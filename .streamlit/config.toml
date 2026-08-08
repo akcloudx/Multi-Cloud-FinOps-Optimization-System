@@ -1,0 +1,80 @@
+# Multi-Cloud FinOps Optimization System — Theme Configuration
+# Professional Financial Dashboard with Light & Dark Mode Support
+
+# ── Shared typography & radius (top-level, applies to both modes) ─────────────
+[theme]
+font = "'Inter':https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+headingFont = "'Inter':https://fonts.googleapis.com/css2?family=Inter:wght@600;700&display=swap"
+codeFont = "'JetBrains Mono':https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"
+baseFontSize = 14
+baseFontWeight = 400
+headingFontSizes = ["28px", "22px", "18px", "16px", "14px", "12px"]
+headingFontWeights = [700, 600, 600, 600, 500, 500]
+linkUnderline = false
+baseRadius = "8px"
+buttonRadius = "8px"
+showWidgetBorder = true
+showSidebarBorder = true
+chartCategoricalColors = ["#60A5FA","#34D399","#A78BFA","#F87171","#FBBF24","#38BDF8","#94A3B8","#FB923C"]
+chartSequentialColors  = ["#0C4A6E","#075985","#0369A1","#0284C7","#0EA5E9","#38BDF8","#7DD3FC","#BAE6FD","#E0F2FE","#F0F9FF"]
+
+# ── Dark mode colours ─────────────────────────────────────────────────────────
+[theme.dark]
+primaryColor             = "#60A5FA"
+backgroundColor          = "#0F172A"
+secondaryBackgroundColor = "#1E293B"
+codeBackgroundColor      = "#1E293B"
+textColor                = "#F1F5F9"
+linkColor                = "#60A5FA"
+borderColor              = "#334155"
+codeTextColor            = "#CBD5E1"
+greenColor               = "#34D399"
+redColor                 = "#F87171"
+yellowColor              = "#FBBF24"
+orangeColor              = "#FB923C"
+blueColor                = "#60A5FA"
+violetColor              = "#A78BFA"
+grayColor                = "#94A3B8"
+dataframeBorderColor           = "#334155"
+dataframeHeaderBackgroundColor = "#1E293B"
+
+[theme.dark.sidebar]
+backgroundColor              = "#0B1120"
+secondaryBackgroundColor     = "#1E293B"
+codeBackgroundColor          = "#1E293B"
+textColor                    = "#F1F5F9"
+borderColor                  = "#334155"
+primaryColor                 = "#60A5FA"
+
+# ── Light mode colours ────────────────────────────────────────────────────────
+[theme.light]
+primaryColor             = "#0078D4"
+backgroundColor          = "#FFFFFF"
+secondaryBackgroundColor = "#F5F7FA"
+codeBackgroundColor      = "#F3F4F6"
+textColor                = "#111827"
+linkColor                = "#0078D4"
+borderColor              = "#D1D5DB"
+codeTextColor            = "#111827"
+greenColor               = "#059669"
+redColor                 = "#DC2626"
+yellowColor              = "#D97706"
+orangeColor              = "#EA580C"
+blueColor                = "#2563EB"
+violetColor              = "#7C3AED"
+grayColor                = "#6B7280"
+dataframeBorderColor           = "#D1D5DB"
+dataframeHeaderBackgroundColor = "#F5F7FA"
+
+[theme.light.sidebar]
+backgroundColor              = "#F5F7FA"
+secondaryBackgroundColor     = "#EAECF0"
+codeBackgroundColor          = "#E5E7EB"
+textColor                    = "#111827"
+borderColor                  = "#D1D5DB"
+primaryColor                 = "#0078D4"
+dataframeHeaderBackgroundColor = "#EAECF0"
+dataframeBorderColor           = "#D1D5DB"
+
+[server]
+headless = true

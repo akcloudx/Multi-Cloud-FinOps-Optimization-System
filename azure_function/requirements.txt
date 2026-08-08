@@ -1,0 +1,8 @@
+azure-functions
+azure-identity
+azure-mgmt-resourcegraph
+sqlalchemy
+pyodbc
+pandas
+boto3
+python-dotenv

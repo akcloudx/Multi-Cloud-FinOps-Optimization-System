@@ -1,0 +1,58 @@
+name: Deploy FinOps App to Azure
+
+# Runs on every push to main, or manually via the Actions tab (workflow_dispatch).
+# Replaces manually running azure_deploy/deploy_all_resources.ps1's code-deploy
+# step by hand after every change.
+#
+# One-time setup required before this works (see README/CI setup notes):
+#   1. In the Azure Portal, open each resource below and download its
+#      "Publish Profile" (Overview page -> Get publish profile).
+#   2. In this GitHub repo: Settings -> Secrets and variables -> Actions,
+#      add:
+#        AZURE_WEBAPP_PUBLISH_PROFILE      = contents of the App Service's publish profile
+#        AZURE_FUNCTIONAPP_PUBLISH_PROFILE = contents of the Function App's publish profile
+#   3. Update the app/function names below if they ever change (they're
+#      derived from your subscription ID suffix by deploy_all_resources.ps1,
+#      so they only change if you deploy under a different subscription).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  AZURE_WEBAPP_NAME: finops-app-e0b96fd6
+  AZURE_FUNCTIONAPP_NAME: finops-func-e0b96fd6
+
+jobs:
+  deploy-webapp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Mirrors azure_deploy/create_zip.py's file list - keep these two in sync.
+      # Running on a Linux runner also means no more Windows-backslash zip-path
+      # issues, which is exactly what create_zip.py existed to work around locally.
+      - name: Package web app
+        run: |
+          mkdir -p dist
+          cp -r app.py startup.sh ui pricing data db azure_conn aws commitments analysis azure_sdk_vendor .streamlit requirements.txt dist/
+
+      - name: Deploy to Azure App Service
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ env.AZURE_WEBAPP_NAME }}
+          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+          package: dist
+
+  deploy-function:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy 24h cron Function App
+        uses: Azure/functions-action@v1
+        with:
+          app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
+          package: azure_function
+          publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}

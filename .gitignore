@@ -1,0 +1,25 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Local dev databases - real data lives in Azure SQL in deployed environments,
+# these are only ever local SQLite fallbacks and shouldn't be committed.
+*.db
+
+# Secrets - never commit credentials
+.env
+.streamlit/secrets.toml
+
+# Local logs and scratch artifacts
+app_logs/
+app_logs.zip
+
+# Editor/agent tooling config - not part of the deployed app
+.claude/
+.agents/
+
+# OS noise
+.DS_Store
+Thumbs.db
