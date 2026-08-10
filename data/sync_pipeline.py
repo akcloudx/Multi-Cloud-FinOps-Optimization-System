@@ -26,6 +26,7 @@ from db.schema import init_db, get_engine, CloudInventory, Commitment, SyncLog, 
 from azure_conn.connector import load_credentials_from_env, fetch_live_inventory, test_connection, AzureCredentials
 from aws.connector import load_aws_credentials_from_env, test_aws_connection
 from pricing.azure_retail_api import refresh_retail_prices
+from pricing.commitment_pricing import refresh_commitment_prices
 
 
 def run_ingestion_pipeline(provider: str = "Azure", creds=None, force_mock: bool = False, tenant_db_id=None) -> dict:
@@ -68,6 +69,12 @@ def run_ingestion_pipeline(provider: str = "Azure", creds=None, force_mock: bool
                 key = (r.get("SKU"), r.get("Region"), r.get("OS"))
                 if key in rates:
                     r["PAYG Hourly Cost USD"] = rates[key]
+
+            # Real 1yr/3yr Savings Plan + Reserved Instance rates for every
+            # SKU/region/OS just synced - what savings_plan_analysis() and
+            # reservation_analysis() use instead of a flat safety-buffer guess.
+            if records:
+                refresh_commitment_prices(engine, records, provider=provider)
 
             with Session(engine) as session:
                 # Replace this tenant's prior snapshot so removed/renamed Azure

@@ -333,6 +333,17 @@ def seed_if_empty(engine=None):
             session.bulk_insert_mappings(Commitment, COMMITMENTS)
             session.commit()
             print(f"[OK] Seeded {len(INVENTORY)} resources, {len(COMMITMENTS)} commitments.")
+
+            # Demo data deserves real SP/RI economics too, not just Live
+            # tenants - fetch real 1yr/3yr rates for every demo SKU/region/OS
+            # once, on first-ever seed. Public API, no credentials needed.
+            # Best-effort: a network hiccup here shouldn't break app startup.
+            try:
+                from pricing.commitment_pricing import refresh_commitment_prices
+                refresh_commitment_prices(engine, INVENTORY, provider="Azure")
+                print("[OK] Cached real Savings Plan / Reserved Instance rates for demo inventory.")
+            except Exception as e:
+                print(f"[Warning] Could not pre-fetch demo commitment pricing: {e}")
         else:
             print("[INFO] Already seeded -- skipping.")
 

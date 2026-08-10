@@ -110,10 +110,14 @@ def get_waterfall_savings_chart(vm_payg_hr: float, db_payg_hr: float,
 
 def get_recommendation_opportunity_chart(recs: list,
                                           is_dark: bool = True) -> go.Figure:
-    """Horizontal bar chart showing potential monthly savings per recommendation."""
-    if not recs:
+    """Horizontal bar chart showing potential monthly savings by issue
+    CATEGORY (e.g. "Orphaned Capacity", "RI Purchase Gap") - one bar per
+    category, not one per underlying recommendation card, so a tenant with a
+    dozen orphaned resources still reads as one clean bar instead of a wall
+    of per-resource labels."""
+    if not recs or (len(recs) == 1 and recs[0].get("type") == "OPTIMAL"):
         fig = go.Figure()
-        fig.update_layout(title="No recommendations", **_layout(is_dark))
+        fig.update_layout(title="No optimization opportunities - portfolio is well-matched", **_layout(is_dark))
         return fig
 
     colors = _DARK_CATEGORICAL if is_dark else _LIGHT_CATEGORICAL
@@ -124,27 +128,33 @@ def get_recommendation_opportunity_chart(recs: list,
 
     rec_data = [
         {
-            "Title": r.get("title", "Recommendation"),
+            "Category": r.get("category") or r.get("title", "Recommendation"),
             "Severity": r.get("severity", "LOW"),
             "Monthly Impact USD": r.get("financial_impact_hr", 0.0) * 730,
         }
         for r in recs
+        if r.get("type") != "OPTIMAL"
     ]
+    if not rec_data:
+        fig = go.Figure()
+        fig.update_layout(title="No optimization opportunities - portfolio is well-matched", **_layout(is_dark))
+        return fig
 
     df_rec = pd.DataFrame(rec_data).sort_values("Monthly Impact USD", ascending=True)
 
     fig = px.bar(
         df_rec,
         x="Monthly Impact USD",
-        y="Title",
+        y="Category",
         orientation="h",
         color="Severity",
-        title="Est. monthly savings opportunity by action directive",
+        title="Estimated monthly savings opportunity by issue category",
         color_discrete_map={"HIGH": high_c, "MEDIUM": med_c, "LOW": low_c, "OK": ok_c},
     )
 
     fig.update_layout(
         xaxis_title="Potential monthly savings ($ USD)",
+        yaxis_title=None,
         **_layout(is_dark, margin=dict(l=20, r=20, t=50, b=20)),
     )
     return fig

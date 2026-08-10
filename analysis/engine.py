@@ -547,15 +547,23 @@ def generate_recommendations(
     extra_sp_hr:  float = 0.0,    # What-If: additional SP commitment to model
 ) -> list[dict]:
     """
-    Generates prioritized, actionable FinOps recommendations.
+    Generates prioritized, actionable FinOps recommendations - one card per
+    ISSUE CATEGORY, not one per affected resource. A tenant with 12 orphaned
+    VMs gets one "12 orphaned resources" card with a drill-down table
+    (`items`), not 12 separate cards - the flood of near-duplicate cards was
+    exactly what made this list easy to ignore.
 
     Recommendation types:
       - ACTION_REQUIRED : HIGH severity — significant financial waste detected
-      - PURCHASE        : MEDIUM — buy more SP capacity at the safe buffer rate
+      - PURCHASE        : MEDIUM — buy more SP/RI capacity
+      - REVIEW          : MEDIUM — pooled-capacity sizing needs a human look, not an auto count
       - EXCHANGE        : MEDIUM — swap over-reserved RI to under-reserved profile
       - OPTIMAL         : LOW — commitment well-matched to current run-rate
 
-    The safety_buffer parameter and extra_sp_hr are used for What-If modeling.
+    Each dict carries a `category` (for chart grouping/consolidation) and an
+    `items` list (empty when there's nothing to drill into) alongside the
+    existing title/detail/financial_impact_hr fields, so callers that only
+    knew the old shape still work.
     """
     recommendations = []
 
@@ -576,83 +584,99 @@ def generate_recommendations(
             "type":     "ACTION_REQUIRED",
             "severity": "HIGH",
             "icon":     "🔴",
-            "title":    "Cancel or Modify Underutilized Reserved Instances",
+            "category": "RI Leakage",
+            "title":    "Cancel or modify underutilized Reserved Instances",
             "detail": (
-                f"${ri_leakage:,.2f} USD of RI commitment is going unutilized "
-                f"(efficiency: {ri_efficiency:.1f}%). "
-                "Intermittent workloads (Dev VMs shut down after business hours) are "
-                "causing rigid RI hours to sit completely idle at night. "
-                "Strategy: Move intermittent Dev workloads from RI coverage to a "
-                "flexible Savings Plan, or schedule RI exchanges for right-sized VMs."
+                f"${ri_leakage:,.2f}/month of RI commitment is going unutilized "
+                f"(efficiency: {ri_efficiency:.1f}%). Intermittent workloads (Dev VMs shut "
+                f"down after business hours) leave rigid RI hours idle overnight."
             ),
+            "action": "Move intermittent workloads off RI onto a flexible Savings Plan, or schedule an RI exchange for right-sized VMs.",
             "financial_impact_hr": round(ri_leakage / (DEFAULT_SIMULATE_DAYS * 24), 4),
+            "items": [],
         })
 
-    # ── Orphaned RI Drain Alert ───────────────────────────────────────────────
+    # ── Orphaned RI Drain Alert — one card, N resources ──────────────────────
     if not ri_result.orphaned_ri_drain.empty:
-        total_monthly_drain = float(ri_result.orphaned_ri_drain["Monthly RI Drain (USD)"].sum())
-        for _, row in ri_result.orphaned_ri_drain.iterrows():
-            recommendations.append({
-                "type":     "ACTION_REQUIRED",
-                "severity": "HIGH",
-                "icon":     "⚠️",
-                "title":    f"Orphaned RI Drain — {row['Resource ID']} ({row['SKU']})",
-                "detail": (
-                    f"VM '{row['Resource ID']}' is STOPPED (deallocated) but its SKU "
-                    f"({row['SKU']} in {row['Region']}) is covered by RI '{row['Matching RI']}'. "
-                    f"This wastes ${row['Monthly RI Drain (USD)']:,.2f}/month in unused RI capacity. "
-                    f"Action: Either restart the VM or CANCEL/EXCHANGE the RI immediately."
-                ),
-                "financial_impact_hr": row["RI Rate/hr (USD)"],
-            })
+        drain_df = ri_result.orphaned_ri_drain
+        total_monthly_drain = float(drain_df["Monthly RI Drain (USD)"].sum())
+        n = len(drain_df)
+        recommendations.append({
+            "type":     "ACTION_REQUIRED",
+            "severity": "HIGH",
+            "icon":     "⚠️",
+            "category": "Orphaned Capacity",
+            "title":    f"{n} stopped resource{'s' if n != 1 else ''} draining active RI capacity",
+            "detail": (
+                f"{n} resource{'s are' if n != 1 else ' is'} STOPPED (deallocated) but still "
+                f"covered by an active Reserved Instance, wasting ${total_monthly_drain:,.2f}/month "
+                f"in unused RI capacity."
+            ),
+            "action": "Restart each resource to use the RI it's paying for, or cancel/exchange the RI if it's staying off.",
+            "financial_impact_hr": round(total_monthly_drain / 730, 4),
+            "items": drain_df.to_dict(orient="records"),
+        })
 
-    # ── RI Gap — Need to Purchase More ───────────────────────────────────────
+    # ── RI Gap — Need to Purchase More (per-instance vs pooled, each rolled up) ─
     gap_rows = ri_result.coverage_table[ri_result.coverage_table["gap"] > 0]
-    for _, row in gap_rows.iterrows():
-        is_pooled = row.get("coverage_model") == "capacity"
+    instance_gaps = gap_rows[gap_rows.get("coverage_model") != "capacity"]
+    pooled_gaps = gap_rows[gap_rows.get("coverage_model") == "capacity"]
+
+    if not instance_gaps.empty:
+        total_gap_units = int(instance_gaps["gap"].sum())
+        n_profiles = len(instance_gaps)
         recommendations.append({
             "type":     "PURCHASE",
             "severity": "MEDIUM",
             "icon":     "🟡",
-            "title": (
-                f"Review pooled reservation sizing — {row['SKU']} ({row['Region']})" if is_pooled
-                else f"Purchase {int(row['gap'])} more RI — {row['SKU']} ({row['Region']})"
-            ),
+            "category": "RI Purchase Gap",
+            "title":    f"Purchase {total_gap_units} more Reserved Instance{'s' if total_gap_units != 1 else ''} across {n_profiles} SKU profile{'s' if n_profiles != 1 else ''}",
             "detail": (
-                (
-                    f"{int(row['running_count'])} resource(s) of {row['SKU']} ({row['OS']}) are "
-                    f"running in {row['Region']} but current reservations only cover {int(row['reserved_qty'])}. "
-                    f"This service's reservations are purchased as pooled capacity/throughput (TB, RU/s, "
-                    f"DBCU, cDWU, or vCore-hours), applied automatically across all matching resources - "
-                    f"not bought per resource. Check actual usage in Azure Cost Management before resizing "
-                    f"the reservation, rather than treating this as \"buy {int(row['gap'])} more.\""
-                ) if is_pooled else (
-                    f"{int(row['running_count'])} instances of {row['SKU']} ({row['OS']}) are "
-                    f"running in {row['Region']} but only {int(row['reserved_qty'])} are reserved. "
-                    f"Gap of {int(row['gap'])} instance(s) is running at full PAYG rates. "
-                    f"Purchasing {int(row['gap'])} additional 1-year RIs would save approximately "
-                    f"30–40% versus PAYG rates."
-                )
+                f"{total_gap_units} running instance{'s are' if total_gap_units != 1 else ' is'} "
+                f"on-demand with no matching reservation - see the breakdown for exact SKU/region/OS profiles."
             ),
+            "action": "Purchase 1-year or 3-year RIs for the listed profiles - typically ~30-40% cheaper than PAYG for compute.",
             "financial_impact_hr": 0.0,
+            "items": instance_gaps.to_dict(orient="records"),
         })
 
-    # ── RI Excess — Cancel or Exchange ───────────────────────────────────────
+    if not pooled_gaps.empty:
+        n_profiles = len(pooled_gaps)
+        recommendations.append({
+            "type":     "REVIEW",
+            "severity": "MEDIUM",
+            "icon":     "🟡",
+            "category": "RI Pooled Capacity Review",
+            "title":    f"Review pooled reservation sizing for {n_profiles} service profile{'s' if n_profiles != 1 else ''}",
+            "detail": (
+                "These services' reservations are pooled capacity/throughput (TB, RU/s, DBCU, "
+                "cDWU, or vCore-hours) applied automatically across all matching resources - "
+                "not bought per resource, so a resource-count gap isn't a literal purchase instruction."
+            ),
+            "action": "Check actual usage in Azure Cost Management before resizing any of the listed reservations.",
+            "financial_impact_hr": 0.0,
+            "items": pooled_gaps.to_dict(orient="records"),
+        })
+
+    # ── RI Excess — Cancel or Exchange (rolled up) ───────────────────────────
     excess_rows = ri_result.coverage_table[ri_result.coverage_table["excess"] > 0]
-    for _, row in excess_rows.iterrows():
+    if not excess_rows.empty:
+        total_excess = int(excess_rows["excess"].sum())
+        n_profiles = len(excess_rows)
         recommendations.append({
             "type":     "EXCHANGE",
             "severity": "MEDIUM",
             "icon":     "🔵",
-            "title":    f"Exchange {int(row['excess'])} excess RI — {row['SKU']} ({row['Region']})",
+            "category": "RI Rebalance",
+            "title":    f"Exchange or cancel {total_excess} idle Reserved Instance{'s' if total_excess != 1 else ''}",
             "detail": (
-                f"{int(row['reserved_qty'])} RIs are held for {row['SKU']} ({row['OS']}) "
-                f"in {row['Region']} but only {int(row['running_count'])} instances are running. "
-                f"{int(row['excess'])} excess RI(s) detected. "
-                f"Consider exchanging for a SKU/region profile with active gaps, or cancelling "
-                f"if commitment term allows."
+                f"{total_excess} reserved instance{'s are' if total_excess != 1 else ' is'} held "
+                f"across {n_profiles} SKU profile{'s' if n_profiles != 1 else ''} with no running "
+                f"resource to cover."
             ),
+            "action": "Exchange for a SKU/region profile with an active gap, or cancel if the commitment term allows.",
             "financial_impact_hr": 0.0,
+            "items": excess_rows.to_dict(orient="records"),
         })
 
     # ── SP Purchase Recommendation ────────────────────────────────────────────
@@ -667,32 +691,33 @@ def generate_recommendations(
             "type":     "PURCHASE",
             "severity": "MEDIUM",
             "icon":     "🟡",
-            "title":    f"Purchase Additional Savings Plan — ${recommended_purchase:.4f}/hr",
+            "category": "Savings Plan Purchase",
+            "title":    f"Purchase ${recommended_purchase:.4f}/hr of additional Savings Plan",
             "detail": (
                 f"Average hourly PAYG overage of ${avg_hourly_overage:.4f}/hr detected. "
-                f"Applying the {int(safety_buffer * 100)}% safety buffer (conservative anchor "
-                f"to steady-state baseline, excluding business-hours peak spikes): "
-                f"recommend purchasing ${recommended_purchase:.4f}/hr of additional "
-                f"Savings Plan commitment. "
-                f"This protects the financial baseline when Dev VMs go offline at night."
+                f"At the {int(safety_buffer * 100)}% safety buffer (a conservative anchor to "
+                f"steady-state baseline, excluding business-hours peak spikes), this protects "
+                f"the financial baseline when Dev VMs go offline at night."
             ),
+            "action": f"Purchase ${recommended_purchase:.4f}/hr of additional Savings Plan commitment.",
             "financial_impact_hr": recommended_purchase,
+            "items": [],
         })
     elif sp_result.leakage_hr > 0.10:
         recommendations.append({
             "type":     "ACTION_REQUIRED",
             "severity": "MEDIUM",
             "icon":     "🔴",
-            "title":    "Reduce Savings Plan Commitment — Leakage Detected",
+            "category": "Savings Plan Leakage",
+            "title":    "Reduce Savings Plan commitment — leakage detected",
             "detail": (
                 f"Current SP commitment (${sp_result.existing_commitment_hr:.4f}/hr) exceeds "
                 f"the steady-state baseline (${sp_result.baseline_spend_hr:.4f}/hr) by "
-                f"${sp_result.leakage_hr:.4f}/hr. "
-                f"You are paying for unused SP commitment. "
-                f"Consider reducing to the recommended ${sp_result.recommended_commitment_hr:.4f}/hr "
-                f"({int(safety_buffer*100)}% safety buffer applied)."
+                f"${sp_result.leakage_hr:.4f}/hr - you're paying for unused SP commitment."
             ),
+            "action": f"Reduce commitment to the recommended ${sp_result.recommended_commitment_hr:.4f}/hr ({int(safety_buffer*100)}% safety buffer applied).",
             "financial_impact_hr": sp_result.leakage_hr,
+            "items": [],
         })
 
     # ── Optimal State ──────────────────────────────────────────────────────────
@@ -701,14 +726,16 @@ def generate_recommendations(
             "type":     "OPTIMAL",
             "severity": "OK",
             "icon":     "🟢",
-            "title":    "Commitment Portfolio is Optimally Configured",
+            "category": "Optimal",
+            "title":    "Commitment portfolio is optimally configured",
             "detail": (
-                "No significant leakage, gaps, or orphaned resources detected. "
-                "Your Savings Plan and Reserved Instance commitments are well-matched "
-                "to the current infrastructure run-rate. "
-                "Continue monitoring as the environment changes."
+                "No significant leakage, gaps, or orphaned resources detected. Your Savings "
+                "Plan and Reserved Instance commitments are well-matched to the current "
+                "infrastructure run-rate."
             ),
+            "action": "Continue monitoring as the environment changes.",
             "financial_impact_hr": 0.0,
+            "items": [],
         })
 
     return recommendations

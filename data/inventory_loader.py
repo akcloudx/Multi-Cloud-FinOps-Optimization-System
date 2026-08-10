@@ -2,10 +2,15 @@
 data/inventory_loader.py
 Loads the compute & database asset registry from the SQLite database.
 
-FOCUS-aligned schema columns:
+Internal working schema columns:
   resource_id, resource_name, resource_type, resource_state,
   region, os, sku, payg_hourly_usd, avg_daily_running_hours,
   subscription, provider, is_orphaned
+
+These are normalized/provider-neutral in spirit but are NOT the FOCUS
+(FinOps Open Cost & Usage Specification) column names or vocabularies -
+see analysis/focus_mapping.py for the actual FOCUS v1.2 projection, exposed
+in the UI via the Asset Inventory tab's "FOCUS View" toggle.
 
 REAL AZURE EQUIVALENT (when you move off mock data):
   Azure Resource Graph query, e.g.:

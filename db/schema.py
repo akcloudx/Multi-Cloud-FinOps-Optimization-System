@@ -163,6 +163,34 @@ class RetailPrice(Base):
     fetched_at    = Column(String(255), nullable=False)
 
 
+class CommitmentPriceCache(Base):
+    """
+    Cache of REAL commitment-discount pricing (Reserved Instances / Savings
+    Plans), fetched from Azure Retail Prices API (api-version=2023-01-01-preview
+    - required for the Reservation type's reservationTerm field and the
+    Consumption type's nested savingsPlan[] rates) or, in future, AWS's Price
+    List / Savings Plans APIs. Keyed narrowly to the SKU/region/OS combos
+    actually present in a tenant's live (or demo) inventory - never a full
+    regional catalog dump. See pricing/commitment_pricing.py.
+    """
+    __tablename__ = "commitment_price_cache"
+
+    id                        = Column(Integer, primary_key=True, autoincrement=True)
+    provider                  = Column(String(50), nullable=False)   # "Azure" | "AWS"
+    instrument                = Column(String(30), nullable=False)   # "SavingsPlan" | "ReservedInstance"
+    region                    = Column(String(255), nullable=False)
+    sku                       = Column(String(255), nullable=False)
+    os                        = Column(String(255), nullable=True)
+    term                      = Column(String(20), nullable=False)   # "1yr" | "3yr"
+    # Normalized to a $/hr rate either way - Savings Plan rates are natively
+    # hourly; Reserved Instance rates come back as a total term price and are
+    # divided by (term_months * 730) here so both instruments are directly
+    # comparable to PAYG $/hr and to each other.
+    effective_hourly_rate_usd = Column(Float, nullable=True)
+    payg_hourly_rate_usd      = Column(Float, nullable=True)
+    fetched_at                = Column(String(255), nullable=False)
+
+
 class CloudTenant(Base):
     """
     Registry of connected Azure Tenants & AWS Accounts stored in Azure SQL DB.
