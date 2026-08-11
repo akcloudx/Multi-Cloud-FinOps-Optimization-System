@@ -68,6 +68,7 @@ def init_db(provider: str = "Azure"):
     Base.metadata.create_all(engine)
     _ensure_column(engine, "cloud_inventory", "tenant_id", "INTEGER")
     _ensure_column(engine, "commitments", "tenant_id", "INTEGER")
+    _ensure_column(engine, "commitment_price_cache", "resource_type", "VARCHAR(255)")
     return engine
 
 
@@ -178,6 +179,14 @@ class CommitmentPriceCache(Base):
     id                        = Column(Integer, primary_key=True, autoincrement=True)
     provider                  = Column(String(50), nullable=False)   # "Azure" | "AWS"
     instrument                = Column(String(30), nullable=False)   # "SavingsPlan" | "ReservedInstance"
+    # Part of the cache key alongside sku/region/os/term (added 2026-08) -
+    # without it, two different services sharing an identical SKU string
+    # (e.g. SQL Managed Instance and SQL Elastic Pool both reporting
+    # "GP_Gen5_8") silently overwrite each other's cached price, even though
+    # resolve_sku_query() correctly fetches DIFFERENT real rates for each
+    # (different armSkuName prefixes) - caught live via a real Elastic Pool
+    # SKU colliding with an existing Managed Instance demo row.
+    resource_type             = Column(String(255), nullable=True)
     region                    = Column(String(255), nullable=False)
     sku                       = Column(String(255), nullable=False)
     os                        = Column(String(255), nullable=True)
@@ -189,6 +198,92 @@ class CommitmentPriceCache(Base):
     effective_hourly_rate_usd = Column(Float, nullable=True)
     payg_hourly_rate_usd      = Column(Float, nullable=True)
     fetched_at                = Column(String(255), nullable=False)
+
+
+class ReservationPurchase(Base):
+    """
+    A purchased Reserved Instance / Reserved Capacity record, schema-matched
+    field-for-field to Azure's real Microsoft.Capacity/reservationOrders/
+    reservations API (ReservationsProperties) - NOT this app's own simplified
+    Commitment table. Built deliberately service-by-service (Compute first)
+    so every field is either independently verified against Microsoft's own
+    REST API docs or explicitly absent, rather than guessed across every
+    service at once. See db/seed.py's RESERVATION_PURCHASES for field-level
+    verification notes per record.
+    Reference: https://learn.microsoft.com/en-us/rest/api/reserved-vm-instances/reservation/get
+    """
+    __tablename__ = "reservation_purchases"
+
+    id                              = Column(Integer, primary_key=True, autoincrement=True)
+    reservation_order_id            = Column(String(100), nullable=False)
+    reservation_id                  = Column(String(100), nullable=False)
+    name                            = Column(String(255), nullable=False)
+    type                            = Column(String(255), nullable=False)
+    location                        = Column(String(255), nullable=False)
+    sku_name                        = Column(String(255), nullable=False)
+    sku_description                 = Column(String(255), nullable=True)
+    reserved_resource_type          = Column(String(100), nullable=False)
+    instance_flexibility            = Column(String(20), nullable=True)
+    applied_scope_type              = Column(String(50), nullable=False)
+    applied_scope_display_name      = Column(String(255), nullable=True)
+    applied_scope_subscription_id   = Column(String(255), nullable=True)
+    billing_plan                    = Column(String(50), nullable=False)
+    term                            = Column(String(10), nullable=False)   # ISO-8601: P1Y | P3Y | P5Y
+    quantity                        = Column(Integer, nullable=False)
+    provisioning_state               = Column(String(50), nullable=False)
+    renew                            = Column(Boolean, default=False)
+    purchase_date                    = Column(String(20), nullable=True)
+    purchase_date_time              = Column(String(50), nullable=False)
+    effective_date_time             = Column(String(50), nullable=False)
+    benefit_start_time              = Column(String(50), nullable=False)
+    expiry_date                     = Column(String(20), nullable=True)
+    expiry_date_time                = Column(String(50), nullable=False)
+    utilization_trend               = Column(String(20), nullable=True)
+    utilization_1day_pct            = Column(Float, nullable=True)
+    utilization_7day_pct            = Column(Float, nullable=True)
+    utilization_30day_pct           = Column(Float, nullable=True)
+    provider                        = Column(String(50), default="Azure")
+    # NULL = demo/seed data. Non-NULL = live-ingested, scoped to that cloud_tenants.id.
+    tenant_id                       = Column(Integer, nullable=True)
+
+
+class SavingsPlanPurchase(Base):
+    """
+    A purchased Savings Plan record, schema-matched field-for-field to
+    Azure's real Microsoft.BillingBenefits/savingsPlanOrders/savingsPlans
+    API (SavingsPlanModel) - NOT this app's own simplified Commitment table.
+    Same verification discipline as ReservationPurchase above.
+    Reference: https://learn.microsoft.com/en-us/rest/api/billingbenefits/savings-plan/get
+    """
+    __tablename__ = "savings_plan_purchases"
+
+    id                          = Column(Integer, primary_key=True, autoincrement=True)
+    savings_plan_order_id       = Column(String(100), nullable=False)
+    savings_plan_id             = Column(String(100), nullable=False)
+    name                        = Column(String(255), nullable=False)
+    type                        = Column(String(255), nullable=False)
+    sku_name                    = Column(String(255), nullable=False)
+    billing_scope_id            = Column(String(255), nullable=False)
+    billing_plan                = Column(String(20), nullable=False)   # ISO-8601: P1M
+    commitment_grain            = Column(String(20), nullable=False)   # "Hourly"
+    commitment_currency_code    = Column(String(10), nullable=False)
+    commitment_amount           = Column(Float, nullable=False)
+    applied_scope_type          = Column(String(50), nullable=False)
+    display_name                = Column(String(255), nullable=True)
+    term                        = Column(String(10), nullable=False)   # ISO-8601: P1Y | P3Y | P5Y
+    provisioning_state          = Column(String(50), nullable=False)
+    renew                       = Column(Boolean, default=False)
+    purchase_date_time          = Column(String(50), nullable=False)
+    effective_date_time         = Column(String(50), nullable=False)
+    benefit_start_time          = Column(String(50), nullable=False)
+    expiry_date_time            = Column(String(50), nullable=False)
+    utilization_trend           = Column(String(20), nullable=True)
+    utilization_1day_pct        = Column(Float, nullable=True)
+    utilization_7day_pct        = Column(Float, nullable=True)
+    utilization_30day_pct       = Column(Float, nullable=True)
+    provider                    = Column(String(50), default="Azure")
+    # NULL = demo/seed data. Non-NULL = live-ingested, scoped to that cloud_tenants.id.
+    tenant_id                   = Column(Integer, nullable=True)
 
 
 class CloudTenant(Base):

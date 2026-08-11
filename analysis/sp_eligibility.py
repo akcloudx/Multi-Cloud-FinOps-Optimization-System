@@ -18,12 +18,28 @@ Savings plan for Compute (1-yr or 3-yr) covers:
   Host, Azure Container Apps, Azure Spring Apps for Enterprise.
 
 Savings plan for Databases (1-yr ONLY) covers:
-  Azure SQL Database (ALL compute tiers, including Serverless, Hyperscale, and
-  legacy DTU - unlike Reserved Capacity, there is no Serverless/DTU exclusion
-  here), Azure SQL Managed Instance, Azure Database for PostgreSQL Flexible
-  Server (NOT legacy Single Server), Azure Database for MySQL Flexible Server
-  (NOT legacy Single Server), Azure Cosmos DB provisioned throughput (NOT
-  Serverless capacity mode).
+  Azure SQL Database AND Azure SQL Elastic Pool (vCore purchasing model only -
+  General Purpose, Business Critical, Hyperscale, and Serverless are ALL
+  covered, unlike Reserved Capacity which excludes Serverless; Elastic Pool
+  shares the exact same eligibility rule as Single Database - verified live
+  that Azure prices vCore pools against the same catalog entries), Azure SQL
+  Managed Instance, Azure Database for PostgreSQL Flexible Server (NOT legacy
+  Single Server), Azure Database for MySQL Flexible Server (NOT legacy Single
+  Server), Azure Cosmos DB provisioned throughput (NOT Serverless capacity
+  mode).
+
+  CORRECTED 2026-08: an earlier version of this file claimed legacy DTU-tier
+  SQL Database was ALSO covered ("ALL compute tiers... including... legacy
+  DTU"). That was wrong - re-verified directly against Microsoft's official
+  savings-plan-overview page, whose explicit coverage list names "Azure SQL
+  Database Hyperscale" and "Azure SQL Database serverless" individually but
+  never mentions DTU, and confirmed independently (a third-party FinOps
+  source states plainly: "the DTU-based purchasing model is excluded from
+  Database Savings Plans... no Hybrid Benefit, no reserved capacity, no
+  Database Savings Plans"). This also matches what was already verified live
+  against the Retail Prices API: zero DTU-tier Consumption items carry any
+  Savings Plan pricing data at all. DTU is genuinely NOT eligible here - not
+  "eligible but unpriceable," an earlier, weaker fix this file briefly had.
 
 NOT covered by ANY savings plan - Reserved Capacity is the only commitment
 option for these, and only for the tiers documented in ri_eligibility.py:
@@ -60,11 +76,22 @@ def _app_service_or_functions_sp(sku: str) -> Tuple[bool, str]:
 
 
 def _sql_db_sp(sku: str) -> Tuple[bool, str]:
-    # Unlike Reserved Capacity, Savings Plan for Databases covers ALL Azure
-    # SQL Database compute tiers - Serverless and DTU-based included. It's a
-    # dollar-denominated spend commitment, not a vCore-unit purchase, so the
-    # purchasing-model restrictions that block RI don't apply here.
-    return True, "Azure SQL Database is eligible for Savings Plan for Databases at any compute tier (including Serverless and DTU-based)."
+    # Savings Plan for Databases covers the vCore purchasing model's General
+    # Purpose/Business Critical/Hyperscale/Serverless tiers - unlike Reserved
+    # Capacity, there's no Serverless exclusion here. DTU is genuinely NOT
+    # covered (corrected 2026-08 - see module docstring for the two
+    # independent sources this was re-verified against: Microsoft's own
+    # savings-plan-overview coverage list, and live Retail Prices API data
+    # showing zero DTU Consumption items carry any Savings Plan pricing).
+    s = (sku or "").upper()
+    if s and s != "N/A":
+        parts = s.split("_")
+        is_dtu = "SERVERLESS" not in s and not any(p in ("GP", "BC", "HS") for p in parts)
+        if is_dtu:
+            return False, ("DTU-based purchasing model is not eligible for Savings Plan for Databases - only the vCore purchasing model "
+                            "(General Purpose, Business Critical, Hyperscale, Serverless) is covered (verified against Microsoft's official "
+                            "coverage list and live Retail Prices API data - migrating to vCore is the only way to access this discount).")
+    return True, "Azure SQL Database (vCore purchasing model) is eligible for Savings Plan for Databases at any compute tier, including Serverless and Hyperscale."
 
 
 def _flexible_server_sp(sku: str) -> Tuple[bool, str]:
@@ -87,6 +114,7 @@ _COMPUTE_SP_RULES = {
 
 _DATABASE_SP_RULES = {
     "Azure SQL Database":            _sql_db_sp,
+    "Azure SQL Elastic Pool":        _sql_db_sp,   # same vCore/DTU rule applies identically - see ri_eligibility.py
     "Azure SQL Managed Instance":    lambda sku: (True, "Eligible for Savings Plan for Databases (compute cost)."),
     "Azure Database for MySQL":      _flexible_server_sp,
     "Azure Database for PostgreSQL": _flexible_server_sp,

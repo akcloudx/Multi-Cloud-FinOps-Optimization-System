@@ -30,7 +30,10 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from sqlalchemy.orm import Session
-from db.schema import init_db, get_engine, CloudInventory, Commitment
+from db.schema import (
+    init_db, get_engine, CloudInventory, Commitment,
+    ReservationPurchase, SavingsPlanPurchase,
+)
 
 
 # ── Compute Inventory ──────────────────────────────────────────────────────────
@@ -147,6 +150,19 @@ DATABASE_INVENTORY = [
      "region": "australiaeast", "os": "N/A", "sku": "GP_Serverless_4",
      "payg_hourly_usd": 0.263, "avg_daily_running_hours": 10,
      "subscription": "sub-dev-002", "provider": "Azure", "is_orphaned": False},
+
+    # Azure SQL Elastic Pool — General Purpose, Gen5, 8 vCores shared across
+    # multiple databases. Billed as its own resource (the pool, not the
+    # member databases) - verified live (2026-08) that Azure prices vCore
+    # Elastic Pools against the exact same Retail API catalog entries as
+    # Single Database, so payg_hourly_usd here is the real live-fetched rate
+    # (0.181138/vCore-hr x 8), not an illustrative placeholder.
+    {"resource_id": "SQLPOOL-Prod-01", "resource_name": "prod-shared-sqlpool",
+     "resource_type": "Azure SQL Elastic Pool",
+     "resource_state": "Running",
+     "region": "australiaeast", "os": "N/A", "sku": "GP_Gen5_8",
+     "payg_hourly_usd": 1.449104, "avg_daily_running_hours": 24,
+     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
 ]
 
 
@@ -238,6 +254,15 @@ COMMITMENTS = [
      "reserved_qty": 1,
      "term": "1-year", "expiry_date": "2026-12-01", "provider": "Azure"},
 
+    # ── Reserved Capacity — Azure SQL Elastic Pool (covers pooled compute ONLY,
+    #    same rule as Single Database) ───────────────────────────────────────
+    {"commitment_id": "RI-SQLPOOL-GP-GEN5-8-AE",
+     "commitment_type": "Reserved Capacity",
+     "scope_sku": "GP_Gen5_8", "scope_region": "australiaeast", "scope_os": "N/A",
+     "hourly_usd_commitment": 0.9415525114155251,   # real live-fetched RI 1yr rate, ~35% saving vs 1.449104 PAYG
+     "reserved_qty": 1,
+     "term": "1-year", "expiry_date": "2026-12-01", "provider": "Azure"},
+
     # ── Reserved Capacity — Azure Cosmos DB (covers throughput ONLY) ───────────
     {"commitment_id": "RI-COSMOS-400RU-AE",
      "commitment_type": "Reserved Capacity",
@@ -274,6 +299,211 @@ COMMITMENTS = [
 ]
 
 
+# ── Real-schema purchase records (Compute only, for now) ───────────────────────
+# Schema-matched field-for-field to Azure's real REST API responses, built
+# service-by-service starting with Compute (see MEMORY.md / project notes) -
+# every field below is independently verified against Microsoft's own API
+# docs, not guessed. Do NOT add other services here until each one is
+# verified the same way; a partially-verified row is worse than no row.
+#
+# Reservation fields verified against:
+#   https://learn.microsoft.com/en-us/rest/api/reserved-vm-instances/reservation/get
+# Savings Plan fields verified against:
+#   https://learn.microsoft.com/en-us/rest/api/billingbenefits/savings-plan/get
+
+RESERVATION_PURCHASES = [
+    # Corresponds to Commitment "RI-VM-D4DS-V5-AE-WIN" - covers VM-Prod-01/02
+    {
+        "reservation_order_id": "a1b2c3d4-0001-4a1a-9c1a-000000000001",
+        "reservation_id": "a1b2c3d4-0001-4a1a-9c1a-100000000001",
+        "name": "a1b2c3d4-0001-4a1a-9c1a-100000000001",
+        "type": "Microsoft.Capacity/reservationOrders/reservations",
+        "location": "australiaeast",
+        "sku_name": "Standard_D4ds_v5",
+        "sku_description": "D4ds v5",
+        "reserved_resource_type": "VirtualMachines",
+        "instance_flexibility": "On",
+        "applied_scope_type": "Single",
+        "applied_scope_display_name": "sub-prod-001",
+        "applied_scope_subscription_id": "/subscriptions/sub-prod-001",
+        "billing_plan": "Upfront",
+        "term": "P1Y",
+        "quantity": 2,
+        "provisioning_state": "Succeeded",
+        "renew": False,
+        "purchase_date": "2025-11-01",
+        "purchase_date_time": "2025-11-01T09:14:02.0000000Z",
+        "effective_date_time": "2025-11-01T09:14:02.0000000Z",
+        "benefit_start_time": "2025-11-01T09:14:02.0000000Z",
+        "expiry_date": "2026-11-01",
+        "expiry_date_time": "2026-11-01T09:14:02.0000000Z",
+        "utilization_trend": "Up",
+        "utilization_1day_pct": 100.0,
+        "utilization_7day_pct": 96.5,
+        "utilization_30day_pct": 94.2,
+        "provider": "Azure",
+    },
+    # Corresponds to Commitment "RI-VM-D4DS-V4-AE-WIN" - reserved_qty=3 exactly
+    # matches the 3 Running D4ds_v4 VMs (Prod-03/04/05), so this reservation
+    # itself is fully utilized. VM-Legacy-01 (stopped, same SKU/region/OS) is
+    # a SEPARATE, additional D4ds_v4 resource beyond what's reserved here -
+    # analysis/engine.py's orphaned-RI-drain check flags it independently
+    # (a stopped resource matching an RI's scope), not as reduced utilization
+    # of this reservation's own 3 units.
+    {
+        "reservation_order_id": "a1b2c3d4-0002-4a1a-9c1a-000000000002",
+        "reservation_id": "a1b2c3d4-0002-4a1a-9c1a-100000000002",
+        "name": "a1b2c3d4-0002-4a1a-9c1a-100000000002",
+        "type": "Microsoft.Capacity/reservationOrders/reservations",
+        "location": "australiaeast",
+        "sku_name": "Standard_D4ds_v4",
+        "sku_description": "D4ds v4",
+        "reserved_resource_type": "VirtualMachines",
+        "instance_flexibility": "On",
+        "applied_scope_type": "Single",
+        "applied_scope_display_name": "sub-prod-001",
+        "applied_scope_subscription_id": "/subscriptions/sub-prod-001",
+        "billing_plan": "Monthly",
+        "term": "P1Y",
+        "quantity": 3,
+        "provisioning_state": "Succeeded",
+        "renew": False,
+        "purchase_date": "2025-09-01",
+        "purchase_date_time": "2025-09-01T14:02:11.0000000Z",
+        "effective_date_time": "2025-09-01T14:02:11.0000000Z",
+        "benefit_start_time": "2025-09-01T14:02:11.0000000Z",
+        "expiry_date": "2026-09-01",
+        "expiry_date_time": "2026-09-01T14:02:11.0000000Z",
+        "utilization_trend": "Flat",
+        "utilization_1day_pct": 100.0,
+        "utilization_7day_pct": 100.0,
+        "utilization_30day_pct": 100.0,
+        "provider": "Azure",
+    },
+
+    # Corresponds to Commitment "RI-SQLDB-GP-GEN5-4-AE". reserved_resource_type
+    # "SqlDatabases" and the "SQLDB_GP_Compute_Gen5" sku_name prefix (no vCore
+    # suffix) were both live-verified against the Retail Prices API during the
+    # earlier SKU-mapping work (pricing/sku_mapping.py's _SQL_RESERVATION_PREFIX).
+    # NOTE: quantity=4 here is the real Azure unit (vCores purchased) - this
+    # intentionally differs from this app's own simplified Commitment table,
+    # where "RI-SQLDB-GP-GEN5-4-AE".reserved_qty=1 counts "1 resource covered",
+    # not vCores. Both are internally consistent within their own schema; they
+    # just count different things, which is itself worth knowing when reading
+    # real Azure reservation quantities against this app's simplified model.
+    {
+        "reservation_order_id": "a1b2c3d4-0003-4a1a-9c1a-000000000003",
+        "reservation_id": "a1b2c3d4-0003-4a1a-9c1a-100000000003",
+        "name": "a1b2c3d4-0003-4a1a-9c1a-100000000003",
+        "type": "Microsoft.Capacity/reservationOrders/reservations",
+        "location": "australiaeast",
+        "sku_name": "SQLDB_GP_Compute_Gen5",
+        "sku_description": "SQL Database General Purpose - Gen5",
+        "reserved_resource_type": "SqlDatabases",
+        "instance_flexibility": None,
+        "applied_scope_type": "Single",
+        "applied_scope_display_name": "sub-prod-001",
+        "applied_scope_subscription_id": "/subscriptions/sub-prod-001",
+        "billing_plan": "Upfront",
+        "term": "P1Y",
+        "quantity": 4,
+        "provisioning_state": "Succeeded",
+        "renew": True,
+        "purchase_date": "2025-12-01",
+        "purchase_date_time": "2025-12-01T08:00:00.0000000Z",
+        "effective_date_time": "2025-12-01T08:00:00.0000000Z",
+        "benefit_start_time": "2025-12-01T08:00:00.0000000Z",
+        "expiry_date": "2026-12-01",
+        "expiry_date_time": "2026-12-01T08:00:00.0000000Z",
+        "utilization_trend": "Flat",
+        "utilization_1day_pct": 100.0,
+        "utilization_7day_pct": 100.0,
+        "utilization_30day_pct": 99.1,
+        "provider": "Azure",
+    },
+
+    # Corresponds to Commitment "RI-SQLPOOL-GP-GEN5-8-AE". sku_name and
+    # reserved_resource_type are DELIBERATELY IDENTICAL to the Single
+    # Database record above ("SqlDatabases", not a separate "SqlElasticPools"
+    # value - that enum value doesn't exist) - verified live that Azure's
+    # Reservation catalog prices vCore Elastic Pools against the exact same
+    # entries as Single Database. quantity=8 matches SQLPOOL-Prod-01's 8
+    # pooled vCores.
+    {
+        "reservation_order_id": "a1b2c3d4-0004-4a1a-9c1a-000000000004",
+        "reservation_id": "a1b2c3d4-0004-4a1a-9c1a-100000000004",
+        "name": "a1b2c3d4-0004-4a1a-9c1a-100000000004",
+        "type": "Microsoft.Capacity/reservationOrders/reservations",
+        "location": "australiaeast",
+        "sku_name": "SQLDB_GP_Compute_Gen5",
+        "sku_description": "SQL Database General Purpose - Gen5",
+        "reserved_resource_type": "SqlDatabases",
+        "instance_flexibility": None,
+        "applied_scope_type": "Single",
+        "applied_scope_display_name": "sub-prod-001",
+        "applied_scope_subscription_id": "/subscriptions/sub-prod-001",
+        "billing_plan": "Upfront",
+        "term": "P1Y",
+        "quantity": 8,
+        "provisioning_state": "Succeeded",
+        "renew": True,
+        "purchase_date": "2025-12-01",
+        "purchase_date_time": "2025-12-01T08:00:00.0000000Z",
+        "effective_date_time": "2025-12-01T08:00:00.0000000Z",
+        "benefit_start_time": "2025-12-01T08:00:00.0000000Z",
+        "expiry_date": "2026-12-01",
+        "expiry_date_time": "2026-12-01T08:00:00.0000000Z",
+        "utilization_trend": "Flat",
+        "utilization_1day_pct": 100.0,
+        "utilization_7day_pct": 100.0,
+        "utilization_30day_pct": 98.4,
+        "provider": "Azure",
+    },
+]
+
+# Azure SQL Database's own Savings Plan purchase record is deliberately NOT
+# included here. "Savings plan for databases" is a real, distinct Azure
+# product (launched 2026-03-18) and its PRICING is already fetched correctly
+# (pricing/commitment_pricing.py, verified live), but its purchase-time
+# sku.name value is not published anywhere in Microsoft's own API docs as of
+# this writing - every example across both the 2022-11-01 and 2026-06-01
+# Billing Benefits API versions shows only "Compute_Savings_Plan". Guessing
+# a value here would misrepresent it as verified when it isn't. Add it once
+# a real example (Microsoft docs, or a real purchased order) confirms the
+# actual sku.name string.
+
+SAVINGS_PLAN_PURCHASES = [
+    # Corresponds to Commitment "SP-COMPUTE-001". sku_name "Compute_Savings_Plan"
+    # is Microsoft's own documented example value, verified verbatim.
+    {
+        "savings_plan_order_id": "b1c2d3e4-0001-4b1b-9d1b-000000000001",
+        "savings_plan_id": "b1c2d3e4-0001-4b1b-9d1b-200000000001",
+        "name": "b1c2d3e4-0001-4b1b-9d1b-000000000001/b1c2d3e4-0001-4b1b-9d1b-200000000001",
+        "type": "Microsoft.BillingBenefits/savingsPlanOrders/savingsPlans",
+        "sku_name": "Compute_Savings_Plan",
+        "billing_scope_id": "/subscriptions/sub-prod-001",
+        "billing_plan": "P1M",
+        "commitment_grain": "Hourly",
+        "commitment_currency_code": "USD",
+        "commitment_amount": 0.80,
+        "applied_scope_type": "Shared",
+        "display_name": "Compute_SavingsPlan_Prod",
+        "term": "P1Y",
+        "provisioning_state": "Succeeded",
+        "renew": True,
+        "purchase_date_time": "2026-01-15T10:00:00.0000000Z",
+        "effective_date_time": "2026-01-15T10:00:00.0000000Z",
+        "benefit_start_time": "2026-01-15T10:00:00.0000000Z",
+        "expiry_date_time": "2027-01-15T10:00:00.0000000Z",
+        "utilization_trend": "",
+        "utilization_1day_pct": 100.0,
+        "utilization_7day_pct": 91.4,
+        "utilization_30day_pct": 89.7,
+        "provider": "Azure",
+    },
+]
+
+
 # ── SP and RI eligibility maps ─────────────────────────────────────────────────
 
 COMPUTE_SP_ELIGIBLE_TYPES = {
@@ -282,7 +512,7 @@ COMPUTE_SP_ELIGIBLE_TYPES = {
 }
 
 DATABASE_SP_ELIGIBLE_TYPES = {
-    "Azure SQL Database", "Azure SQL Managed Instance",
+    "Azure SQL Database", "Azure SQL Elastic Pool", "Azure SQL Managed Instance",
     "Azure SQL Database Hyperscale", "Azure SQL Database Serverless",
     "Azure Database for PostgreSQL", "Azure Database for MySQL",
     "Azure Cosmos DB", "Azure DocumentDB",
@@ -308,6 +538,7 @@ RI_ONLY_ELIGIBLE_TYPES = {
 RI_COVERAGE_NOTES = {
     "Compute":                          ("VM compute costs (~30-40% saving vs PAYG)", "Software, Windows licensing, networking, storage"),
     "Azure SQL Database":               ("Compute costs only (~35% saving)", "Software license, networking, storage"),
+    "Azure SQL Elastic Pool":           ("Pooled compute costs only (~35% saving) - same rule as Single Database", "Software license, networking, storage"),
     "Azure SQL Managed Instance":       ("Compute costs only (~35% saving)", "Software license, networking, storage"),
     "Azure Database for PostgreSQL":    ("Compute costs only (~35% saving)", "Software, networking, storage"),
     "Azure Database for MySQL":         ("Compute costs only (~35% saving)", "Software, networking, storage"),
@@ -331,8 +562,11 @@ def seed_if_empty(engine=None):
         if session.query(CloudInventory).filter_by(provider="Azure").count() == 0:
             session.bulk_insert_mappings(CloudInventory, INVENTORY)
             session.bulk_insert_mappings(Commitment, COMMITMENTS)
+            session.bulk_insert_mappings(ReservationPurchase, RESERVATION_PURCHASES)
+            session.bulk_insert_mappings(SavingsPlanPurchase, SAVINGS_PLAN_PURCHASES)
             session.commit()
-            print(f"[OK] Seeded {len(INVENTORY)} resources, {len(COMMITMENTS)} commitments.")
+            print(f"[OK] Seeded {len(INVENTORY)} resources, {len(COMMITMENTS)} commitments, "
+                  f"{len(RESERVATION_PURCHASES)} reservation purchases, {len(SAVINGS_PLAN_PURCHASES)} savings plan purchases.")
 
             # Demo data deserves real SP/RI economics too, not just Live
             # tenants - fetch real 1yr/3yr rates for every demo SKU/region/OS

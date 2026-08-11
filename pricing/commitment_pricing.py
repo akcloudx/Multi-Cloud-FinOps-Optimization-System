@@ -9,28 +9,23 @@ Called ONLY from the ingestion pipeline (data/sync_pipeline.py) and the demo
 data loader, same architecture as pricing/azure_retail_api.py: API -> ingest
 -> SQL DB -> UI/analysis engine reads the DB only, never the live API
 directly. Fetched narrowly for the SKU/region/OS combos actually present in
-inventory - not a full regional catalog dump (that's the difference from the
-spreadsheet workbook this was modeled on, which pulled thousands of rows per
-region; targeting inventory keeps this fast and small while answering the
-same question: "what would this resource cost under a 1yr/3yr commitment").
+inventory - not a full regional catalog dump.
 
 Azure Retail Prices API docs: https://learn.microsoft.com/en-us/rest/api/cost-management/retail-prices/azure-retail-prices
 The api-version=2023-01-01-preview is required to get:
   - type eq 'Consumption' items' nested `savingsPlan: [{term, unitPrice}]` array
   - type eq 'Reservation' items' `reservationTerm` field
-Verified directly against the live API while building this (2026-08):
-  Consumption item for Standard_D4ds_v5/eastus carries
-    savingsPlan: [{"term": "1 Year", "unitPrice": 0.154471}, {"term": "3 Years", "unitPrice": 0.1032142}]
-  Reservation items for the same SKU/region:
-    {"reservationTerm": "1 Year", "unitPrice": 1168.0}   <- TOTAL price for the year, not hourly
-    {"reservationTerm": "3 Years", "unitPrice": 2257.0}  <- TOTAL price for three years, not hourly
+
+Per-resource-type query strategy (which Retail API field to match, what
+scope to search, whether a Reservation price needs multiplying by a unit
+count) lives in pricing/sku_mapping.py - only VM SKUs have a direct
+armSkuName match; every other service was individually researched live
+against the API (see that module's per-service notes) since Resource Graph's
+reported SKU name frequently doesn't match the Retail API's naming for
+non-VM services at all.
 
 AWS is NOT implemented yet (Live AWS inventory ingestion itself doesn't exist
-yet either - see aws/connector.py). The public API here is provider-agnostic
-on purpose (`provider` param, "SavingsPlan"/"ReservedInstance" instrument
-names that mean the same thing for AWS's own Compute/EC2 Instance Savings
-Plans and EC2/RDS Reserved Instances) so AWS's Price List API can plug in
-later via _fetch_aws_sp_rates/_fetch_aws_ri_rates without changing callers.
+yet either - see aws/connector.py).
 """
 
 from datetime import datetime, timedelta
@@ -41,6 +36,7 @@ import requests
 from sqlalchemy.orm import Session
 
 from db.schema import CommitmentPriceCache
+from pricing.sku_mapping import resolve_sku_query, SkuQueryPlan
 
 RETAIL_API_URL = "https://prices.azure.com/api/retail/prices"
 _API_VERSION = "2023-01-01-preview"
@@ -52,158 +48,244 @@ _TERM_MONTHS = {"1yr": 12, "3yr": 36}
 _AZURE_TERM_LABELS = {"1yr": "1 Year", "3yr": "3 Years"}
 
 
-def _matches_os(item: dict, os_: str) -> bool:
-    wants_windows = (os_ == "Windows")
-    return ("windows" in item.get("productName", "").lower()) == wants_windows
+def _split_by_os(items: list) -> tuple:
+    """Returns (windows_items, other_items). Which OS signal actually
+    appears in productName is service-dependent and NOT consistent: VMs
+    explicitly tag the Windows variant ("...Ddsv5 Series Windows") and leave
+    the Linux/base variant untagged, while App Service does the opposite -
+    it explicitly tags the Linux variant ("...Premium v3 Plan - Linux") and
+    leaves the Windows/base variant untagged. Treating "no windows tag" as
+    "wants non-Windows" (the original heuristic) silently matched an App
+    Service Windows item as if it were Linux, comparing a Linux PAYG price
+    against a Windows committed rate - verified live, this produced a
+    nonsensical 'Savings Plan costs more than PAYG' result. Detect whichever
+    tag is actually present in this item set and split on that; if neither
+    tag appears (databases, storage, ...), there's no OS distinction to make
+    at all and every item is returned as "other"."""
+    has_linux_tag = any("linux" in i.get("productName", "").lower() for i in items)
+    has_windows_tag = any("windows" in i.get("productName", "").lower() for i in items)
+    if has_windows_tag:
+        windows_items = [i for i in items if "windows" in i.get("productName", "").lower()]
+        other_items = [i for i in items if "windows" not in i.get("productName", "").lower()]
+    elif has_linux_tag:
+        other_items = [i for i in items if "linux" in i.get("productName", "").lower()]
+        windows_items = [i for i in items if "linux" not in i.get("productName", "").lower()]
+    else:
+        windows_items, other_items = [], list(items)
+    return windows_items, other_items
 
 
-def _fetch_consumption_items(sku: str, region: str) -> list:
-    filter_q = (
-        f"armRegionName eq '{region}' and armSkuName eq '{sku}' "
-        f"and priceType eq 'Consumption' and currencyCode eq 'USD'"
-    )
-    resp = requests.get(
-        RETAIL_API_URL,
-        params={"$filter": filter_q, "api-version": _API_VERSION},
-        timeout=_REQUEST_TIMEOUT,
-    )
-    resp.raise_for_status()
-    items = [i for i in resp.json().get("Items", []) if i.get("unitOfMeasure") == "1 Hour"]
+def _os_matched_items(items: list, os_: str) -> list:
+    windows_items, other_items = _split_by_os(items)
+    if os_ == "Windows":
+        return windows_items or items
+    return other_items or items
+
+
+def _exclude_noise_meters(items: list) -> list:
+    """Excludes meter variants that shouldn't be picked as a 'baseline'
+    price by a plain min()/first-match heuristic: Spot and Low Priority are
+    opportunistic/interruptible pricing, not a real committable baseline;
+    Zone Redundant is an opt-in resiliency variant this app doesn't track
+    per-resource, and picking it silently (verified live: it can be
+    *cheaper* than the standard variant for some SQL Database tiers, so a
+    naive "pick the min price" comparison picks it every time) produces a
+    baseline that doesn't match what a non-zone-redundant resource actually
+    pays. "Free" meters (verified live: SQL Database Serverless publishes
+    decoy meters like "8 vCore - Free" priced at exactly $0.00 alongside the
+    real "vCore" rate) are an even sharper version of the same problem - a
+    naive min() would ALWAYS pick a $0 meter over any real price."""
+    noise = ("spot", "low priority", "zone redundan", "free")
     return [
         i for i in items
-        if "spot" not in i.get("meterName", "").lower()
-        and "low priority" not in i.get("meterName", "").lower()
+        if not any(n in i.get("meterName", "").lower() for n in noise)
     ]
 
 
-def _windows_license_surcharge(items: list, os_: str, base_meter_id: Optional[str]) -> float:
-    """Azure Savings Plans and Reservations commit against the base compute
-    meter only - a Windows VM's OS-license premium keeps billing at PAYG on
-    top of the committed rate even after committing (unless Azure Hybrid
-    Benefit is applied, which this app doesn't model). Verified directly
-    against the live API while building this: the item carrying
-    `savingsPlan`/appearing under Reservation has productName WITHOUT
-    "Windows" in it, while the Windows-priced item has no savingsPlan entry
-    at all - they're the same SKU, two different meters. Returns the $/hr
-    delta to add on top of the committed base rate; 0 for non-Windows OS."""
-    if os_ != "Windows" or base_meter_id is None:
-        return 0.0
-    windows_items = [i for i in items if _matches_os(i, "Windows")]
-    base_items = [i for i in items if i.get("meterId") == base_meter_id]
-    if not windows_items or not base_items:
-        return 0.0
-    windows_payg = min(float(i["retailPrice"]) for i in windows_items)
-    base_payg = float(base_items[0]["retailPrice"])
-    return max(0.0, windows_payg - base_payg)
+def _normalize_name(s: str) -> str:
+    return (s or "").strip().lower().replace(" ", "")
 
 
-def _fetch_azure_sp_rates(sku: str, region: str, os_: str) -> dict:
+_HOURLY_UNITS = {"1hour", "1/hour"}
+
+
+def _is_hourly(item: dict) -> bool:
+    """Azure spells the hourly unit inconsistently across services - VMs/App
+    Service/SQL Database use '1 Hour', but Synapse Analytics uses '1/Hour'
+    for the exact same per-hour billing (verified live: DW500c's only
+    Consumption item is tagged '1/Hour'). A strict '== \"1 Hour\"' check
+    silently dropped every Synapse price, making it look unpriceable when
+    it isn't."""
+    return _normalize_name(item.get("unitOfMeasure", "")) in _HOURLY_UNITS
+
+
+def _query_retail_items(price_type: str, region: str, plan: SkuQueryPlan, match_value: str) -> list:
+    """Fetches Retail Prices API items for one price_type ('Consumption' or
+    'Reservation'), scoped by the query plan. armSkuName matches are pushed
+    server-side (exact, efficient); skuName matches are filtered client-side
+    after a serviceName-scoped fetch, since skuName has inconsistent spacing
+    across tiers (e.g. App Service's "P2 v3" vs "P1mv4") that OData `eq`
+    can't reliably normalize."""
+    filter_parts = [
+        f"armRegionName eq '{region}'",
+        f"priceType eq '{price_type}'",
+        "currencyCode eq 'USD'",
+    ]
+    if plan.service_name:
+        filter_parts.append(f"serviceName eq '{plan.service_name}'")
+    if plan.match_field == "armSkuName" and match_value:
+        filter_parts.append(f"armSkuName eq '{match_value}'")
+    if plan.product_contains:
+        filter_parts.append(f"contains(productName, '{plan.product_contains}')")
+    filter_q = " and ".join(filter_parts)
+
+    resp = requests.get(
+        RETAIL_API_URL, params={"$filter": filter_q, "api-version": _API_VERSION}, timeout=_REQUEST_TIMEOUT,
+    )
+    resp.raise_for_status()
+    items = resp.json().get("Items", [])
+
+    if plan.match_field == "skuName" and match_value:
+        target = _normalize_name(match_value)
+        items = [i for i in items if _normalize_name(i.get("skuName", "")) == target]
+    return items
+
+
+def _compute_only_items(items: list, plan: SkuQueryPlan, os_: str) -> list:
+    """Returns the item subset to treat as this resource's real compute
+    cost. For Compute (VMs - plan.os_license_is_separable=True), this is
+    ALWAYS the base/non-Windows-tagged meter regardless of the resource's
+    actual OS: verified live + against the Azure pricing calculator that a
+    Windows VM's tagged Consumption entry is a license-INCLUSIVE bundle
+    carrying no savingsPlan array of its own, sitting alongside an untagged
+    base entry that both (a) is the true compute-only price the discount
+    attaches to and (b) is numerically identical to what a same-size Linux
+    VM pays - VM compute hardware cost doesn't vary by OS, only the license
+    does. By explicit decision this app excludes OS license cost entirely
+    rather than tracking it as a surcharge, so Windows and Linux resources
+    of the same VM SKU intentionally resolve to the same $/hr here.
+    Every other service keeps genuine OS-matching (_os_matched_items) -
+    e.g. App Service's Windows vs Linux tiers are genuinely different
+    compute costs, not a license line bolted onto an identical base price,
+    so there's nothing to strip out there."""
+    if plan.os_license_is_separable:
+        _, base_items = _split_by_os(items)
+        return base_items or items
+    return _os_matched_items(items, os_)
+
+
+def _fetch_azure_sp_rates(resource_type: str, sku: str, region: str, os_: str) -> dict:
     """Returns {"payg": float|None, "1yr": float|None, "3yr": float|None},
-    all already $/hr - Savings Plan rates are natively hourly in the API.
-    1yr/3yr include the Windows license surcharge on top of the committed
-    base-compute rate where applicable (see _windows_license_surcharge)."""
+    all already $/hr, COMPUTE COST ONLY - OS license (e.g. Windows Server)
+    is deliberately excluded everywhere, not folded into either side, per
+    explicit product decision. Savings Plan rates are natively hourly in
+    the API."""
     result = {"payg": None, "1yr": None, "3yr": None}
     if not sku or sku == "N/A" or not region:
         return result
 
+    plan = resolve_sku_query(resource_type, sku)
+    if not plan.supported:
+        return result
+
     try:
-        items = _fetch_consumption_items(sku, region)
+        items = _query_retail_items("Consumption", region, plan, plan.consumption_match_value)
     except Exception:
         return result
+    items = [i for i in items if _is_hourly(i)]
+    items = _exclude_noise_meters(items)
     if not items:
         return result
 
-    # PAYG baseline: what the customer actually pays today for this OS.
-    os_matched = [i for i in items if _matches_os(i, os_)] or items
+    # PAYG baseline: the compute-only price (see _compute_only_items) -
+    # falls back to the full set only when this service has no OS/meter
+    # distinction at all (databases, storage, ...).
+    os_matched = _compute_only_items(items, plan, os_)
     payg_item = min(os_matched, key=lambda i: float(i["retailPrice"]))
-    result["payg"] = float(payg_item["retailPrice"])
+    result["payg"] = float(payg_item["retailPrice"]) * plan.consumption_multiplier
 
-    # Savings Plan rates attach to the base compute meter, not the
-    # Windows-suffixed one - find whichever item actually carries them.
-    # Some non-VM services (e.g. PostgreSQL Flexible Server) reuse VM-style
-    # armSkuName values for their underlying compute tier and can also carry
-    # a savingsPlan entry, so prefer an actual "Compute" serviceFamily match
-    # when more than one candidate exists, to avoid picking the wrong one.
-    sp_candidates = [i for i in items if i.get("savingsPlan")]
+    # Savings Plan rates attach to a specific meter - search within the SAME
+    # compute-only subset first, so PAYG and the committed rate always come
+    # from the same meter. Some non-VM services (e.g. PostgreSQL Flexible
+    # Server) also reuse VM-style armSkuName values for their underlying
+    # compute tier and can carry a savingsPlan entry of their own, so prefer
+    # an actual "Compute" serviceFamily match when more than one candidate
+    # exists, to avoid picking the wrong service's entry.
+    sp_candidates = [i for i in os_matched if i.get("savingsPlan")] or [i for i in items if i.get("savingsPlan")]
     sp_item = next((i for i in sp_candidates if i.get("serviceFamily") == "Compute"), None) \
         or (sp_candidates[0] if sp_candidates else None)
     if not sp_item:
         return result
 
-    surcharge = _windows_license_surcharge(items, os_, sp_item.get("meterId"))
     for sp in sp_item.get("savingsPlan", []):
         term, rate = sp.get("term"), sp.get("unitPrice")
         if rate is None:
             continue
+        scaled_rate = float(rate) * plan.savings_plan_multiplier * plan.consumption_multiplier
         if term == "1 Year":
-            result["1yr"] = float(rate) + surcharge
+            result["1yr"] = scaled_rate
         elif term == "3 Years":
-            result["3yr"] = float(rate) + surcharge
+            result["3yr"] = scaled_rate
     return result
 
 
-def _fetch_azure_ri_rates(sku: str, region: str, os_: str) -> dict:
-    """Returns {"1yr": float|None, "3yr": float|None}, normalized to $/hr by
-    dividing the API's total-term price by (term_months * 730), plus the
-    Windows license surcharge on top where applicable (reservations are also
-    base-compute-only - see _windows_license_surcharge)."""
+def _fetch_azure_ri_rates(resource_type: str, sku: str, region: str, os_: str) -> dict:
+    """Returns {"1yr": float|None, "3yr": float|None}, normalized to $/hr:
+    total-term price / (term_months * 730), multiplied first by
+    plan.reservation_multiplier for services priced per-unit rather than
+    per-instance (e.g. SQL Database/MI are priced per vCore, not per
+    database - see pricing/sku_mapping.py). COMPUTE COST ONLY - see
+    _fetch_azure_sp_rates / _compute_only_items for why OS license is
+    excluded rather than added back as a surcharge."""
     result = {"1yr": None, "3yr": None}
     if not sku or sku == "N/A" or not region:
         return result
 
-    filter_q = (
-        f"armRegionName eq '{region}' and armSkuName eq '{sku}' "
-        f"and priceType eq 'Reservation' and currencyCode eq 'USD'"
-    )
+    plan = resolve_sku_query(resource_type, sku)
+    if not plan.supported or plan.reservation_unsupported_reason:
+        return result
+
     try:
-        resp = requests.get(
-            RETAIL_API_URL,
-            params={"$filter": filter_q, "api-version": _API_VERSION},
-            timeout=_REQUEST_TIMEOUT,
-        )
-        resp.raise_for_status()
-        ri_items = resp.json().get("Items", [])
-        consumption_items = _fetch_consumption_items(sku, region)
+        ri_items = _query_retail_items("Reservation", region, plan, plan.reservation_match_value)
     except Exception:
         return result
+    ri_items = _exclude_noise_meters(ri_items)
     if not ri_items:
         return result
 
-    surcharge = 0.0
-    if ri_items:
-        surcharge = _windows_license_surcharge(consumption_items, os_, ri_items[0].get("meterId"))
+    ri_os_matched = _compute_only_items(ri_items, plan, os_)
 
     for term_key, months in _TERM_MONTHS.items():
         label = _AZURE_TERM_LABELS[term_key]
-        matches = [c for c in ri_items if c.get("reservationTerm") == label]
+        matches = [c for c in ri_os_matched if c.get("reservationTerm") == label]
         if matches:
-            total_price = min(float(c["retailPrice"]) for c in matches)
-            result[term_key] = total_price / (months * MONTH_HOURS) + surcharge
+            unit_price = min(float(c["retailPrice"]) for c in matches)
+            total_price = unit_price * plan.reservation_multiplier
+            result[term_key] = total_price / (months * MONTH_HOURS)
     return result
 
 
-def _fetch_aws_sp_rates(sku: str, region: str, os_: str) -> dict:
+def _fetch_aws_sp_rates(resource_type: str, sku: str, region: str, os_: str) -> dict:
     """AWS Savings Plans (Compute SP / EC2 Instance SP) pricing - not
     implemented yet. Live AWS inventory ingestion doesn't exist yet either
     (aws/connector.py), so there's nothing to look this up against in
     practice; returns all-None so callers degrade gracefully rather than
-    crash. Real implementation would call AWS's Price List API / Savings
-    Plans pricing endpoints with the same (sku, region, os) -> {"payg","1yr","3yr"} shape."""
+    crash."""
     return {"payg": None, "1yr": None, "3yr": None}
 
 
-def _fetch_aws_ri_rates(sku: str, region: str, os_: str) -> dict:
+def _fetch_aws_ri_rates(resource_type: str, sku: str, region: str, os_: str) -> dict:
     """AWS Reserved Instances (EC2 Standard/Convertible, RDS) pricing - not
     implemented yet, same reasoning as _fetch_aws_sp_rates."""
     return {"1yr": None, "3yr": None}
 
 
 def _upsert(session: Session, cached: dict, provider: str, instrument: str,
-            region: str, sku: str, os_: str, term: str,
+            resource_type: str, region: str, sku: str, os_: str, term: str,
             hourly_rate: Optional[float], payg_rate: Optional[float], now_iso: str):
     if hourly_rate is None:
         return
-    key = (provider, instrument, region, sku, os_, term)
+    key = (provider, instrument, resource_type, region, sku, os_, term)
     row = cached.get(key)
     if row:
         row.effective_hourly_rate_usd = hourly_rate
@@ -211,7 +293,7 @@ def _upsert(session: Session, cached: dict, provider: str, instrument: str,
         row.fetched_at = now_iso
     else:
         session.add(CommitmentPriceCache(
-            provider=provider, instrument=instrument, region=region, sku=sku, os=os_,
+            provider=provider, instrument=instrument, resource_type=resource_type, region=region, sku=sku, os=os_,
             term=term, effective_hourly_rate_usd=hourly_rate, payg_hourly_rate_usd=payg_rate,
             fetched_at=now_iso,
         ))
@@ -219,17 +301,23 @@ def _upsert(session: Session, cached: dict, provider: str, instrument: str,
 
 def refresh_commitment_prices(engine, resource_rows: list[dict], provider: str = "Azure") -> None:
     """
-    For each unique (sku, region, os) in resource_rows, fetches real 1yr/3yr
-    Savings Plan and Reserved Instance rates and upserts them into
-    CommitmentPriceCache. Reuses any row fetched within CACHE_MAX_AGE_HOURS;
-    only hits the live API for stale or missing combos - same caching
-    discipline as pricing/azure_retail_api.py.
+    For each unique (resource_type, sku, region, os) in resource_rows,
+    fetches real 1yr/3yr Savings Plan and Reserved Instance rates and upserts
+    them into CommitmentPriceCache. Reuses any row fetched within
+    CACHE_MAX_AGE_HOURS; only hits the live API for stale or missing combos.
+    Resource type is needed (not just the SKU string) because the correct
+    Retail API query strategy differs per service - see sku_mapping.py.
     """
     combos = {
-        (r.get("SKU") or r.get("sku"), r.get("Region") or r.get("region"), r.get("OS") or r.get("os"))
+        (
+            r.get("Resource Type") or r.get("resource_type"),
+            r.get("SKU") or r.get("sku"),
+            r.get("Region") or r.get("region"),
+            r.get("OS") or r.get("os"),
+        )
         for r in resource_rows
     }
-    combos = {c for c in combos if c[0] and c[0] != "N/A"}
+    combos = {c for c in combos if c[1] and c[1] != "N/A"}
     if not combos:
         return
 
@@ -239,29 +327,29 @@ def refresh_commitment_prices(engine, resource_rows: list[dict], provider: str =
 
     with Session(engine) as session:
         cached = {
-            (row.provider, row.instrument, row.region, row.sku, row.os, row.term): row
+            (row.provider, row.instrument, row.resource_type, row.region, row.sku, row.os, row.term): row
             for row in session.query(CommitmentPriceCache).filter(CommitmentPriceCache.provider == provider).all()
         }
         now_iso = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
 
-        for sku, region, os_ in combos:
-            sp_row = cached.get((provider, "SavingsPlan", region, sku, os_, "1yr"))
-            ri_row = cached.get((provider, "ReservedInstance", region, sku, os_, "1yr"))
+        for resource_type, sku, region, os_ in combos:
+            sp_row = cached.get((provider, "SavingsPlan", resource_type, region, sku, os_, "1yr"))
+            ri_row = cached.get((provider, "ReservedInstance", resource_type, region, sku, os_, "1yr"))
             sp_fresh = sp_row is not None and sp_row.fetched_at >= cutoff
             ri_fresh = ri_row is not None and ri_row.fetched_at >= cutoff
             if sp_fresh and ri_fresh:
                 continue
 
-            sp_rates = sp_fetch(sku, region, os_) if not sp_fresh else None
-            ri_rates = ri_fetch(sku, region, os_) if not ri_fresh else None
+            sp_rates = sp_fetch(resource_type, sku, region, os_) if not sp_fresh else None
+            ri_rates = ri_fetch(resource_type, sku, region, os_) if not ri_fresh else None
 
             if sp_rates:
-                _upsert(session, cached, provider, "SavingsPlan", region, sku, os_, "1yr", sp_rates.get("1yr"), sp_rates.get("payg"), now_iso)
-                _upsert(session, cached, provider, "SavingsPlan", region, sku, os_, "3yr", sp_rates.get("3yr"), sp_rates.get("payg"), now_iso)
+                _upsert(session, cached, provider, "SavingsPlan", resource_type, region, sku, os_, "1yr", sp_rates.get("1yr"), sp_rates.get("payg"), now_iso)
+                _upsert(session, cached, provider, "SavingsPlan", resource_type, region, sku, os_, "3yr", sp_rates.get("3yr"), sp_rates.get("payg"), now_iso)
             if ri_rates:
                 payg_for_ri = (sp_rates or {}).get("payg")
-                _upsert(session, cached, provider, "ReservedInstance", region, sku, os_, "1yr", ri_rates.get("1yr"), payg_for_ri, now_iso)
-                _upsert(session, cached, provider, "ReservedInstance", region, sku, os_, "3yr", ri_rates.get("3yr"), payg_for_ri, now_iso)
+                _upsert(session, cached, provider, "ReservedInstance", resource_type, region, sku, os_, "1yr", ri_rates.get("1yr"), payg_for_ri, now_iso)
+                _upsert(session, cached, provider, "ReservedInstance", resource_type, region, sku, os_, "3yr", ri_rates.get("3yr"), payg_for_ri, now_iso)
 
         session.commit()
 
@@ -270,7 +358,7 @@ def get_commitment_prices(engine, provider: str = "Azure") -> pd.DataFrame:
     """Reads the full cached commitment price table for a provider back out
     as a DataFrame - this is what the analysis engine and UI actually read;
     they never call the live API directly."""
-    columns = ["provider", "instrument", "region", "sku", "os", "term",
+    columns = ["provider", "instrument", "resource_type", "region", "sku", "os", "term",
                "effective_hourly_rate_usd", "payg_hourly_rate_usd", "fetched_at"]
     with Session(engine) as session:
         rows = session.query(CommitmentPriceCache).filter(CommitmentPriceCache.provider == provider).all()

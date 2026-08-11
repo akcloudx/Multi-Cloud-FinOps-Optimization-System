@@ -235,6 +235,7 @@ Resources
 | where type in (
     'microsoft.compute/virtualmachines',
     'microsoft.sql/servers/databases',
+    'microsoft.sql/servers/elasticpools',
     'microsoft.sql/managedinstances',
     'microsoft.dbformysql/servers',
     'microsoft.dbformysql/flexibleservers',
@@ -255,12 +256,58 @@ Resources
     powerState = tostring(properties.extended.instanceView.powerState.displayStatus),
     vmSize     = tostring(properties.hardwareProfile.vmSize),
     osType     = tostring(properties.storageProfile.osDisk.osType),
-    sqlSku     = tostring(properties.currentSku.name),
-    topSku     = tostring(sku.name)
+    sqlSkuName = tostring(properties.currentSku.name),
+    sqlSkuCapacity = tostring(properties.currentSku.capacity),
+    poolSkuName = tostring(sku.name),
+    poolSkuCapacity = tostring(sku.capacity),
+    topSku     = tostring(sku.name),
+    redisSkuName  = tostring(properties.sku.name),
+    redisFamily   = tostring(properties.sku.family),
+    redisCapacity = tostring(properties.sku.capacity)
+| extend
+    // SQL DB/MI reservations & savings plans are priced per vCore (see
+    // pricing/sku_mapping.py) - properties.currentSku.name alone (e.g.
+    // "GP_Gen5") loses the vCore count Azure's own ARM API tracks
+    // separately as properties.currentSku.capacity, so combine them into
+    // this app's TIER_Generation_vCores convention (e.g. "GP_Gen5_4").
+    sqlSku = case(
+        isnotempty(sqlSkuName) and isnotempty(sqlSkuCapacity), strcat(sqlSkuName, "_", sqlSkuCapacity),
+        isnotempty(sqlSkuName), sqlSkuName,
+        ""
+    ),
+    // Elastic Pools report SKU at a DIFFERENT ARM path than databases -
+    // top-level sku.name/sku.capacity (e.g. name="GP_Gen5", capacity=8 for a
+    // vCore pool; name="BasicPool"/"StandardPool"/"PremiumPool" for DTU
+    // pools), NOT properties.currentSku like a database. Reuses the exact
+    // same TIER_Generation_vCores convention as sqlSku above - verified live
+    // (2026-08) that Azure's Retail Prices API prices vCore Elastic Pools
+    // identically to vCore Single Databases (same armSkuName, e.g.
+    // "SQLDB_GP_Compute_Gen5"), so pricing/sku_mapping.py's existing SQL
+    // Database resolver is reused as-is for Elastic Pool too. Explicitly
+    // gated to the elasticpools type since sku.name/sku.capacity are generic
+    // top-level ARM fields other resource types in this query may also
+    // populate for unrelated reasons (e.g. App Service Plan instance count).
+    poolSku = case(
+        type == 'microsoft.sql/servers/elasticpools' and isnotempty(poolSkuName) and isnotempty(poolSkuCapacity),
+            strcat(poolSkuName, "_", poolSkuCapacity),
+        ""
+    ),
+    // Azure Cache for Redis has no top-level sku.name - its tier/size is
+    // properties.sku.name ("Basic"/"Standard"/"Premium") + .family ("C"/"P")
+    // + .capacity (an int), combined here into "{family}{capacity}_{tier}"
+    // (e.g. "P2_Premium") to match this app's demo-data convention and what
+    // pricing/sku_mapping.py's Redis lookup expects.
+    redisSku = case(
+        isnotempty(redisFamily) and isnotempty(redisCapacity) and isnotempty(redisSkuName),
+            strcat(redisFamily, redisCapacity, "_", redisSkuName),
+        ""
+    )
 | extend
     resolvedSku = case(
         isnotempty(vmSize), vmSize,
         isnotempty(sqlSku), sqlSku,
+        isnotempty(poolSku), poolSku,
+        isnotempty(redisSku), redisSku,
         isnotempty(topSku), topSku,
         'N/A'
     )
@@ -320,6 +367,7 @@ def _map_resource_type(azure_type: str) -> str:
     mapping = {
         "microsoft.compute/virtualmachines":            "Compute",
         "microsoft.sql/servers/databases":              "Azure SQL Database",
+        "microsoft.sql/servers/elasticpools":           "Azure SQL Elastic Pool",
         "microsoft.sql/managedinstances":               "Azure SQL Managed Instance",
         "microsoft.dbformysql/servers":                 "Azure Database for MySQL",
         "microsoft.dbformysql/flexibleservers":         "Azure Database for MySQL",
