@@ -138,35 +138,38 @@ _SQL_CONSUMPTION_PREFIX = {
 }
 # Hardware generations other than Gen5 (DC-series, Fsv2-series, Premium-series,
 # Premium-series memory-optimized - all real, selectable options on the Azure
-# pricing calculator) - status is NOT uniform across them, corrected 2026-08
-# after an earlier blanket "not covered, safe failure" claim here turned out
-# to be too broad for Hyperscale specifically:
+# pricing calculator) - status is NOT uniform across them:
 #
-#   - Hyperscale Premium-series and Premium-series-memory-optimized: the
-#     RESERVATION side actually works ALREADY, not by a deliberate mapping
-#     but because Azure's real Reservation armSkuName for both
-#     ("SQLDB_HyperScale_Compute_Premium" / "..._Premium_Memory_Optimized")
-#     happens to follow the exact same underscore-separated
-#     "{res_prefix}_{generation}" pattern Gen5 uses - verified live with
-#     exact math for both (e.g. Premium: $1144 total-1yr / (12*730) * 20
-#     vCores = $2.611872/hr, confirmed against the live API). The
-#     CONSUMPTION/Savings Plan side does NOT work for either - Azure's real
-#     Consumption armSkuName for these uses a completely different, literal-
-#     space-containing format ("SQLDB_HS_Premium Memory Optimized Compute_1"),
-#     which correctly fails to match and returns no data rather than a wrong
-#     number.
+#   - Hyperscale Premium-series and Premium-series-memory-optimized: FULLY
+#     WORKING on both sides, verified live with exact math (2026-08). An
+#     earlier note here claimed Consumption/Savings Plan "does NOT work" for
+#     these - that was wrong, based on an incomplete check (only tried
+#     Gen5's "_1"-suffixed armSkuName guess). The real pattern: Consumption
+#     uses the exact SAME flat armSkuName as Reservation, no suffix at all
+#     ("SQLDB_HyperScale_Compute_Premium" / "..._Premium_Memory_Optimized") -
+#     see _HYPERSCALE_UNIFIED_ARMSKUNAME. Verified: Premium 0.18266 PAYG/
+#     vCore -> 0.146128 SP-1yr/vCore (20% off); Premium Memory Optimized
+#     0.255724 -> 0.2045792 (20% off); Reservation 1yr/3yr both 35%/55% off
+#     for both, matching the universal SQL DB discount pattern.
+#   - Business Critical DC-series: Consumption/Savings Plan WORKING (see
+#     _plan_sql_dc_series), Reservation deliberately NOT sourced (stale
+#     catalog entry, calculator confirms unavailable).
 #   - Hyperscale DC-series: genuinely NOT covered on either side - verified
 #     live its armSkuName has an incompatible structure entirely
 #     ("SQL_Database_SingleDB_Hyperscale_Compute_DC-Series_vCore" - doesn't
 #     even start with "SQLDB"), so the generic pattern correctly finds
 #     nothing (safe failure) rather than accidentally matching.
-#   - Fsv2-series, and Premium-series/DC-series for General Purpose/Business
-#     Critical (as opposed to Hyperscale) - NOT checked this session at all,
-#     status unknown, not to be assumed safe or working either way.
+#   - Fsv2-series - NOT checked this session at all, status unknown, not to
+#     be assumed safe or working either way. Premium-series/DC-series do NOT
+#     exist for General Purpose or Business Critical (DC-series aside) or
+#     General Purpose (any of these) - verified live (2026-08): zero
+#     Consumption items for "General Purpose" + "Premium"/"DC-Series", and
+#     zero for "Business Critical" + "Premium" (excluding DC) - Azure simply
+#     doesn't sell those combinations, not a mapping gap.
 #   - None of the above have an established internal SKU-string convention
 #     in this app yet (no live/demo inventory exercises them) - the
-#     Reservation-side successes above were verified by testing a plausible
-#     guessed SKU string against the live API's math, not by confirming a
+#     successes above were verified by testing a plausible guessed SKU
+#     string against the live API's math, not by confirming a
 #     real KQL-scanned resource would actually produce that exact string.
 #
 # Gen5 remains the default/overwhelmingly common choice and the only
@@ -177,6 +180,11 @@ _SQL_TIER_DISPLAY_NAME = {"GP": "General Purpose", "BC": "Business Critical", "H
 # Tiers whose Consumption pricing is a flat per-1-vCore meter (needs
 # consumption_multiplier) rather than a pre-scaled per-vCore-count SKU.
 _HYPERSCALE_FLAT_CONSUMPTION = {"HS"}
+# Hyperscale hardware generations (matched case/hyphen/underscore-insensitively
+# against the SKU's "generation" token) whose Consumption armSkuName is
+# IDENTICAL to the Reservation armSkuName (no "_1" or "_N" suffix at all) -
+# verified live 2026-08, see _plan_sql_family's Hyperscale branch.
+_HYPERSCALE_UNIFIED_ARMSKUNAME = {"PREMIUM", "PREMIUMMEMORYOPTIMIZED"}
 # DC-series verified working ONLY for these (family, tier) combos this
 # session - see _plan_sql_dc_series. Do not assume it generalizes.
 _DC_SERIES_VERIFIED = {("SQLDB", "BC")}
@@ -253,14 +261,40 @@ def _plan_sql_family(sku: str, family: str, service_name: str) -> SkuQueryPlan:
         return SkuQueryPlan(supported=False, reason=f"No verified pricing pattern yet for {family} tier '{tier}' (only General Purpose/Business Critical/Hyperscale are mapped).")
 
     if tier in _HYPERSCALE_FLAT_CONSUMPTION:
+        gen_key = generation.upper().replace("-", "").replace("_", "")
+        if gen_key in _HYPERSCALE_UNIFIED_ARMSKUNAME:
+            # Premium-series / Premium-series-memory-optimized: a THIRD
+            # distinct Hyperscale Consumption pattern, verified live 2026-08
+            # (real user-supplied config investigation). Unlike Gen5 (which
+            # needs a separate "HS_..._1" Consumption armSkuName), these use
+            # the exact SAME flat armSkuName for BOTH Consumption and
+            # Reservation - no "_1" or "_N" suffix at all. Verified:
+            # SQLDB_HyperScale_Compute_Premium (0.18266 PAYG/vCore,
+            # 0.146128 SP-1yr/vCore = 20% off) and
+            # SQLDB_HyperScale_Compute_Premium_Memory_Optimized (0.255724
+            # PAYG/vCore, 0.2045792 SP-1yr/vCore = 20% off), both flat
+            # per-vCore on both sides needing the same consumption_multiplier
+            # treatment as Gen5's "_1" pattern. An earlier session note
+            # claimed Consumption/Savings Plan "does NOT work" for these
+            # hardware types - that was based on an incomplete check (only
+            # tried the Gen5-style "_1"-suffixed guess); corrected here now
+            # that the real pattern has been found and verified.
+            unified_armskuname = f"{res_prefix}_{generation}"
+            return SkuQueryPlan(
+                supported=True, service_name=service_name, match_field="armSkuName",
+                consumption_match_value=unified_armskuname,
+                reservation_match_value=unified_armskuname,
+                reservation_multiplier=vcores,
+                consumption_multiplier=vcores,
+            )
         # Verified live: only a flat "_1" (1 vCore) Consumption meter exists
-        # for Hyperscale Provisioned - no per-vCore-count SKU the way GP/BC
-        # have. Since this queries that flat "_1" item directly, retailPrice
-        # AND its nested savingsPlan.unitPrice are BOTH already on the same
-        # per-1-vCore basis (verified live: 0.217365 PAYG / 0.173892 SP-1yr
-        # for the same "_1" item) - unlike GP/BC where retailPrice is
-        # pre-scaled but savingsPlan stays flat (needing the separate
-        # savings_plan_multiplier below), here ONE multiplier
+        # for Hyperscale Gen5 Provisioned - no per-vCore-count SKU the way
+        # GP/BC have. Since this queries that flat "_1" item directly,
+        # retailPrice AND its nested savingsPlan.unitPrice are BOTH already
+        # on the same per-1-vCore basis (verified live: 0.217365 PAYG /
+        # 0.173892 SP-1yr for the same "_1" item) - unlike GP/BC where
+        # retailPrice is pre-scaled but savingsPlan stays flat (needing the
+        # separate savings_plan_multiplier below), here ONE multiplier
         # (consumption_multiplier) correctly scales both; do NOT also set
         # savings_plan_multiplier or this would double-apply the vCore factor.
         return SkuQueryPlan(
