@@ -73,6 +73,7 @@ def init_db(provider: str = "Azure"):
     _ensure_column(engine, "commitment_price_cache", "redundancy", "VARCHAR(255)")
     _ensure_column(engine, "commitments", "scope_redundancy", "VARCHAR(255)")
     _ensure_column(engine, "commitments", "scope_resource_type", "VARCHAR(255)")
+    _ensure_column(engine, "cloud_inventory", "ha_replica_count", "INTEGER")
     return engine
 
 
@@ -96,6 +97,21 @@ class CloudInventory(Base):
     # real ARM properties.zoneRedundant setting or pricing would silently use
     # the wrong baseline for a real zone-redundant resource.
     redundancy                = Column(String(255), nullable=True, default="N/A")
+    # Number of Hyperscale High Availability secondary replicas (real ARM
+    # property Microsoft.Sql/servers/databases.properties.
+    # highAvailabilityReplicaCount, int 0-4). Verified live 2026-08 against
+    # the real Azure pricing calculator: each replica is billed at the SAME
+    # per-vCore rate as the primary Compute meter (confirmed identical $, no
+    # distinct Retail API "replica" meter exists) - not a small surcharge,
+    # a genuine 2x-or-more cost multiplier for a Hyperscale database with 1+
+    # replicas. This column is captured for Business Critical too (the same
+    # ARM property also applies there), but ONLY Hyperscale's billing
+    # relationship for this property was verified this session - see
+    # pricing/commitment_pricing.py, which deliberately does NOT multiply
+    # by this for Business Critical, to avoid guessing an unverified rule
+    # (Business Critical's base price already includes built-in HA
+    # architecture; whether/how extra replicas cost more wasn't checked).
+    ha_replica_count           = Column(Integer, nullable=True, default=0)
     payg_hourly_usd          = Column(Float, nullable=False)
     avg_daily_running_hours  = Column(Integer, nullable=False)
     subscription             = Column(String(255), nullable=True)

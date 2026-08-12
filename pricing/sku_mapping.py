@@ -119,13 +119,38 @@ def _plan_app_service(sku: str) -> SkuQueryPlan:
 # Business Critical was upgraded from "inferred" to verified 2026-08 (live
 # request confirmed both SQLDB_BC_Compute_Gen5_4 Consumption, carrying a real
 # savingsPlan, and the SQLDB_BC_Compute_Gen5 Reservation prefix).
+#
+# CORRECTION 2026-08: an earlier pass through this module concluded "SQL
+# Managed Instance does not offer a Hyperscale tier at all" and blocked it
+# outright - that was WRONG, caused by a case-sensitive search bug (searched
+# armSkuName for the literal substring "HyperScale", the full-word form SQL
+# Database's Reservation side uses, and found zero matches). MI Hyperscale
+# genuinely exists and uses the SAME short "HS" prefix as MI's Consumption
+# side convention (not the "HyperScale" full-word shift that's specific to
+# SQL DATABASE's Reservation naming) - confirmed live across 3 independent
+# regions (austriaeast, chilecentral, and a 5-region broad scan). Its real
+# profile, also verified live, is genuinely different from every other SQL
+# DB/MI tier: Consumption exists (flat per-vCore rate, IDENTICAL price
+# whether querying the bare "SQLMI_HS_Compute_Gen5" armSkuName or ANY sized
+# variant "_8" through "_80" - confirmed byte-for-byte identical retailPrice
+# across all of them, in 3 separate regions), but ZERO Reservation entries
+# exist anywhere (0 results, priceType eq 'Reservation') and ZERO Consumption
+# items carry a savingsPlan array (0 of 87 checked) - MI Hyperscale is
+# genuinely priceable for PAYG but not eligible for ANY commitment discount,
+# unlike SQL Database Hyperscale which has both RI and SP. See
+# _plan_sql_family's dedicated SQLMI+HS branch.
 _SQL_RESERVATION_PREFIX = {
     ("SQLDB", "GP"): "SQLDB_GP_Compute",            # verified
     ("SQLDB", "BC"): "SQLDB_BC_Compute",             # verified
     ("SQLDB", "HS"): "SQLDB_HyperScale_Compute",     # verified - note the naming shift from the consumption side
     ("SQLMI", "GP"): "SQLMI_GP_Compute",             # verified
-    ("SQLMI", "BC"): "SQLMI_BC_Compute",             # inferred
-    ("SQLMI", "HS"): "SQLMI_HyperScale_Compute",     # inferred by analogy to SQLDB's confirmed shift
+    ("SQLMI", "BC"): "SQLMI_BC_Compute",             # verified 2026-08 (Gen5 sized Reservation entries confirmed
+                                                       # live across dozens of regions, e.g. 1907.0/3960.0 1yr/3yr)
+    ("SQLMI", "HS"): "SQLMI_HS_Compute",             # verified 2026-08 the PREFIX is real (matches Consumption's
+                                                       # short-form convention) - but never actually queried, since
+                                                       # zero Reservation entries exist for this tier (see above);
+                                                       # kept here only so the generic cons_prefix/res_prefix lookup
+                                                       # doesn't need a special case just to populate a placeholder.
 }
 _SQL_CONSUMPTION_PREFIX = {
     ("SQLDB", "GP"): "SQLDB_GP_Compute",             # verified
@@ -133,8 +158,11 @@ _SQL_CONSUMPTION_PREFIX = {
     ("SQLDB", "HS"): "SQLDB_HS_Compute",             # verified - but see _HYPERSCALE_FLAT_CONSUMPTION below,
                                                        # this prefix alone is NOT enough for Hyperscale.
     ("SQLMI", "GP"): "SQLMI_GP_Compute",             # verified
-    ("SQLMI", "BC"): "SQLMI_BC_Compute",             # inferred
-    ("SQLMI", "HS"): "SQLMI_HS_Compute",             # inferred
+    ("SQLMI", "BC"): "SQLMI_BC_Compute",             # verified 2026-08 (Gen5 8-vCore Consumption confirmed live:
+                                                       # 2.679032 PAYG, carries a real savingsPlan)
+    ("SQLMI", "HS"): "SQLMI_HS_Compute",             # verified 2026-08 - flat per-vCore, see _plan_sql_family's
+                                                       # dedicated SQLMI+HS branch (queries the BARE unsized
+                                                       # armSkuName - no "_1" variant exists for MI, unlike SQL DB).
 }
 # Hardware generations other than Gen5 (DC-series, Fsv2-series, Premium-series,
 # Premium-series memory-optimized - all real, selectable options on the Azure
@@ -193,62 +221,123 @@ _SQL_TIER_DISPLAY_NAME = {"GP": "General Purpose", "BC": "Business Critical", "H
 # Tiers whose Consumption pricing is a flat per-1-vCore meter (needs
 # consumption_multiplier) rather than a pre-scaled per-vCore-count SKU.
 _HYPERSCALE_FLAT_CONSUMPTION = {"HS"}
-# Hyperscale hardware generations (matched case/hyphen/underscore-insensitively
-# against the SKU's "generation" token) whose Consumption armSkuName is
-# IDENTICAL to the Reservation armSkuName (no "_1" or "_N" suffix at all) -
-# verified live 2026-08, see _plan_sql_family's Hyperscale branch.
+# Hardware generations (matched case/hyphen/underscore-insensitively against
+# the SKU's "generation" token) whose Consumption armSkuName is IDENTICAL to
+# the Reservation armSkuName (no "_1" or "_N" suffix at all) - verified live
+# 2026-08 for TWO independent (family, tier) combos, see _plan_sql_family's
+# unified-armSkuName branch: SQL Database Hyperscale (SQLDB_HyperScale_
+# Compute_Premium[_Memory_Optimized]) AND SQL Managed Instance Business
+# Critical (SQLMI_BC_Compute_Premium[_Memory_Optimized]) - despite the name,
+# this set is no longer Hyperscale-exclusive.
 _HYPERSCALE_UNIFIED_ARMSKUNAME = {"PREMIUM", "PREMIUMMEMORYOPTIMIZED"}
-# DC-series verified working ONLY for these (family, tier) combos this
-# session - see _plan_sql_dc_series. Do not assume it generalizes.
-_DC_SERIES_VERIFIED = {("SQLDB", "BC")}
+# DC-series verified working for ALL THREE SQL Database tiers, corrected
+# 2026-08 via systematic Azure pricing calculator dropdown enumeration
+# (browser-automated, not a one-off manual screenshot) after an earlier pass
+# wrongly concluded GP/HS didn't offer it at all - see _plan_sql_dc_series
+# for the full correction and evidence. Only Business Critical and Hyperscale
+# block Reservation specifically; General Purpose has a real, current
+# Reservation offering. SQL Managed Instance DC-series remains unchecked.
+_DC_SERIES_VERIFIED = {("SQLDB", "GP"), ("SQLDB", "BC"), ("SQLDB", "HS")}
+# (family, tier) combos where the calculator explicitly shows Reservations
+# as unavailable ("1/3 year reserved option is not available for your
+# instance selection") despite a matching Retail API catalog entry existing -
+# see _plan_sql_dc_series.
+_DC_SERIES_RESERVATION_BLOCKED = {("SQLDB", "BC"), ("SQLDB", "HS")}
 
 
 def _plan_sql_dc_series(tier: str, vcores: int, family: str, service_name: str) -> SkuQueryPlan:
     """DC-series (confidential-computing-capable hardware) - a genuinely
-    different pricing structure from Gen5, verified live 2026-08 against a
-    real user-supplied config (West US, Business Critical, 40 vCore):
+    different pricing structure from Gen5.
 
-    Consumption matches on skuName (e.g. "40 vCore"), NOT armSkuName - and
-    BOTH retailPrice and the nested savingsPlan.unitPrice are already
-    pre-scaled per the queried vCore count (verified across 10/20/40 vCore:
-    6.332/12.664/25.328 - exactly proportional to vCore count), the OPPOSITE
-    of Gen5 where savingsPlan stays flat regardless of tier. No multiplier
-    needed here.
+    CORRECTED 2026-08: an earlier pass through this function concluded
+    General Purpose and Hyperscale DC-series were real Azure product-catalog
+    absences (GP: "zero Consumption items exist"; HS: "structurally
+    incompatible armSkuName") and blocked both entirely. That was WRONG on
+    both counts - caught by systematically enumerating the real Azure
+    pricing calculator's dropdown options via browser automation (added
+    Azure SQL Database to the calculator, read every Service
+    Tier/Hardware Type combobox directly from the page DOM, cross-checked
+    each against the Retail API) instead of continuing to trust the
+    original, apparently too-narrow manual check. Real, verified picture for
+    all three tiers (East US, matching the calculator's own displayed
+    price/discount %, not just a raw catalog row):
 
-    Reservation: the Retail API DOES return one catalog entry (armSkuName
-    "SQL_Database_Single_Elastic_Pool_Business_Critical_Compute_DC-Series_
-    vCore") but it is DELIBERATELY not used. The real Azure pricing
-    calculator explicitly states "1 year reserved option is not available
-    for your instance selection" (and same for 3 year) for this exact
-    configuration, and that catalog entry's own effectiveStartDate
-    (2021-07-07) is over 4 years stale compared to a known-current Gen5 BC
-    Reservation entry queried the same way (2025-07-01) - strong evidence
-    it's a legacy listing Azure never removed from the API rather than
-    something actually purchasable today. Trusting a raw catalog price over
-    the calculator's explicit "not available" would be a real inaccuracy,
-    not just an unmapped gap - so reservation_match_value is left empty,
-    letting the RI fetch naturally and correctly resolve to no data.
+      - General Purpose: Consumption real ($0.304/vCore/hr, pre-scaled -
+        verified 1/2/4/8/10/12/...40 vCore all scale exactly proportionally),
+        Savings Plan real (~22-24% off), Reservation real and CURRENT -
+        calculator shows ~35%/~55% off as available, not grayed out.
+      - Business Critical: Consumption + Savings Plan real (~23-24% off),
+        Reservation explicitly unavailable per the calculator ("1/3 year
+        reserved option is not available for your instance selection").
+      - Hyperscale: Consumption + Savings Plan real (~20% off, flat
+        per-1-vCore meter like every other Hyperscale hardware type),
+        Reservation explicitly unavailable per the calculator (shown as
+        "(~0% discount)" / "not available for your instance selection").
 
-    Only verified for SQL Database Business Critical - General Purpose/
-    Hyperscale DC-series and SQL Managed Instance are NOT covered here."""
+    A real Retail API Reservation catalog ROW exists for ALL THREE tiers
+    (all sharing the identical effectiveStartDate of 2021-07-07, including
+    General Purpose's which IS genuinely purchasable) - this proved
+    effectiveStartDate staleness is NOT a reliable signal of purchasability
+    on its own, contrary to what the original Business Critical
+    investigation assumed. The calculator's own displayed availability is
+    the only trustworthy signal for this question; that's why
+    _DC_SERIES_RESERVATION_BLOCKED is keyed directly off calculator
+    observations, not catalog metadata.
+
+    Consumption matches on skuName - General Purpose/Business Critical use a
+    sized value (e.g. "40 vCore") with BOTH retailPrice and the nested
+    savingsPlan.unitPrice already pre-scaled per the queried vCore count (the
+    OPPOSITE of Gen5, where savingsPlan stays flat) - no multiplier needed.
+    Hyperscale instead uses the flat per-1-vCore pattern common to every
+    other Hyperscale hardware type in this file (skuName "1 vCore",
+    consumption_multiplier=vcores) - confirmed live, its Consumption/SP
+    prices at 1/1 vCore are byte-identical to what a naive sized-skuName
+    query would have wrongly assumed was tier-specific.
+
+    Reservation, where available (General Purpose only), ALSO matches on
+    skuName but with the flat, unsized value "vCore" (not "{vcores} vCore" -
+    confirmed live, GP's Reservation entries only ever carry a bare "vCore"
+    skuName regardless of term) plus reservation_multiplier=vcores - the
+    same match_field ("skuName") works for both sides because product_contains
+    already scopes the query to the correct tier's productName, so a generic
+    "vCore" skuName match can't accidentally cross-match another tier's rows.
+
+    SQL Managed Instance DC-series remains genuinely unchecked - not
+    verified either way."""
     if (family, tier) not in _DC_SERIES_VERIFIED:
-        return SkuQueryPlan(supported=False, reason=f"DC-series pricing is only verified for SQL Database Business Critical this session - '{family}' tier '{tier}' is not covered.")
+        return SkuQueryPlan(supported=False, reason=f"DC-series pricing is only verified for SQL Database (General Purpose/Business Critical/Hyperscale) this session - '{family}' tier '{tier}' is not covered.")
     tier_display = _SQL_TIER_DISPLAY_NAME.get(tier, tier)
+    reservation_unsupported_reason = None
+    reservation_match_value = "vCore"
+    if (family, tier) in _DC_SERIES_RESERVATION_BLOCKED:
+        reservation_match_value = ""
+        reservation_unsupported_reason = (
+            f"Azure's pricing calculator explicitly shows Reservations as unavailable for DC-series {tier_display} "
+            "('1/3 year reserved option is not available for your instance selection', shown as a ~0% discount) - "
+            "a matching Retail API catalog entry exists, but the calculator's own displayed availability is the "
+            "authoritative signal here, not the raw catalog row."
+        )
+    if tier == "HS":
+        return SkuQueryPlan(
+            supported=True, service_name=service_name, match_field="skuName",
+            consumption_match_value="1 vCore",
+            reservation_match_value=reservation_match_value,
+            consumption_multiplier=vcores,
+            reservation_multiplier=vcores,
+            product_contains=f"{tier_display} - Compute DC-Series",
+            reservation_unsupported_reason=reservation_unsupported_reason,
+        )
     return SkuQueryPlan(
         supported=True, service_name=service_name, match_field="skuName",
         consumption_match_value=f"{vcores} vCore",
-        reservation_match_value="",
+        reservation_match_value=reservation_match_value,
+        reservation_multiplier=vcores,
         product_contains=f"{tier_display} - Compute DC-Series",
-        reservation_unsupported_reason=(
-            "Azure's pricing calculator explicitly shows Reservations as unavailable for DC-series Business "
-            "Critical ('1/3 year reserved option is not available for your instance selection') - the Retail "
-            "API's catalog entry for this is a stale legacy listing (effectiveStartDate 2021-07-07 vs a "
-            "current Gen5 BC Reservation's 2025-07-01), not something actually purchasable today."
-        ),
+        reservation_unsupported_reason=reservation_unsupported_reason,
     )
 
 
-def _plan_sql_family(sku: str, family: str, service_name: str) -> SkuQueryPlan:
+def _plan_sql_family(sku: str, family: str, service_name: str, redundancy: str = "N/A") -> SkuQueryPlan:
     """sku expected as 'TIER_Generation_vCores' (e.g. 'GP_Gen5_4') - this
     app's existing seed-data convention, and also what Resource Graph's
     properties.currentSku.name + properties.currentSku.capacity are combined
@@ -256,7 +345,12 @@ def _plan_sql_family(sku: str, family: str, service_name: str) -> SkuQueryPlan:
     'Generation' of 'Serverless' (e.g. 'GP_Serverless_4') is a real, distinct
     billing model - routed to _plan_sql_serverless instead of the Provisioned
     path below. 'Generation' of 'DC-Series'/'DC' is likewise routed to
-    _plan_sql_dc_series."""
+    _plan_sql_dc_series. redundancy only matters for the unified-armSkuName
+    branch below (SQL MI Business Critical Premium-series splits Zone-
+    Redundant pricing into a separate armSkuName) - every other branch is
+    already redundancy-agnostic because Zone-Redundant pricing there is a
+    meterName-tagged variant of the SAME armSkuName, filtered downstream by
+    _filter_by_redundancy in commitment_pricing.py."""
     parts = (sku or "").split("_")
     if len(parts) < 3 or not parts[-1].isdigit():
         return SkuQueryPlan(supported=False, reason=f"SKU '{sku}' doesn't match either the expected TIER_Generation_vCores (Provisioned, e.g. GP_Gen5_4) or TIER_Serverless_vCores pattern - can't size a reservation without a known vCore count. If this is a DTU-purchase-model database (e.g. 'S0', 'P1', Basic/Standard/Premium tiers), that's a separate, currently-unmapped naming scheme - verified live that DTU-tier SQL Database has zero Savings Plan and zero Reservation entries in the Retail API at all, so there would be nothing to fetch regardless.")
@@ -285,33 +379,93 @@ def _plan_sql_family(sku: str, family: str, service_name: str) -> SkuQueryPlan:
     if not cons_prefix or not res_prefix:
         return SkuQueryPlan(supported=False, reason=f"No verified pricing pattern yet for {family} tier '{tier}' (only General Purpose/Business Critical/Hyperscale are mapped).")
 
+    gen_key = generation.upper().replace("-", "").replace("_", "")
+    # Premium-series / Premium-series-memory-optimized: a distinct Consumption
+    # pattern verified live 2026-08 for THREE independent (family, tier)
+    # combos - SQL Database Hyperscale, SQL Managed Instance Business
+    # Critical, AND SQL Managed Instance General Purpose (confirmed
+    # symmetric with BC: same unified armSkuName pattern, same separate
+    # "_ZR" split, Memory-Optimized variant confirmed too). Unlike Gen5
+    # (which needs a separate "..._1"-suffixed or "..._{vcores}"-suffixed
+    # armSkuName), these use the exact SAME flat armSkuName for BOTH
+    # Consumption and Reservation - no "_1" or "_N" suffix at all. Verified:
+    # SQLDB_HyperScale_Compute_Premium (0.18266 PAYG/vCore, 0.146128
+    # SP-1yr/vCore = 20% off); SQLMI_BC_Compute_Premium (0.352 PAYG/vCore,
+    # 0.2816 SP-1yr/vCore = 20% off, eastus2); SQLMI_GP_Compute_Premium
+    # (0.176 PAYG/vCore, 0.1408 SP-1yr/vCore = 20% off, eastus2, real
+    # Reservation 1yr $1002/3yr $2081) - all flat per-vCore on both sides
+    # needing the same consumption_multiplier treatment as Gen5 Hyperscale's
+    # "_1" pattern. NOT verified for SQL Managed Instance Hyperscale - see
+    # the dedicated SQLMI+HS branch below, which is Consumption-only and
+    # genuinely has no Premium-series confirmation either way; if a
+    # Hyperscale+Premium-series MI SKU is ever seen, it falls through to
+    # that branch's generic bare-armSkuName construction, which safely
+    # finds nothing rather than guessing wrong if the combination isn't real.
+    is_unified_armskuname_case = gen_key in _HYPERSCALE_UNIFIED_ARMSKUNAME and (
+        (family == "SQLDB" and tier in _HYPERSCALE_FLAT_CONSUMPTION)
+        or (family == "SQLMI" and tier in ("BC", "GP"))
+    )
+    if is_unified_armskuname_case:
+        unified_armskuname = f"{res_prefix}_{generation}"
+        is_zone_redundant = (redundancy or "").strip().lower() in ("zone redundant", "zoneredundant", "zr")
+        if is_zone_redundant and family == "SQLMI" and tier in ("BC", "GP"):
+            # SQL MI Business Critical AND General Purpose Premium-series
+            # both split Zone-Redundant pricing into a WHOLLY SEPARATE
+            # armSkuName (verified live 2026-08 for both tiers, e.g.
+            # "SQLMI_BC_Compute_Premium" / "SQLMI_GP_Compute_Premium" only
+            # return non-redundant "vCore" meterName items; the Zone-
+            # Redundant price lives under a separate "..._ZR" armSkuName
+            # instead - confirmed for Premium AND Premium_Memory_Optimized,
+            # both tiers), NOT a meterName-tagged variant of the base SKU
+            # the way Gen5 works. The downstream meterName-based
+            # _filter_by_redundancy in commitment_pricing.py can't find this
+            # - it never queries the "_ZR" SKU string at all - so the
+            # correct armSkuName has to be selected up front, here. SQL
+            # Database Hyperscale Premium-series was checked for the same
+            # pattern and does NOT have it (zero results for a
+            # "..._Premium_ZR" armSkuName, and the base armSkuName carries
+            # no Zone-Redundant meter either - Azure genuinely doesn't offer
+            # Zone-Redundant Hyperscale Premium-series), so this suffix is
+            # deliberately scoped to SQL Managed Instance only.
+            unified_armskuname = f"{unified_armskuname}_ZR"
+        return SkuQueryPlan(
+            supported=True, service_name=service_name, match_field="armSkuName",
+            consumption_match_value=unified_armskuname,
+            reservation_match_value=unified_armskuname,
+            reservation_multiplier=vcores,
+            consumption_multiplier=vcores,
+        )
+
+    if family == "SQLMI" and tier == "HS":
+        # SQL Managed Instance Hyperscale - genuinely exists (corrected
+        # 2026-08 after wrongly concluding it didn't, see the module-level
+        # comment above _SQL_RESERVATION_PREFIX), but has a real pricing
+        # profile that's DIFFERENT from every other SQL DB/MI tier, verified
+        # live across 3 independent regions: Consumption is a FLAT per-vCore
+        # rate, byte-for-byte IDENTICAL whether querying the bare unsized
+        # "SQLMI_HS_Compute_Gen5" armSkuName or ANY sized variant ("_8"
+        # through "_80") - unlike SQL Database's Hyperscale Gen5, which
+        # needs a specific "_1"-suffixed item (MI has NO "_1" variant at
+        # all, confirmed 0 results), the bare unsized name is queried
+        # directly here since it's confirmed to always carry the flat rate.
+        # ZERO Reservation entries exist anywhere for this tier (0 results,
+        # priceType eq 'Reservation') and ZERO Consumption items carry a
+        # savingsPlan array (0 of 87 checked) - MI Hyperscale is priceable
+        # for PAYG but genuinely not eligible for ANY commitment discount.
+        return SkuQueryPlan(
+            supported=True, service_name=service_name, match_field="armSkuName",
+            consumption_match_value=f"{cons_prefix}_{generation}",
+            reservation_match_value="",
+            consumption_multiplier=vcores,
+            reservation_unsupported_reason=(
+                "SQL Managed Instance Hyperscale has zero Reservation entries in the Retail Prices API - "
+                "verified live, Azure does not sell Reserved Capacity for this tier. Savings Plan is also "
+                "unavailable (zero Consumption items carry any savingsPlan pricing) - Hyperscale is a real, "
+                "priceable MI tier, but genuinely not eligible for any commitment discount."
+            ),
+        )
+
     if tier in _HYPERSCALE_FLAT_CONSUMPTION:
-        gen_key = generation.upper().replace("-", "").replace("_", "")
-        if gen_key in _HYPERSCALE_UNIFIED_ARMSKUNAME:
-            # Premium-series / Premium-series-memory-optimized: a THIRD
-            # distinct Hyperscale Consumption pattern, verified live 2026-08
-            # (real user-supplied config investigation). Unlike Gen5 (which
-            # needs a separate "HS_..._1" Consumption armSkuName), these use
-            # the exact SAME flat armSkuName for BOTH Consumption and
-            # Reservation - no "_1" or "_N" suffix at all. Verified:
-            # SQLDB_HyperScale_Compute_Premium (0.18266 PAYG/vCore,
-            # 0.146128 SP-1yr/vCore = 20% off) and
-            # SQLDB_HyperScale_Compute_Premium_Memory_Optimized (0.255724
-            # PAYG/vCore, 0.2045792 SP-1yr/vCore = 20% off), both flat
-            # per-vCore on both sides needing the same consumption_multiplier
-            # treatment as Gen5's "_1" pattern. An earlier session note
-            # claimed Consumption/Savings Plan "does NOT work" for these
-            # hardware types - that was based on an incomplete check (only
-            # tried the Gen5-style "_1"-suffixed guess); corrected here now
-            # that the real pattern has been found and verified.
-            unified_armskuname = f"{res_prefix}_{generation}"
-            return SkuQueryPlan(
-                supported=True, service_name=service_name, match_field="armSkuName",
-                consumption_match_value=unified_armskuname,
-                reservation_match_value=unified_armskuname,
-                reservation_multiplier=vcores,
-                consumption_multiplier=vcores,
-            )
         # Verified live: only a flat "_1" (1 vCore) Consumption meter exists
         # for Hyperscale Gen5 Provisioned - no per-vCore-count SKU the way
         # GP/BC have. Since this queries that flat "_1" item directly,
@@ -366,12 +520,12 @@ def _plan_sql_serverless(tier: str, vcores: int, family: str, service_name: str)
     )
 
 
-def _plan_sql_database(sku: str) -> SkuQueryPlan:
-    return _plan_sql_family(sku, "SQLDB", "SQL Database")
+def _plan_sql_database(sku: str, redundancy: str = "N/A") -> SkuQueryPlan:
+    return _plan_sql_family(sku, "SQLDB", "SQL Database", redundancy)
 
 
-def _plan_sql_managed_instance(sku: str) -> SkuQueryPlan:
-    return _plan_sql_family(sku, "SQLMI", "SQL Managed Instance")
+def _plan_sql_managed_instance(sku: str, redundancy: str = "N/A") -> SkuQueryPlan:
+    return _plan_sql_family(sku, "SQLMI", "SQL Managed Instance", redundancy)
 
 
 # ── Azure Synapse Analytics ─────────────────────────────────────────────────
@@ -495,21 +649,44 @@ _PLAN_RESOLVERS = {
         "e.g. P30) but nothing live currently reaches it. Note also: Azure sells Disk reservations in 1-Year "
         "and 10-Year terms, not the 1yr/3yr this app models - 3yr will correctly show as unavailable."
     ),
+    "Azure SQL Managed Instance Pool": _plan_deferred(
+        "SQL Managed Instance Pools are now captured by live Resource Graph ingestion (azure_conn/connector.py, "
+        "2026-08) and DO have real Reservation/Savings Plan discounts per the Azure pricing calculator "
+        "(~35%/~55% Reservation, ~23% Savings Plan confirmed live for a General Purpose/Premium-series/80 "
+        "vCore/Norway West test) - this is a real, priceable service, not a policy gap like PostgreSQL/MySQL "
+        "above. But it does NOT bill via the same per-vCore meter as a standalone Managed Instance: the "
+        "calculator's total for that exact config ($32,003.20/mo) doesn't match a standalone instance's "
+        "per-vCore rate scaled to the same vCore count (off by roughly 3x), and no confidently-matching Retail "
+        "Prices API meter was found after checking several plausible candidates (the flat per-vCore meter, a "
+        "sized-skuName variant, the Gen5 hardware pattern - none landed on the calculator's real number). "
+        "Deliberately left unpriced rather than guessing a rate that could be wrong by a large margin - needs "
+        "either a live tenant's actual billed rate to reverse-engineer against, or deeper Azure pricing "
+        "documentation than the public Retail API surfaces. Eligibility (ri_eligibility.py/sp_eligibility.py) "
+        "correctly still marks this eligible, matching the priceability-vs-eligibility split used for "
+        "Fsv2-series SQL Database."
+    ),
 }
 
 
-def resolve_sku_query(resource_type: str, sku: str) -> SkuQueryPlan:
+_REDUNDANCY_AWARE_RESOLVERS = {_plan_sql_database, _plan_sql_managed_instance}
+
+
+def resolve_sku_query(resource_type: str, sku: str, redundancy: str = "N/A") -> SkuQueryPlan:
     """Entry point: given this app's Resource Type and SKU, returns how to
     query the Retail Prices API for real SP/RI pricing, or an explicit
     'unsupported' plan with a reason. Falls back to the old direct-armSkuName
     strategy for any resource type not explicitly researched yet, so newly
     added resource types degrade to "probably wrong" rather than "crashes" -
     but every type this app currently tracks eligibility rules for for RI/SP
-    is listed above."""
+    is listed above. redundancy only affects SQL Database/Elastic Pool/
+    Managed Instance resolvers (see _plan_sql_family) - every other resolver
+    ignores it, since no other service's armSkuName splits by redundancy."""
     resolver = _PLAN_RESOLVERS.get(resource_type)
     if resolver is None:
         return SkuQueryPlan(
             supported=True, service_name=None, match_field="armSkuName",
             consumption_match_value=sku, reservation_match_value=sku,
         )
+    if resolver in _REDUNDANCY_AWARE_RESOLVERS:
+        return resolver(sku, redundancy)
     return resolver(sku)

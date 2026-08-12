@@ -122,6 +122,26 @@ DATABASE_INVENTORY = [
      "payg_hourly_usd": 0.434732, "avg_daily_running_hours": 24,
      "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
 
+    # Azure SQL Database — Hyperscale, Premium-series, 4 vCores, WITH 1 High
+    # Availability secondary replica. Exercises NEW billing dimension
+    # (2026-08): each HA replica bills at the SAME per-vCore rate as the
+    # primary Compute meter (verified live against the real Azure pricing
+    # calculator - a database with 1 replica costs exactly 2x one with 0),
+    # confirmed via the real ARM property properties.highAvailabilityReplicaCount
+    # (0-4, Hyperscale/Business Critical only - see analysis/commitment_economics.py's
+    # _hyperscale_replica_multiplier). payg_hourly_usd is the real
+    # live-fetched PRIMARY-only rate ($0.73064/hr, eastus) - the multiplier
+    # is applied on top of this by the pricing pipeline, not baked in here,
+    # so this row also proves the multiplier logic is live and correct
+    # (not silently a no-op because it was pre-multiplied in the seed data).
+    {"resource_id": "SQLDB-Prod-03", "resource_name": "prod-catalog-sqldb-hs-ha",
+     "resource_type": "Azure SQL Database",
+     "resource_state": "Running",
+     "region": "eastus", "os": "N/A", "sku": "HS_Premium_4",
+     "redundancy": "Locally Redundant", "ha_replica_count": 1,
+     "payg_hourly_usd": 0.73064, "avg_daily_running_hours": 24,
+     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+
     # Azure SQL Managed Instance — General Purpose, 8 vCores
     # RI covers: compute costs only. Not: software license, networking, storage.
     {"resource_id": "SQLMI-Prod-01", "resource_name": "prod-reporting-sqlmi",
@@ -130,6 +150,21 @@ DATABASE_INVENTORY = [
      "region": "australiaeast", "os": "N/A", "sku": "GP_Gen5_8",
      "redundancy": "Locally Redundant",
      "payg_hourly_usd": 1.008, "avg_daily_running_hours": 24,
+     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+
+    # Azure SQL Managed Instance — Business Critical, Premium-series, 4 vCores,
+    # Zone Redundant. Exercises NEW hardware-generation support (2026-08):
+    # Premium-series splits Zone-Redundant pricing into a genuinely separate
+    # armSkuName ("SQLMI_BC_Compute_Premium_ZR", not a meterName-tagged
+    # variant of the base SKU the way Gen5 works) - see pricing/sku_mapping.py's
+    # _plan_sql_family. payg_hourly_usd is the real live-fetched eastus2 rate
+    # for this exact SKU+redundancy combo: 0.211 $/vCore/hr x 4 vCores.
+    {"resource_id": "SQLMI-Prod-02", "resource_name": "prod-finance-sqlmi-premium",
+     "resource_type": "Azure SQL Managed Instance",
+     "resource_state": "Running",
+     "region": "eastus2", "os": "N/A", "sku": "BC_Premium_4",
+     "redundancy": "Zone Redundant",
+     "payg_hourly_usd": 0.844, "avg_daily_running_hours": 24,
      "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
 
     # Azure Database for PostgreSQL — General Purpose, 4 vCores

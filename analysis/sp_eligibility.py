@@ -94,6 +94,18 @@ def _sql_db_sp(sku: str) -> Tuple[bool, str]:
     return True, "Azure SQL Database (vCore purchasing model) is eligible for Savings Plan for Databases at any compute tier, including Serverless and Hyperscale."
 
 
+def _sql_mi_sp(sku: str) -> Tuple[bool, str]:
+    # SQL Managed Instance Hyperscale is a real, priceable tier (see
+    # ri_eligibility.py's _sql_mi_eligibility for the 2026-08 correction),
+    # but genuinely has no Savings Plan offering either - verified live,
+    # zero of 87 Consumption items checked carry any savingsPlan pricing
+    # data for this tier.
+    s = (sku or "").upper()
+    if s and s != "N/A" and any(p in ("HS", "HYPERSCALE") for p in s.split("_")):
+        return False, "SQL Managed Instance Hyperscale has no Savings Plan offering - verified live against the Retail Prices API (zero Consumption items carry any savingsPlan pricing for this tier, though PAYG pricing is real and available)."
+    return True, "Eligible for Savings Plan for Databases (compute cost)."
+
+
 def _flexible_server_sp(sku: str) -> Tuple[bool, str]:
     # Our resource_type mapping doesn't currently distinguish Single Server
     # from Flexible Server (azure_conn/connector.py maps both ARM types to the
@@ -115,7 +127,10 @@ _COMPUTE_SP_RULES = {
 _DATABASE_SP_RULES = {
     "Azure SQL Database":            _sql_db_sp,
     "Azure SQL Elastic Pool":        _sql_db_sp,   # same vCore/DTU rule applies identically - see ri_eligibility.py
-    "Azure SQL Managed Instance":    lambda sku: (True, "Eligible for Savings Plan for Databases (compute cost)."),
+    "Azure SQL Managed Instance":    _sql_mi_sp,
+    "Azure SQL Managed Instance Pool": _sql_mi_sp,   # same eligibility rule - see ri_eligibility.py's matching
+                                                       # entry and pricing/sku_mapping.py for why this type is
+                                                       # eligible but deliberately left unpriced for now.
     "Azure Database for MySQL":      _flexible_server_sp,
     "Azure Database for PostgreSQL": _flexible_server_sp,
     "Azure Cosmos DB":               _cosmos_db_sp,

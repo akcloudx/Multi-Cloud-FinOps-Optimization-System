@@ -17,6 +17,33 @@ TERMS = ["1yr", "3yr"]
 TERM_LABELS = {"1yr": "1-Year", "3yr": "3-Year"}
 
 
+def _hyperscale_replica_multiplier(resource_type: str, sku: str, ha_replicas) -> float:
+    """Azure SQL Database Hyperscale (Single Database only, NOT Elastic Pool
+    - the real ARM property highAvailabilityReplicaCount doesn't apply
+    within a Hyperscale elastic pool) bills each High Availability secondary
+    replica at the SAME per-vCore rate as the primary Compute meter -
+    verified live 2026-08 against the real Azure pricing calculator (a
+    database with 1 replica costs exactly 2x a database with 0), and
+    confirmed no distinct 'replica' meter exists in the Retail Prices API
+    (it's a quantity multiplier on the existing rate, not a different
+    price). Returns 1.0 (no-op) for anything not Hyperscale Single Database,
+    since only that combination's billing relationship for this property
+    was verified - Business Critical also exposes this same ARM property,
+    but its rate relationship (BC's base price already includes built-in
+    HA architecture) wasn't checked, so it's deliberately left at 1.0
+    rather than guessed."""
+    if resource_type != "Azure SQL Database":
+        return 1.0
+    tier = (sku or "").split("_")[0].upper()
+    if tier != "HS":
+        return 1.0
+    try:
+        replicas = int(ha_replicas) if ha_replicas is not None and str(ha_replicas) != "nan" else 0
+    except (TypeError, ValueError):
+        replicas = 0
+    return 1.0 + max(0, replicas)
+
+
 def _lookup_rate(prices_df: pd.DataFrame, instrument: str, term: str, resource_type: str, region: str, sku: str, os_: str, redundancy: str = "N/A"):
     if prices_df is None or prices_df.empty:
         return None
@@ -78,12 +105,16 @@ def savings_plan_term_comparison(pool_df: pd.DataFrame, prices_df: pd.DataFrame)
         priced = 0
         for _, r in pool_df.iterrows():
             redundancy = r["Redundancy"] if "Redundancy" in r.index else "N/A"
+            replica_mult = _hyperscale_replica_multiplier(
+                r["Resource Type"], r["SKU"], r["HA Replicas"] if "HA Replicas" in r.index else 0
+            )
             cached_payg = _lookup_payg(prices_df, r["Resource Type"], r["Region"], r["SKU"], r["OS"], redundancy)
             payg = cached_payg if cached_payg is not None else float(r["PAYG Hourly Cost USD"])
+            payg *= replica_mult
             payg_total += payg
             rate = _lookup_rate(prices_df, "SavingsPlan", term, r["Resource Type"], r["Region"], r["SKU"], r["OS"], redundancy)
             if rate is not None:
-                committed_total += rate
+                committed_total += rate * replica_mult
                 priced += 1
             else:
                 committed_total += payg

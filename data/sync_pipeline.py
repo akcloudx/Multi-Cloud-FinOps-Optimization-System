@@ -94,6 +94,7 @@ def run_ingestion_pipeline(provider: str = "Azure", creds=None, force_mock: bool
                         os=r["OS"],
                         sku=r["SKU"],
                         redundancy=r.get("Redundancy", "N/A") or "N/A",
+                        ha_replica_count=r.get("HA Replicas", 0) or 0,
                         payg_hourly_usd=r.get("PAYG Hourly Cost USD", 0.0),
                         avg_daily_running_hours=r.get("Avg Daily Running Hours", 24),
                         subscription=r.get("Subscription", ""),

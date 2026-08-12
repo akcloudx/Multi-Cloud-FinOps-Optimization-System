@@ -35,19 +35,38 @@ def _sql_db_eligibility(sku: str) -> Tuple[bool, str]:
     parts = s.split("_")
     if "SERVERLESS" in s or "S" in parts:
         return False, "Serverless compute tier is not eligible for reserved capacity - only the vCore Provisioned compute tier qualifies."
-    # DC-series (confidential-computing hardware) Reservations are excluded
-    # even for otherwise-eligible tiers - verified live 2026-08 (real
-    # calculator config, Business Critical/DC-series/40 vCore): the Azure
-    # pricing calculator explicitly shows "1/3 year reserved option is not
-    # available for your instance selection" - not just unmapped, genuinely
-    # not offered. See pricing/sku_mapping.py's _plan_sql_dc_series for the
-    # full evidence (a matching Retail API catalog entry exists but is a
-    # stale 2021 legacy listing, not something actually purchasable today).
-    if any(p.replace("-", "") in ("DC", "DCSERIES") for p in parts):
-        return False, "DC-series hardware is not eligible for Reserved Capacity - Azure's own pricing calculator explicitly shows this as unavailable, confirmed live."
+    # DC-series (confidential-computing hardware) Reservation eligibility is
+    # TIER-SPECIFIC, not a blanket exclusion - corrected 2026-08 after
+    # systematically re-checking every tier via the real Azure pricing
+    # calculator (browser-automated dropdown enumeration, not another manual
+    # screenshot): General Purpose + DC-series genuinely HAS a current
+    # Reservation offering (calculator shows ~35%/~55% off as available);
+    # only Business Critical and Hyperscale + DC-series show "1/3 year
+    # reserved option is not available for your instance selection". An
+    # earlier pass here wrongly blocked ALL DC-series regardless of tier,
+    # based only on the Business Critical case. See pricing/sku_mapping.py's
+    # _plan_sql_dc_series for the full evidence and correction.
+    if any(p.replace("-", "") in ("DC", "DCSERIES") for p in parts) and any(p in ("BC", "HS") for p in parts):
+        return False, "DC-series hardware is not eligible for Reserved Capacity for this tier - Azure's own pricing calculator explicitly shows this as unavailable for Business Critical/Hyperscale (General Purpose + DC-series IS eligible), confirmed live."
     if any(p in ("GP", "BC", "HS") for p in parts):
         return True, "vCore Provisioned compute tier - eligible for reserved capacity."
     return False, "DTU-based purchasing model is not eligible for reserved capacity - only the vCore purchasing model qualifies."
+
+
+def _sql_mi_eligibility(sku: str) -> Tuple[bool, str]:
+    # SQL Managed Instance Hyperscale IS a real tier (corrected 2026-08 after
+    # an earlier pass wrongly concluded it wasn't, caused by a case-sensitive
+    # search bug - see pricing/sku_mapping.py's module-level comment above
+    # _SQL_RESERVATION_PREFIX for the full correction), but it genuinely has
+    # no Reserved Capacity offering - verified live, zero Reservation entries
+    # exist anywhere in the Retail Prices API for this tier. General Purpose
+    # and Business Critical remain fully eligible.
+    s = (sku or "").upper()
+    if not s or s == "N/A":
+        return True, "Assumed vCore-based General Purpose/Business Critical (SKU not captured for this resource)."
+    if any(p in ("HS", "HYPERSCALE") for p in s.split("_")):
+        return False, "SQL Managed Instance Hyperscale has no Reserved Capacity offering - verified live against the Retail Prices API (zero Reservation entries for this tier, though Consumption/PAYG pricing is real and available)."
+    return True, "SQL Managed Instance is always vCore-based - reservations cover compute cost (not storage)."
 
 
 def _app_service_eligibility(sku: str) -> Tuple[bool, str]:
@@ -111,7 +130,12 @@ _RULES = {
                                                               # verified live Azure prices vCore pools against
                                                               # the same Reservation catalog entries as Single
                                                               # Database (see pricing/sku_mapping.py).
-    "Azure SQL Managed Instance":    lambda sku: (True, "SQL Managed Instance is always vCore-based - reservations cover compute cost (not storage)."),
+    "Azure SQL Managed Instance":    _sql_mi_eligibility,
+    "Azure SQL Managed Instance Pool": _sql_mi_eligibility,   # same vCore-tier eligibility rule - eligibility
+                                                                # (can Azure sell this) and priceability (can this
+                                                                # app compute a rate) are different questions -
+                                                                # see pricing/sku_mapping.py, where this type is
+                                                                # deliberately left unpriced despite being eligible.
     "Azure Database for MySQL":      lambda sku: (True, "Flexible Server is eligible for reserved capacity. (Legacy Single Server no longer accepts new reservations.)"),
     "Azure Database for PostgreSQL": lambda sku: (True, "Flexible Server is eligible for reserved capacity. (Legacy Single Server no longer accepts new reservations.)"),
     "Azure Cosmos DB":               lambda sku: (True, "Assumed provisioned throughput (capacity mode not captured for this resource) - Serverless Cosmos DB accounts are not eligible."),
@@ -179,6 +203,7 @@ def check_eligibility(resource_type: str, sku: str) -> Tuple[bool, str]:
 _CAPACITY_POOLED_TYPES = {
     "Azure Cosmos DB", "Azure Databricks", "Azure Synapse Analytics",
     "Azure SQL Database", "Azure SQL Managed Instance", "Azure SQL Elastic Pool",
+    "Azure SQL Managed Instance Pool",
 }
 _UNMEASURABLE_TYPES = {"Azure Blob Storage", "Azure Files"}
 

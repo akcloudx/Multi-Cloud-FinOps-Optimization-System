@@ -237,6 +237,7 @@ Resources
     'microsoft.sql/servers/databases',
     'microsoft.sql/servers/elasticpools',
     'microsoft.sql/managedinstances',
+    'microsoft.sql/instancepools',
     'microsoft.dbformysql/servers',
     'microsoft.dbformysql/flexibleservers',
     'microsoft.dbforpostgresql/servers',
@@ -252,6 +253,13 @@ Resources
 // it's not billable and not user-managed, so exclude it from inventory.
 // https://learn.microsoft.com/en-us/azure/azure-sql/database/resource-graph-samples
 | where not(type == 'microsoft.sql/servers/databases' and name == 'master')
+// A Managed Instance placed inside an Instance Pool (properties.instancePoolId
+// non-empty, per the real ARM schema) draws its compute from the pool's
+// already-provisioned capacity - it is NOT separately billed the way a
+// standalone Single Instance is. Excluding it here (the pool resource itself,
+// captured separately below via microsoft.sql/instancepools, is what's
+// actually billed) avoids double-counting the same compute cost twice.
+| where not(type == 'microsoft.sql/managedinstances' and isnotempty(tostring(properties.instancePoolId)))
 | extend
     powerState = tostring(properties.extended.instanceView.powerState.displayStatus),
     vmSize     = tostring(properties.hardwareProfile.vmSize),
@@ -259,8 +267,17 @@ Resources
     sqlSkuName = tostring(properties.currentSku.name),
     sqlSkuCapacity = tostring(properties.currentSku.capacity),
     zoneRedundant = tobool(properties.zoneRedundant),
+    // Real ARM property (verified against Microsoft.Sql/servers/databases
+    // template docs, 2026-08): count of High Availability secondary
+    // replicas, 0-4, applies to Business Critical AND Hyperscale editions.
+    // Only Hyperscale's billing relationship for this was verified live
+    // this session (each replica doubles-or-more the compute cost, same
+    // per-vCore rate as the primary meter) - see pricing/commitment_pricing.py,
+    // which deliberately only multiplies cost by this for Hyperscale.
+    haReplicaCount = toint(properties.highAvailabilityReplicaCount),
     poolSkuName = tostring(sku.name),
     poolSkuCapacity = tostring(sku.capacity),
+    instancePoolVCores = tostring(properties.vCores),
     topSku     = tostring(sku.name),
     redisSkuName  = tostring(properties.sku.name),
     redisFamily   = tostring(properties.sku.family),
@@ -293,6 +310,28 @@ Resources
             strcat(poolSkuName, "_", poolSkuCapacity),
         ""
     ),
+    // Instance Pools report SKU at the SAME top-level sku.name path as
+    // Elastic Pool (e.g. "GP_Gen5" - already matches this app's TIER_Gen
+    // prefix convention with zero transformation), but the vCore count is a
+    // SEPARATE top-level properties.vCores field, NOT sku.capacity (the real
+    // ARM schema example never sets sku.capacity for an instance pool at
+    // all - confirmed against Microsoft's own template reference, 2026-08).
+    // NOTE: pricing/sku_mapping.py currently marks this SKU shape
+    // unsupported (supported=False) even though it parses correctly -
+    // verified live that Instance Pools do NOT bill via the same per-vCore
+    // meter as a standalone Managed Instance (the real Azure pricing
+    // calculator shows a materially different total for the same vCore
+    // count/hardware/region), and no confidently-matching Retail Prices API
+    // meter was found after checking several plausible candidates. Capturing
+    // the real SKU string here now means a live tenant's Instance Pools are
+    // at least visible in inventory (not silently dropped) and won't
+    // double-count against pooled Managed Instances (see the where-clause
+    // above), even before the pricing side is solved.
+    instancePoolSku = case(
+        type == 'microsoft.sql/instancepools' and isnotempty(poolSkuName) and isnotempty(instancePoolVCores),
+            strcat(poolSkuName, "_", instancePoolVCores),
+        ""
+    ),
     // Azure Cache for Redis has no top-level sku.name - its tier/size is
     // properties.sku.name ("Basic"/"Standard"/"Premium") + .family ("C"/"P")
     // + .capacity (an int), combined here into "{family}{capacity}_{tier}"
@@ -308,6 +347,7 @@ Resources
         isnotempty(vmSize), vmSize,
         isnotempty(sqlSku), sqlSku,
         isnotempty(poolSku), poolSku,
+        isnotempty(instancePoolSku), instancePoolSku,
         isnotempty(redisSku), redisSku,
         isnotempty(topSku), topSku,
         'N/A'
@@ -324,10 +364,17 @@ Resources
         (type == 'microsoft.sql/servers/databases' or type == 'microsoft.sql/servers/elasticpools') and zoneRedundant == true, 'Zone Redundant',
         (type == 'microsoft.sql/servers/databases' or type == 'microsoft.sql/servers/elasticpools') and zoneRedundant == false, 'Locally Redundant',
         'N/A'
+    ),
+    // Gated to standalone databases only - Hyperscale within an Elastic Pool
+    // does not support this property at all (confirmed in Microsoft's own
+    // docs), and non-SQL-DB types never populate it.
+    resolvedHaReplicas = case(
+        type == 'microsoft.sql/servers/databases' and isnotnull(haReplicaCount), haReplicaCount,
+        0
     )
 | project
     id, name, type, location, subscriptionId,
-    powerState, resolvedSku, osType, resolvedRedundancy,
+    powerState, resolvedSku, osType, resolvedRedundancy, resolvedHaReplicas,
     resourceGroup, tags
 | order by type asc, name asc
 """
@@ -369,6 +416,7 @@ def fetch_live_inventory(creds: AzureCredentials) -> pd.DataFrame:
             "OS":                      r.get("osType", "N/A") or "N/A",
             "SKU":                     r.get("resolvedSku", "N/A") or "N/A",
             "Redundancy":              r.get("resolvedRedundancy", "N/A") or "N/A",
+            "HA Replicas":             r.get("resolvedHaReplicas", 0) or 0,
             "PAYG Hourly Cost USD":    0.0,   # populated by pricing module
             "Avg Daily Running Hours": 24,    # default; update via Activity Log
             "Subscription":            r.get("subscriptionId", ""),
@@ -384,6 +432,7 @@ def _map_resource_type(azure_type: str) -> str:
         "microsoft.sql/servers/databases":              "Azure SQL Database",
         "microsoft.sql/servers/elasticpools":           "Azure SQL Elastic Pool",
         "microsoft.sql/managedinstances":               "Azure SQL Managed Instance",
+        "microsoft.sql/instancepools":                  "Azure SQL Managed Instance Pool",
         "microsoft.dbformysql/servers":                 "Azure Database for MySQL",
         "microsoft.dbformysql/flexibleservers":         "Azure Database for MySQL",
         "microsoft.dbforpostgresql/servers":            "Azure Database for PostgreSQL",

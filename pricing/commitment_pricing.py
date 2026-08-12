@@ -205,7 +205,7 @@ def _fetch_azure_sp_rates(resource_type: str, sku: str, region: str, os_: str, r
     if not sku or sku == "N/A" or not region:
         return result
 
-    plan = resolve_sku_query(resource_type, sku)
+    plan = resolve_sku_query(resource_type, sku, redundancy)
     if not plan.supported:
         return result
 
@@ -265,7 +265,7 @@ def _fetch_azure_ri_rates(resource_type: str, sku: str, region: str, os_: str, r
     if not sku or sku == "N/A" or not region:
         return result
 
-    plan = resolve_sku_query(resource_type, sku)
+    plan = resolve_sku_query(resource_type, sku, redundancy)
     if not plan.supported or plan.reservation_unsupported_reason:
         return result
 
