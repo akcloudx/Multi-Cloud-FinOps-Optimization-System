@@ -118,8 +118,35 @@ def _cosmos_db_sp(sku: str) -> Tuple[bool, str]:
     return True, "Assumed provisioned throughput (capacity mode not captured for this resource) - Serverless Cosmos DB usage is not eligible for Savings Plan for Databases."
 
 
+_VM_FAMILY_RE = re.compile(r"^(?:Basic|Standard)_([A-Za-z]+)")
+# Families confirmed live 2026-08 to carry ZERO savingsPlan entries anywhere
+# in the Retail Prices API - same full-catalog scan as ri_eligibility.py's
+# _VM_FAMILIES_NO_RI (~12,000 rows, all VM Consumption items in eastus).
+# Basic-tier A-series specifically (Standard-tier A-series retains some
+# Savings Plan coverage - confirmed live, 7 of 113 Standard_A rows carry a
+# savingsPlan, only Basic_A had literally zero). G/GS: same legacy series as
+# the RI exclusion. NM/PB: newer specialized series with no Savings Plan
+# found at all (NM does have some real Reservation rows though - RI and SP
+# eligibility genuinely differ for this one family, which is why they're
+# tracked as separate sets rather than one shared list).
+_VM_FAMILIES_NO_SP_STANDARD = {"G", "GS", "NM", "PB"}
+
+
+def _vm_sp(sku: str) -> Tuple[bool, str]:
+    s = (sku or "").strip()
+    if not s or s == "N/A":
+        return True, "Assumed a mainstream VM series with Savings Plan for Compute support (SKU not captured for this resource)."
+    m = _VM_FAMILY_RE.match(s)
+    family = m.group(1) if m else ""
+    if s.upper().startswith("BASIC_") and family == "A":
+        return False, "Basic-tier A-series VMs have no Savings Plan offering - verified live against the full Retail Prices API catalog (zero savingsPlan entries for Basic_A, though Standard-tier A-series retains some coverage)."
+    if family in _VM_FAMILIES_NO_SP_STANDARD:
+        return False, f"'{family}'-series VMs have no Savings Plan for Compute offering - verified live against the full Retail Prices API catalog (zero savingsPlan entries for this family)."
+    return True, "Savings Plan for Compute is available for this VM series."
+
+
 _COMPUTE_SP_RULES = {
-    "Compute":       lambda sku: (True, "All Azure VM series are eligible for Savings Plan for Compute."),
+    "Compute":       _vm_sp,
     "App Service":   _app_service_or_functions_sp,
     "Azure Functions": _app_service_or_functions_sp,
 }

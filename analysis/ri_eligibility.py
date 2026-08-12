@@ -19,9 +19,37 @@ import re
 from typing import Tuple
 
 
+_VM_FAMILY_RE = re.compile(r"^(?:Basic|Standard)_([A-Za-z]+)")
+# Families confirmed live 2026-08 to have ZERO Reservation entries anywhere
+# in the Retail Prices API - a full-catalog scan (all VM Consumption AND
+# Reservation items in eastus, ~12,000 rows across both price types), not a
+# narrow single-query guess (see the DC-series/MI-Hyperscale correction
+# earlier this session for why that distinction matters). A: legacy
+# entry-level series (both Basic_A and Standard_A tiers - spot-checked
+# Basic_A1/G2 directly: current effectiveStartDate, i.e. still an active
+# current meter, genuinely just never had RI enabled). G/GS: legacy 2015-era
+# series, superseded by newer families, no RI ever added. DS: legacy
+# Premium-Storage-suffix naming (mostly superseded by newer Dsv5-style
+# capacity-suffix naming, which DOES have RI - this only affects the old
+# "DS2_v2"-style names specifically). NP: FPGA-accelerated series, no RI.
+# H (base, NOT its HB/HC/HX variants - those DO have RI): older H-series
+# generation. HC: has real Consumption + Savings Plan, but no Reservation.
+# PB: newer AMD-based series, neither RI nor SP found.
+_VM_FAMILIES_NO_RI = {"A", "G", "GS", "DS", "NP", "H", "HC", "PB"}
+
+
 def _vm_eligibility(sku: str) -> Tuple[bool, str]:
     # https://learn.microsoft.com/en-us/azure/virtual-machines/reserved-vm-instance-size-flexibility
-    return True, "All Azure VM series support Reserved VM Instances (discount applies within the VM's instance size flexibility group)."
+    # NOT a blanket "all VM series" claim (that was the old, wrong version of
+    # this function) - see _VM_FAMILIES_NO_RI above for the live evidence.
+    s = (sku or "").strip()
+    if not s or s == "N/A":
+        return True, "Assumed a mainstream VM series with Reserved Instance support (SKU not captured for this resource)."
+    m = _VM_FAMILY_RE.match(s)
+    family = m.group(1) if m else ""
+    if family in _VM_FAMILIES_NO_RI:
+        return False, f"'{family}'-series VMs have no Reserved Instance offering - verified live against the full Retail Prices API catalog (zero Reservation entries for this family, confirmed as a current/active series, not a stale listing)."
+    return True, "Reserved VM Instances are available for this VM series (discount applies within the VM's instance size flexibility group)."
 
 
 def _sql_db_eligibility(sku: str) -> Tuple[bool, str]:
