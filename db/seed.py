@@ -104,7 +104,22 @@ DATABASE_INVENTORY = [
      "resource_type": "Azure SQL Database",
      "resource_state": "Running",
      "region": "australiaeast", "os": "N/A", "sku": "GP_Gen5_4",
+     "redundancy": "Locally Redundant",
      "payg_hourly_usd": 0.526, "avg_daily_running_hours": 24,
+     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+
+    # Azure SQL Database — same SKU/region as SQLDB-Prod-01 above, but Zone
+    # Redundant - deliberately included to prove the redundancy-aware
+    # pricing pipeline end-to-end. payg_hourly_usd is the REAL live-fetched
+    # Zone-Redundant rate ($0.434732/hr, verified 2026-08), genuinely
+    # CHEAPER than the Standard variant's $0.724552/hr for this SKU - not a
+    # typo, Zone-Redundant meters aren't simply "Standard + surcharge".
+    {"resource_id": "SQLDB-Prod-02", "resource_name": "prod-payments-sqldb-zr",
+     "resource_type": "Azure SQL Database",
+     "resource_state": "Running",
+     "region": "australiaeast", "os": "N/A", "sku": "GP_Gen5_4",
+     "redundancy": "Zone Redundant",
+     "payg_hourly_usd": 0.434732, "avg_daily_running_hours": 24,
      "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
 
     # Azure SQL Managed Instance — General Purpose, 8 vCores
@@ -113,6 +128,7 @@ DATABASE_INVENTORY = [
      "resource_type": "Azure SQL Managed Instance",
      "resource_state": "Running",
      "region": "australiaeast", "os": "N/A", "sku": "GP_Gen5_8",
+     "redundancy": "Locally Redundant",
      "payg_hourly_usd": 1.008, "avg_daily_running_hours": 24,
      "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
 
@@ -148,6 +164,7 @@ DATABASE_INVENTORY = [
      "resource_type": "Azure SQL Database",
      "resource_state": "Running",
      "region": "australiaeast", "os": "N/A", "sku": "GP_Serverless_4",
+     "redundancy": "Locally Redundant",
      "payg_hourly_usd": 0.263, "avg_daily_running_hours": 10,
      "subscription": "sub-dev-002", "provider": "Azure", "is_orphaned": False},
 
@@ -161,6 +178,7 @@ DATABASE_INVENTORY = [
      "resource_type": "Azure SQL Elastic Pool",
      "resource_state": "Running",
      "region": "australiaeast", "os": "N/A", "sku": "GP_Gen5_8",
+     "redundancy": "Locally Redundant",
      "payg_hourly_usd": 1.449104, "avg_daily_running_hours": 24,
      "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
 ]
@@ -236,20 +254,29 @@ COMMITMENTS = [
     # ── Reserved Instances — Compute (VM SKU-level) ────────────────────────────
     {"commitment_id": "RI-VM-D4DS-V5-AE-WIN",
      "commitment_type": "Reserved Instance",
-     "scope_sku": "Standard_D4ds_v5", "scope_region": "australiaeast", "scope_os": "Windows",
+     "scope_sku": "Standard_D4ds_v5", "scope_resource_type": "Compute",
+     "scope_region": "australiaeast", "scope_os": "Windows", "scope_redundancy": "N/A",
      "hourly_usd_commitment": 0.20, "reserved_qty": 2,
      "term": "1-year", "expiry_date": "2026-11-01", "provider": "Azure"},
 
     {"commitment_id": "RI-VM-D4DS-V4-AE-WIN",
      "commitment_type": "Reserved Instance",
-     "scope_sku": "Standard_D4ds_v4", "scope_region": "australiaeast", "scope_os": "Windows",
+     "scope_sku": "Standard_D4ds_v4", "scope_resource_type": "Compute",
+     "scope_region": "australiaeast", "scope_os": "Windows", "scope_redundancy": "N/A",
      "hourly_usd_commitment": 0.19, "reserved_qty": 3,
      "term": "1-year", "expiry_date": "2026-09-01", "provider": "Azure"},
 
     # ── Reserved Capacity — Azure SQL Database (covers compute costs ONLY) ─────
+    # scope_redundancy="Locally Redundant" - this reservation covers
+    # SQLDB-Prod-01 (Standard) specifically, NOT SQLDB-Prod-02 (Zone
+    # Redundant, added 2026-08) - they're genuinely different priced meters,
+    # so one reservation doesn't cover both. That's intentional: it means
+    # SQLDB-Prod-02 correctly shows as an uncovered gap in the RI Coverage
+    # tab, which is accurate (it really isn't covered by any reservation).
     {"commitment_id": "RI-SQLDB-GP-GEN5-4-AE",
      "commitment_type": "Reserved Capacity",
-     "scope_sku": "GP_Gen5_4", "scope_region": "australiaeast", "scope_os": "N/A",
+     "scope_sku": "GP_Gen5_4", "scope_resource_type": "Azure SQL Database",
+     "scope_region": "australiaeast", "scope_os": "N/A", "scope_redundancy": "Locally Redundant",
      "hourly_usd_commitment": 0.340,   # ~35% saving vs 0.526 PAYG
      "reserved_qty": 1,
      "term": "1-year", "expiry_date": "2026-12-01", "provider": "Azure"},
@@ -258,7 +285,8 @@ COMMITMENTS = [
     #    same rule as Single Database) ───────────────────────────────────────
     {"commitment_id": "RI-SQLPOOL-GP-GEN5-8-AE",
      "commitment_type": "Reserved Capacity",
-     "scope_sku": "GP_Gen5_8", "scope_region": "australiaeast", "scope_os": "N/A",
+     "scope_sku": "GP_Gen5_8", "scope_resource_type": "Azure SQL Elastic Pool",
+     "scope_region": "australiaeast", "scope_os": "N/A", "scope_redundancy": "Locally Redundant",
      "hourly_usd_commitment": 0.9415525114155251,   # real live-fetched RI 1yr rate, ~35% saving vs 1.449104 PAYG
      "reserved_qty": 1,
      "term": "1-year", "expiry_date": "2026-12-01", "provider": "Azure"},
@@ -266,7 +294,8 @@ COMMITMENTS = [
     # ── Reserved Capacity — Azure Cosmos DB (covers throughput ONLY) ───────────
     {"commitment_id": "RI-COSMOS-400RU-AE",
      "commitment_type": "Reserved Capacity",
-     "scope_sku": "Cosmos_400RU", "scope_region": "australiaeast", "scope_os": "N/A",
+     "scope_sku": "Cosmos_400RU", "scope_resource_type": "Azure Cosmos DB",
+     "scope_region": "australiaeast", "scope_os": "N/A", "scope_redundancy": "N/A",
      "hourly_usd_commitment": 0.020,   # ~37% saving vs 0.032 PAYG
      "reserved_qty": 1,
      "term": "1-year", "expiry_date": "2027-02-01", "provider": "Azure"},
@@ -274,7 +303,8 @@ COMMITMENTS = [
     # ── Reserved Capacity — Azure Blob Storage (covers storage capacity ONLY) ──
     {"commitment_id": "RI-BLOB-LRS-HOT-AE",
      "commitment_type": "Reserved Capacity",
-     "scope_sku": "LRS_Hot_100TB", "scope_region": "australiaeast", "scope_os": "N/A",
+     "scope_sku": "LRS_Hot_100TB", "scope_resource_type": "Azure Blob Storage",
+     "scope_region": "australiaeast", "scope_os": "N/A", "scope_redundancy": "N/A",
      "hourly_usd_commitment": 0.140,   # ~25% saving vs 0.188 PAYG
      "reserved_qty": 1,
      "term": "1-year", "expiry_date": "2026-10-01", "provider": "Azure"},
@@ -282,9 +312,16 @@ COMMITMENTS = [
     # ── Savings Plan for Compute (flexible $/hr pool, 1-yr or 3-yr) ────────────
     # Covers: VMs, App Service, Functions Premium, Container Instances,
     #         Dedicated Host, Container Apps, Azure Spring Apps
+    # scope_resource_type=None - this is a pooled $/hr commitment spanning
+    # MULTIPLE resource types by design (not tied to one SKU/service), so
+    # unlike the per-resource RIs above there's no single Resource Type to
+    # assign; analysis/engine.py's per-resource coverage matching doesn't
+    # apply to Savings Plans anyway (they're read via
+    # commitments/existing_commitments.py's get_compute_savings_plans()).
     {"commitment_id": "SP-COMPUTE-001",
      "commitment_type": "Savings Plan for Compute",
-     "scope_sku": "Any Compute", "scope_region": "Global", "scope_os": "Any",
+     "scope_sku": "Any Compute", "scope_resource_type": None,
+     "scope_region": "Global", "scope_os": "Any", "scope_redundancy": "N/A",
      "hourly_usd_commitment": 0.80,
      "reserved_qty": 0, "term": "1-year", "expiry_date": "2027-01-15", "provider": "Azure"},
 
@@ -293,7 +330,8 @@ COMMITMENTS = [
     #         Cosmos DB, DocumentDB, DMS, SQL Server on VMs/Arc (hourly)
     {"commitment_id": "SP-DATABASE-001",
      "commitment_type": "Savings Plan for Databases",
-     "scope_sku": "Any Database", "scope_region": "Global", "scope_os": "N/A",
+     "scope_sku": "Any Database", "scope_resource_type": None,
+     "scope_region": "Global", "scope_os": "N/A", "scope_redundancy": "N/A",
      "hourly_usd_commitment": 1.20,
      "reserved_qty": 0, "term": "1-year", "expiry_date": "2027-03-01", "provider": "Azure"},
 ]

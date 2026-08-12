@@ -429,18 +429,30 @@ def reservation_analysis(
       Azure Cache for Redis, Synapse Analytics, Databricks, Disk Storage,
       PostgreSQL, MySQL, Data Factory, App Service stamp, etc.
 
-    For each (Resource Type, SKU, Region, OS):
+    For each (Resource Type, SKU, Region, OS, Redundancy):
       - running_count: active instances of that profile
       - reserved_qty:  RIs/Reserved Capacity held for that profile
       - gap:           running_count - reserved_qty (buy more)
       - excess:        reserved_qty - running_count (cancel/exchange)
+
+    Redundancy is part of the matching profile (added 2026-08) alongside
+    Resource Type/SKU/Region/OS: a reservation scoped to Standard pricing
+    does not cover a Zone-Redundant resource of the identical SKU (they're
+    genuinely different priced meters - see pricing/commitment_pricing.py's
+    _filter_by_redundancy) - without this, two resources sharing a SKU but
+    different redundancy would be silently pooled into one demand bucket,
+    understating a real coverage gap on whichever one the reservation
+    doesn't actually apply to.
     """
     # All running resources (any type)
     running_resources = inventory_df[
         inventory_df["Resource State"] == "Running"
-    ]
+    ].copy()
+    if "Redundancy" not in running_resources.columns:
+        running_resources["Redundancy"] = "N/A"
+    running_resources["Redundancy"] = running_resources["Redundancy"].fillna("N/A")
     demand = (
-        running_resources.groupby(["Resource Type", "SKU", "Region", "OS"])
+        running_resources.groupby(["Resource Type", "SKU", "Region", "OS", "Redundancy"])
         .size()
         .reset_index(name="running_count")
     )
@@ -448,30 +460,46 @@ def reservation_analysis(
     # Supply side: all RI / Reserved Capacity commitments
     if ri_df.empty:
         supply = pd.DataFrame(columns=[
-            "Resource Type", "SKU", "Region", "OS", "reserved_qty",
+            "Resource Type", "SKU", "Region", "OS", "Redundancy", "reserved_qty",
             "commitment_id", "hourly_usd_commitment", "term", "expiry_date"
         ])
     else:
-        # Map RI scope_sku → Resource Type by looking up inventory
-        sku_to_rtype = (
-            inventory_df[["SKU", "Resource Type"]]
-            .drop_duplicates()
-            .set_index("SKU")["Resource Type"]
-            .to_dict()
-        )
         supply = ri_df.rename(columns={
-            "scope_sku":    "SKU",
-            "scope_region": "Region",
-            "scope_os":     "OS",
+            "scope_sku":            "SKU",
+            "scope_resource_type":  "Resource Type",
+            "scope_region":         "Region",
+            "scope_os":             "OS",
+            "scope_redundancy":     "Redundancy",
         })[[
-            "commitment_id", "SKU", "Region", "OS",
+            "commitment_id", "SKU", "Resource Type", "Region", "OS", "Redundancy",
             "reserved_qty", "hourly_usd_commitment", "term", "expiry_date"
         ]].copy()
-        supply["Resource Type"] = supply["SKU"].map(sku_to_rtype).fillna("Unknown")
+        supply["Redundancy"] = supply["Redundancy"].fillna("N/A")
+        # scope_resource_type is the authoritative source now (added
+        # 2026-08) - REQUIRED because scope_sku alone is genuinely
+        # ambiguous (e.g. "GP_Gen5_4" is shared by Azure SQL Database,
+        # PostgreSQL Flexible Server, and MySQL Flexible Server; inferring
+        # Resource Type by looking the SKU up in inventory silently picked
+        # an arbitrary, possibly wrong match - caught live testing the
+        # redundancy fix below, where a SQL Database reservation's coverage
+        # was misattributed to MySQL). The SKU-based lookup below is kept
+        # ONLY as a fallback for commitment rows that genuinely predate this
+        # field (should be rare/never for this app's demo-only Commitment
+        # data, but avoids silently dropping coverage for old rows).
+        missing_rtype = supply["Resource Type"].isna() | (supply["Resource Type"] == "")
+        if missing_rtype.any():
+            sku_to_rtype = (
+                inventory_df[["SKU", "Resource Type"]]
+                .drop_duplicates(subset=["SKU"])
+                .set_index("SKU")["Resource Type"]
+                .to_dict()
+            )
+            supply.loc[missing_rtype, "Resource Type"] = supply.loc[missing_rtype, "SKU"].map(sku_to_rtype)
+        supply["Resource Type"] = supply["Resource Type"].fillna("Unknown")
 
-    # Merge demand + supply on all 4 dimensions
+    # Merge demand + supply on all 5 dimensions
     merged = demand.merge(
-        supply, on=["Resource Type", "SKU", "Region", "OS"], how="outer"
+        supply, on=["Resource Type", "SKU", "Region", "OS", "Redundancy"], how="outer"
     ).fillna(0)
     merged["running_count"] = merged["running_count"].astype(int)
     merged["reserved_qty"]  = merged["reserved_qty"].astype(int)
@@ -510,10 +538,22 @@ def reservation_analysis(
     orphan_rows = []
     if not ri_df.empty:
         for _, sres in stopped.iterrows():
+            sres_redundancy = sres.get("Redundancy", "N/A") if hasattr(sres, "get") else (sres["Redundancy"] if "Redundancy" in sres.index else "N/A")
+            # Resource Type is part of the match (not just SKU/region/OS) for
+            # the same reason as the coverage table above: scope_sku alone is
+            # ambiguous across services sharing an identical SKU string. Uses
+            # scope_resource_type directly when set (see db/schema.py), with
+            # a same-SKU fallback only for rows that predate that field.
+            rtype_match = (
+                (ri_df["scope_resource_type"] == sres["Resource Type"]) |
+                (ri_df["scope_resource_type"].isna() | (ri_df["scope_resource_type"] == ""))
+            )
             match = ri_df[
+                rtype_match &
                 (ri_df["scope_sku"]    == sres["SKU"]) &
                 (ri_df["scope_region"] == sres["Region"]) &
-                (ri_df["scope_os"]     == sres["OS"])
+                (ri_df["scope_os"]     == sres["OS"]) &
+                (ri_df["scope_redundancy"].fillna("N/A") == (sres_redundancy or "N/A"))
             ]
             if not match.empty:
                 for _, ri in match.iterrows():

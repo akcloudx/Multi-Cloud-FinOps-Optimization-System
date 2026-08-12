@@ -57,6 +57,7 @@ def get_compute_inventory(provider: str = "Azure", tenant_id=None) -> pd.DataFra
             "Region":                   r.region,
             "OS":                       r.os,
             "SKU":                      r.sku,
+            "Redundancy":               r.redundancy or "N/A",
             "PAYG Hourly Cost USD":     r.payg_hourly_usd,
             "Avg Daily Running Hours":  r.avg_daily_running_hours,
             "Subscription":             r.subscription,
@@ -66,5 +67,5 @@ def get_compute_inventory(provider: str = "Azure", tenant_id=None) -> pd.DataFra
         for r in rows
     ]
     columns = ["Resource ID", "Resource Name", "Resource Type", "Resource State", "Region", "OS",
-               "SKU", "PAYG Hourly Cost USD", "Avg Daily Running Hours", "Subscription", "Provider", "Is Orphaned"]
+               "SKU", "Redundancy", "PAYG Hourly Cost USD", "Avg Daily Running Hours", "Subscription", "Provider", "Is Orphaned"]
     return pd.DataFrame(data, columns=columns)

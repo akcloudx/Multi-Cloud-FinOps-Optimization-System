@@ -258,6 +258,7 @@ Resources
     osType     = tostring(properties.storageProfile.osDisk.osType),
     sqlSkuName = tostring(properties.currentSku.name),
     sqlSkuCapacity = tostring(properties.currentSku.capacity),
+    zoneRedundant = tobool(properties.zoneRedundant),
     poolSkuName = tostring(sku.name),
     poolSkuCapacity = tostring(sku.capacity),
     topSku     = tostring(sku.name),
@@ -310,10 +311,23 @@ Resources
         isnotempty(redisSku), redisSku,
         isnotempty(topSku), topSku,
         'N/A'
+    ),
+    // Verified live (2026-08): properties.zoneRedundant is a real ARM bool
+    // on BOTH Microsoft.Sql/servers/databases and .../elasticPools - and a
+    // Zone-Redundant SQL DB/Elastic Pool meter is priced genuinely
+    // differently (often cheaper) than the Standard variant, not a small
+    // surcharge, so this can't be defaulted or inferred - it must reflect
+    // the resource's real setting or pricing/commitment_pricing.py would
+    // silently pick the wrong meter. Gated to SQL DB/Elastic Pool since
+    // other resource types don't report this property at all.
+    resolvedRedundancy = case(
+        (type == 'microsoft.sql/servers/databases' or type == 'microsoft.sql/servers/elasticpools') and zoneRedundant == true, 'Zone Redundant',
+        (type == 'microsoft.sql/servers/databases' or type == 'microsoft.sql/servers/elasticpools') and zoneRedundant == false, 'Locally Redundant',
+        'N/A'
     )
 | project
     id, name, type, location, subscriptionId,
-    powerState, resolvedSku, osType,
+    powerState, resolvedSku, osType, resolvedRedundancy,
     resourceGroup, tags
 | order by type asc, name asc
 """
@@ -354,6 +368,7 @@ def fetch_live_inventory(creds: AzureCredentials) -> pd.DataFrame:
             "Region":                  r.get("location", ""),
             "OS":                      r.get("osType", "N/A") or "N/A",
             "SKU":                     r.get("resolvedSku", "N/A") or "N/A",
+            "Redundancy":              r.get("resolvedRedundancy", "N/A") or "N/A",
             "PAYG Hourly Cost USD":    0.0,   # populated by pricing module
             "Avg Daily Running Hours": 24,    # default; update via Activity Log
             "Subscription":            r.get("subscriptionId", ""),

@@ -69,6 +69,10 @@ def init_db(provider: str = "Azure"):
     _ensure_column(engine, "cloud_inventory", "tenant_id", "INTEGER")
     _ensure_column(engine, "commitments", "tenant_id", "INTEGER")
     _ensure_column(engine, "commitment_price_cache", "resource_type", "VARCHAR(255)")
+    _ensure_column(engine, "cloud_inventory", "redundancy", "VARCHAR(255)")
+    _ensure_column(engine, "commitment_price_cache", "redundancy", "VARCHAR(255)")
+    _ensure_column(engine, "commitments", "scope_redundancy", "VARCHAR(255)")
+    _ensure_column(engine, "commitments", "scope_resource_type", "VARCHAR(255)")
     return engine
 
 
@@ -84,6 +88,14 @@ class CloudInventory(Base):
     region                   = Column(String(255), nullable=False)
     os                       = Column(String(255), nullable=False)
     sku                      = Column(String(255), nullable=False)
+    # "Zone Redundant" | "Locally Redundant" | "N/A" (services with no
+    # redundancy-driven price variant). Verified live (2026-08): a
+    # Zone-Redundant SQL DB/Elastic Pool meter is a genuinely DIFFERENT (and
+    # often cheaper) price than the standard variant, not a small surcharge -
+    # so this can't be inferred or defaulted, it must reflect the resource's
+    # real ARM properties.zoneRedundant setting or pricing would silently use
+    # the wrong baseline for a real zone-redundant resource.
+    redundancy                = Column(String(255), nullable=True, default="N/A")
     payg_hourly_usd          = Column(Float, nullable=False)
     avg_daily_running_hours  = Column(Integer, nullable=False)
     subscription             = Column(String(255), nullable=True)
@@ -99,8 +111,28 @@ class Commitment(Base):
     commitment_id           = Column(String(500), primary_key=True)
     commitment_type         = Column(String(255), nullable=False)
     scope_sku               = Column(String(255), nullable=False)
+    # Which Resource Type this reservation applies to. Added 2026-08 -
+    # discovered live (via the redundancy work below) that scope_sku ALONE
+    # is not enough to identify a reservation's real target: multiple
+    # services share identical SKU strings (e.g. "GP_Gen5_4" is used by
+    # Azure SQL Database, PostgreSQL Flexible Server, AND MySQL Flexible
+    # Server), and analysis/engine.py's coverage matching used to INFER
+    # Resource Type by looking up scope_sku in inventory - which silently
+    # picked an arbitrary, possibly wrong service when the SKU collided
+    # across services, misattributing a reservation's coverage to the wrong
+    # resource type entirely. Explicit and required now, not inferred.
+    scope_resource_type     = Column(String(255), nullable=True)
     scope_region            = Column(String(255), nullable=False)
     scope_os                = Column(String(255), nullable=True)
+    # "Zone Redundant" | "Locally Redundant" | "N/A" - which redundancy
+    # configuration this specific reservation applies to. Added 2026-08
+    # alongside CloudInventory.redundancy: a reservation scoped to Standard
+    # pricing does not automatically cover a Zone-Redundant resource of the
+    # same SKU/region/OS (and vice versa) - they're genuinely different
+    # priced meters (see pricing/commitment_pricing.py's
+    # _filter_by_redundancy), so gap/coverage matching must account for it
+    # too, not just the pricing lookup.
+    scope_redundancy        = Column(String(255), nullable=True, default="N/A")
     hourly_usd_commitment   = Column(Float, nullable=False)
     reserved_qty            = Column(Integer, default=0)
     term                    = Column(String(255), default="1-year")
@@ -190,6 +222,13 @@ class CommitmentPriceCache(Base):
     region                    = Column(String(255), nullable=False)
     sku                       = Column(String(255), nullable=False)
     os                        = Column(String(255), nullable=True)
+    # Also part of the cache key (added 2026-08) - same collision risk as
+    # resource_type above: the SAME sku/region/os can have a genuinely
+    # different price depending on redundancy (Zone-Redundant SQL DB/Elastic
+    # Pool meters are priced differently, often cheaper, than Standard - see
+    # CloudInventory.redundancy). Without this, a Zone-Redundant and a
+    # Standard resource of the same SKU would silently share one cache row.
+    redundancy                = Column(String(255), nullable=True)
     term                      = Column(String(20), nullable=False)   # "1yr" | "3yr"
     # Normalized to a $/hr rate either way - Savings Plan rates are natively
     # hourly; Reserved Instance rates come back as a total term price and are

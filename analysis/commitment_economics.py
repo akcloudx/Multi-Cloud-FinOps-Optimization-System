@@ -17,7 +17,7 @@ TERMS = ["1yr", "3yr"]
 TERM_LABELS = {"1yr": "1-Year", "3yr": "3-Year"}
 
 
-def _lookup_rate(prices_df: pd.DataFrame, instrument: str, term: str, resource_type: str, region: str, sku: str, os_: str):
+def _lookup_rate(prices_df: pd.DataFrame, instrument: str, term: str, resource_type: str, region: str, sku: str, os_: str, redundancy: str = "N/A"):
     if prices_df is None or prices_df.empty:
         return None
     m = prices_df[
@@ -26,14 +26,15 @@ def _lookup_rate(prices_df: pd.DataFrame, instrument: str, term: str, resource_t
         (prices_df["resource_type"] == resource_type) &
         (prices_df["region"] == region) &
         (prices_df["sku"] == sku) &
-        (prices_df["os"] == os_)
+        (prices_df["os"] == os_) &
+        (prices_df["redundancy"] == (redundancy or "N/A"))
     ]
     if m.empty:
         return None
     return float(m.iloc[0]["effective_hourly_rate_usd"])
 
 
-def _lookup_payg(prices_df: pd.DataFrame, resource_type: str, region: str, sku: str, os_: str):
+def _lookup_payg(prices_df: pd.DataFrame, resource_type: str, region: str, sku: str, os_: str, redundancy: str = "N/A"):
     """The PAYG rate cached alongside the commitment rates, from the exact
     same API snapshot - deliberately preferred over whatever PAYG number
     happens to be sitting on the inventory row. Demo/seed inventory carries
@@ -47,12 +48,19 @@ def _lookup_payg(prices_df: pd.DataFrame, resource_type: str, region: str, sku: 
     Instance and SQL Elastic Pool both using "GP_Gen5_8") while pricing to
     genuinely different real rates - matching on SKU alone would silently
     return whichever service's row happened to be cached, not necessarily
-    this one's (caught live via that exact SQL MI / Elastic Pool collision)."""
+    this one's (caught live via that exact SQL MI / Elastic Pool collision).
+
+    redundancy is part of the match for the same reason: a Zone-Redundant
+    SQL Database/Elastic Pool is priced genuinely differently (often
+    cheaper) than the Standard variant of the identical SKU - verified live
+    (2026-08, e.g. GP Gen5 4vCore Brazil South: $1.156848/hr Standard vs
+    $0.694108/hr Zone Redundant)."""
     if prices_df is None or prices_df.empty:
         return None
     m = prices_df[
         (prices_df["resource_type"] == resource_type) &
-        (prices_df["region"] == region) & (prices_df["sku"] == sku) & (prices_df["os"] == os_)
+        (prices_df["region"] == region) & (prices_df["sku"] == sku) & (prices_df["os"] == os_) &
+        (prices_df["redundancy"] == (redundancy or "N/A"))
         & prices_df["payg_hourly_rate_usd"].notna()
     ]
     if m.empty:
@@ -69,10 +77,11 @@ def savings_plan_term_comparison(pool_df: pd.DataFrame, prices_df: pd.DataFrame)
         committed_total = 0.0
         priced = 0
         for _, r in pool_df.iterrows():
-            cached_payg = _lookup_payg(prices_df, r["Resource Type"], r["Region"], r["SKU"], r["OS"])
+            redundancy = r["Redundancy"] if "Redundancy" in r.index else "N/A"
+            cached_payg = _lookup_payg(prices_df, r["Resource Type"], r["Region"], r["SKU"], r["OS"], redundancy)
             payg = cached_payg if cached_payg is not None else float(r["PAYG Hourly Cost USD"])
             payg_total += payg
-            rate = _lookup_rate(prices_df, "SavingsPlan", term, r["Resource Type"], r["Region"], r["SKU"], r["OS"])
+            rate = _lookup_rate(prices_df, "SavingsPlan", term, r["Resource Type"], r["Region"], r["SKU"], r["OS"], redundancy)
             if rate is not None:
                 committed_total += rate
                 priced += 1
@@ -101,9 +110,13 @@ def ri_gap_pricing(coverage_table: pd.DataFrame, inv_raw: pd.DataFrame, prices_d
     if out.empty:
         return out
 
+    inv_for_lookup = inv_raw.copy()
+    if "Redundancy" not in inv_for_lookup.columns:
+        inv_for_lookup["Redundancy"] = "N/A"
+    inv_for_lookup["Redundancy"] = inv_for_lookup["Redundancy"].fillna("N/A")
     payg_lookup = (
-        inv_raw.drop_duplicates(subset=["SKU", "Region", "OS"])
-        .set_index(["SKU", "Region", "OS"])["PAYG Hourly Cost USD"]
+        inv_for_lookup.drop_duplicates(subset=["SKU", "Region", "OS", "Redundancy"])
+        .set_index(["SKU", "Region", "OS", "Redundancy"])["PAYG Hourly Cost USD"]
         .to_dict()
     )
 
@@ -112,10 +125,11 @@ def ri_gap_pricing(coverage_table: pd.DataFrame, inv_raw: pd.DataFrame, prices_d
         savings_col = f"Monthly Savings if Purchased ({TERM_LABELS[term]})"
         rates, savings = [], []
         for _, row in out.iterrows():
-            key = (row.get("SKU"), row.get("Region"), row.get("OS"))
-            cached_payg = _lookup_payg(prices_df, row.get("Resource Type"), row.get("Region"), row.get("SKU"), row.get("OS"))
+            redundancy = row.get("Redundancy", "N/A") or "N/A"
+            key = (row.get("SKU"), row.get("Region"), row.get("OS"), redundancy)
+            cached_payg = _lookup_payg(prices_df, row.get("Resource Type"), row.get("Region"), row.get("SKU"), row.get("OS"), redundancy)
             payg = cached_payg if cached_payg is not None else payg_lookup.get(key)
-            rate = _lookup_rate(prices_df, "ReservedInstance", term, row.get("Resource Type"), row.get("Region"), row.get("SKU"), row.get("OS"))
+            rate = _lookup_rate(prices_df, "ReservedInstance", term, row.get("Resource Type"), row.get("Region"), row.get("SKU"), row.get("OS"), redundancy)
             rates.append(rate)
             gap = row.get("gap", 0) or 0
             if rate is not None and payg is not None and gap > 0 and row.get("is_eligible", True) and row.get("coverage_model") == "instance":

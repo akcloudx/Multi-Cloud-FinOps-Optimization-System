@@ -41,8 +41,10 @@ def get_all_commitments(provider: str = "Azure", tenant_id=None) -> pd.DataFrame
             "commitment_id":         r.commitment_id,
             "commitment_type":       r.commitment_type,
             "scope_sku":             r.scope_sku,
+            "scope_resource_type":   r.scope_resource_type,
             "scope_region":          r.scope_region,
             "scope_os":              r.scope_os,
+            "scope_redundancy":      r.scope_redundancy or "N/A",
             "hourly_usd_commitment": r.hourly_usd_commitment,
             "reserved_qty":          r.reserved_qty,
             "term":                  r.term,
@@ -51,7 +53,7 @@ def get_all_commitments(provider: str = "Azure", tenant_id=None) -> pd.DataFrame
         }
         for r in rows
     ]
-    columns = ["commitment_id", "commitment_type", "scope_sku", "scope_region", "scope_os",
+    columns = ["commitment_id", "commitment_type", "scope_sku", "scope_resource_type", "scope_region", "scope_os", "scope_redundancy",
                "hourly_usd_commitment", "reserved_qty", "term", "expiry_date", "provider"]
     return pd.DataFrame(data, columns=columns)
 

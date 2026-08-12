@@ -159,13 +159,26 @@ _SQL_CONSUMPTION_PREFIX = {
 #     ("SQL_Database_SingleDB_Hyperscale_Compute_DC-Series_vCore" - doesn't
 #     even start with "SQLDB"), so the generic pattern correctly finds
 #     nothing (safe failure) rather than accidentally matching.
-#   - Fsv2-series - NOT checked this session at all, status unknown, not to
-#     be assumed safe or working either way. Premium-series/DC-series do NOT
-#     exist for General Purpose or Business Critical (DC-series aside) or
-#     General Purpose (any of these) - verified live (2026-08): zero
-#     Consumption items for "General Purpose" + "Premium"/"DC-Series", and
-#     zero for "Business Critical" + "Premium" (excluding DC) - Azure simply
-#     doesn't sell those combinations, not a mapping gap.
+#   - Fsv2-series: genuinely NOT covered, checked and confirmed absent
+#     (2026-08) - unlike DC-series (a real if stale catalog entry exists),
+#     ZERO Consumption or Reservation entries exist anywhere in the Retail
+#     Prices API for Fsv2-series SQL Database, checked with no region filter
+#     at all plus several productName spelling variants. It's a selectable
+#     option on the calculator, but this app's data source (the public
+#     Retail API) simply has nothing published for it - explicitly marked
+#     unsupported with this reason rather than left to the generic fallback
+#     to fail silently. NOT marked ineligible in ri_eligibility.py/
+#     sp_eligibility.py though - no calculator evidence that Azure considers
+#     it policy-ineligible, only that this app can't price it; eligibility
+#     and priceability are different questions (see DC-series BC for the
+#     contrasting case where real calculator evidence of unavailability did
+#     justify an eligibility-layer change).
+#   - Premium-series/DC-series do NOT exist for General Purpose or Business
+#     Critical (DC-series aside) or General Purpose (any of these) -
+#     verified live (2026-08): zero Consumption items for "General Purpose"
+#     + "Premium"/"DC-Series", and zero for "Business Critical" + "Premium"
+#     (excluding DC) - Azure simply doesn't sell those combinations, not a
+#     mapping gap.
 #   - None of the above have an established internal SKU-string convention
 #     in this app yet (no live/demo inventory exercises them) - the
 #     successes above were verified by testing a plausible guessed SKU
@@ -253,6 +266,18 @@ def _plan_sql_family(sku: str, family: str, service_name: str) -> SkuQueryPlan:
         return _plan_sql_serverless(tier, vcores, family, service_name)
     if generation.upper().replace("-", "") in ("DC", "DCSERIES"):
         return _plan_sql_dc_series(tier, vcores, family, service_name)
+    if generation.upper().replace("-", "").replace("_", "") in ("FSV2", "FSV2SERIES"):
+        # Verified live 2026-08 (real user-supplied config: General Purpose,
+        # Fsv2-series, East Asia): zero Consumption or Reservation entries
+        # exist ANYWHERE in the Retail Prices API for Fsv2-series SQL
+        # Database - checked with no region filter at all and multiple
+        # productName spelling variants, not just this one region. Unlike
+        # DC-series (where a real, if stale, catalog entry exists), there is
+        # NO entry at all for Fsv2 - genuinely absent from this API, not
+        # just differently named. The generic fallback below would have
+        # already failed safely (queries would find nothing), but without
+        # an accurate reason - this makes that explicit rather than silent.
+        return SkuQueryPlan(supported=False, reason="Fsv2-series is a selectable hardware option on Azure's pricing calculator, but verified live that zero Consumption or Reservation entries exist for it anywhere in the Retail Prices API (checked across regions and multiple naming variants) - no pricing data to fetch regardless of region or vCore count.")
 
     key = (family, tier)
     cons_prefix = _SQL_CONSUMPTION_PREFIX.get(key)
