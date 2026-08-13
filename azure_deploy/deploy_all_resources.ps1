@@ -6,7 +6,11 @@
 #    Full Architecture: Azure SQL Server + Function App + Streamlit App Service
 #    PowerShell 5.1 Compatible: Uses dual-argument Join-Path calls and ASCII output.
 #    ARM Resilient: Pauses briefly after app creation to ensure ARM Control Plane propagation.
-#    Smart Quota Fallback: Automatically tests candidate regions if student subscription has 0 quota for B1 VMs in the primary region.
+#    Smart Quota Fallback: Automatically tests candidate regions if student subscription has 0 quota in the primary region.
+#    App Service Plan: F1 (Free tier, $0/month) - switched from B1 2026-08 to fit a limited student
+#    subscription budget. 60 CPU-min/day cap, no "Always On" (idles out after ~20 min, cold-starts on
+#    next request) - fine for intermittent demo/test use, not sustained traffic. See the inline note
+#    at the plan-creation step for the one open risk (Oryx remote build behavior not yet verified on F1).
 
 param (
     [string]$ResourceGroupName = "rg-finops-optimizer",
@@ -86,8 +90,30 @@ if (-not $sqlExists) {
 
 $dbExists = az sql db show --name $SqlDbName --server $SqlServerName --resource-group $ResourceGroupName --query name -o tsv 2>$null
 if (-not $dbExists) {
-    Write-Host "        Creating Serverless Database '$SqlDbName'..." -ForegroundColor Yellow
-    az sql db create --resource-group $ResourceGroupName --server $SqlServerName --name $SqlDbName --edition GeneralPurpose --family Gen5 --compute-model Serverless --capacity 1 --auto-pause-delay 60 -o none 2>$null
+    # Try the free-tier offer first (2026-08, added to fit a limited student
+    # subscription budget): 100,000 vCore-seconds + 32 GB data + 32 GB backup
+    # storage free per month, for the lifetime of the subscription - see
+    # https://learn.microsoft.com/en-us/azure/azure-sql/database/free-offer .
+    # --free-limit-exhaustion-behavior AutoPause means it pauses (not bills
+    # overage) if the monthly free allowance is ever exceeded - the safer
+    # choice given the goal here is avoiding ANY accidental spend, not
+    # maximizing uptime. NOT guaranteed to work on every subscription type -
+    # Microsoft's own docs explicitly say "the Microsoft Azure for Students
+    # Starter offer is incompatible with this Azure SQL Database free offer"
+    # (the separate, credit-card-free student program - different from
+    # "Azure for Students" or a general Azure Free account, both of which
+    # ARE compatible). If this subscription is Students Starter, the
+    # --use-free-limit attempt below will fail and the fallback plain
+    # Serverless create (still auto-pausing, just not literally free) runs
+    # instead - deliberately NOT retrying the same free-limit flags a second
+    # time, so an incompatible subscription degrades gracefully rather than
+    # hard-failing the whole deployment.
+    Write-Host "        Creating Serverless Database '$SqlDbName' (trying free-tier offer)..." -ForegroundColor Yellow
+    az sql db create --resource-group $ResourceGroupName --server $SqlServerName --name $SqlDbName --edition GeneralPurpose --family Gen5 --compute-model Serverless --capacity 1 --auto-pause-delay 60 --use-free-limit --free-limit-exhaustion-behavior AutoPause -o none 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "        [INFO] Free-tier offer unavailable on this subscription - falling back to standard Serverless billing (still auto-pauses)." -ForegroundColor DarkYellow
+        az sql db create --resource-group $ResourceGroupName --server $SqlServerName --name $SqlDbName --edition GeneralPurpose --family Gen5 --compute-model Serverless --capacity 1 --auto-pause-delay 60 -o none 2>$null
+    }
     if ($LASTEXITCODE -ne 0) {
         Write-Host "        Re-creating SQL Server and Database..." -ForegroundColor Yellow
         az sql server create --name $SqlServerName --resource-group $ResourceGroupName --location $Location --admin-user $SqlAdminUser --admin-password $SqlAdminPassword -o none
@@ -144,7 +170,18 @@ if (-not $planExists) {
 
     foreach ($region in $candidateRegions) {
         Write-Host "        Attempting App Service Plan creation in region '$region'..." -ForegroundColor Yellow
-        $planOut = az appservice plan create --name $AppPlanName --resource-group $ResourceGroupName --sku B1 --is-linux --location $region 2>&1
+        # F1 (Free tier) - $0/month, chosen deliberately over B1 to fit a
+        # student subscription's limited remaining credit (2026-08). 60
+        # CPU-min/day cap and no "Always On" (app idles out and cold-starts
+        # on the next request after ~20 min) - both fine for intermittent
+        # demo/test usage, not sustained production traffic. NOT verified
+        # live yet whether Oryx's remote build behaves identically on F1 -
+        # the comment below this block documents build/startup behavior that
+        # was confirmed specifically on B1; F1's much tighter build-time
+        # resource limits (shared CPU, 1 GB storage) could plausibly cause
+        # the remote build to behave differently or time out. Test via a
+        # manual workflow_dispatch run before relying on this for a demo.
+        $planOut = az appservice plan create --name $AppPlanName --resource-group $ResourceGroupName --sku F1 --is-linux --location $region 2>&1
         if ($LASTEXITCODE -eq 0) {
             $planCreated = $true
             Write-Host "        [OK] App Service Plan created in '$region'." -ForegroundColor Green
@@ -155,7 +192,7 @@ if (-not $planExists) {
     }
 
     if (-not $planCreated) {
-        Fail "Could not find an available region for B1 App Service Plan due to subscription quota limits."
+        Fail "Could not find an available region for F1 App Service Plan due to subscription quota limits."
     }
 } else {
     Write-Host "        [OK] App Service Plan already exists - skipped." -ForegroundColor DarkGreen
