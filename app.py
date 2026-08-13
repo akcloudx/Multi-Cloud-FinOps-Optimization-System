@@ -108,6 +108,8 @@ from analysis.engine import (
     DEFAULT_SAFETY_BUFFER,
 )
 from analysis.sp_eligibility import check_sp_eligibility
+from analysis.ri_eligibility import check_eligibility
+from pricing.sku_mapping import resolve_sku_query
 from analysis.focus_mapping import to_focus_view, FOCUS_COLUMN_DEFINITIONS, FOCUS_SPEC_VERSION, FOCUS_SPEC_URL
 from analysis.maturity import run_maturity_assessment
 from analysis.commitment_economics import (
@@ -571,6 +573,37 @@ def _split_sp_eligible(df_24x7: pd.DataFrame, azure_provider: bool):
     return df_24x7[is_elig], excluded_df
 
 
+def _payg_blank_reason(resource_type: str, sku: str) -> str:
+    """A blank PAYG cell can mean genuinely different things - conflating
+    them into one generic 'Not RI/SP-metered' label (the old behavior) reads
+    as a bug to anyone who doesn't already know why a specific resource has
+    no hourly rate. Distinguishes: (1) genuinely free/ineligible tiers (Free
+    App Service, Consumption-plan Functions) via the same real eligibility
+    reasons already computed for the RI Coverage/Savings Plan tabs, (2)
+    resources this app can't price per-instance at all (e.g. Storage, sold
+    in 100TB+ blocks) via sku_mapping.py's own documented reason, (3) a
+    genuine, currently-unresolved pricing gap - kept distinct from the first
+    two so it doesn't get mistaken for 'this is fine, it's just free'."""
+    # Check the pricing layer's OWN reason first - it's the most direct
+    # explanation (e.g. Storage's "sold in 100TB+ blocks" note) and is more
+    # specific than a generic eligibility message whenever both apply.
+    plan = resolve_sku_query(resource_type, sku)
+    if not plan.supported and plan.reason:
+        return plan.reason
+    ri_ok, ri_reason = check_eligibility(resource_type, sku)
+    sp_ok, sp_reason = check_sp_eligibility(resource_type, sku)
+    if not ri_ok and not sp_ok:
+        # SP reasons in this codebase tend to have more specific per-SKU
+        # detection (e.g. Y1/Y2/Y3 Consumption plan explicitly called out)
+        # than RI's more general tier regex - prefer it when both apply.
+        return f"Not eligible for RI or Savings Plan - {sp_reason}"
+    if not ri_ok:
+        return f"Not eligible for RI - {ri_reason}"
+    if not sp_ok:
+        return f"Not eligible for Savings Plan - {sp_reason}"
+    return "Pricing data not available for this resource yet"
+
+
 def _render_inventory_section(df: pd.DataFrame, key_prefix: str, show_type_col: bool):
     """Shared renderer for every per-service inventory sub-tab in the Inventory tab."""
     if df.empty:
@@ -583,9 +616,13 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str, show_type_col: 
         else ("Running" if r["Resource State"] == "Running" else "Stopped"),
         axis=1,
     )
-    disp["PAYG Rate/hr"] = disp["PAYG Hourly Cost USD"].apply(
-        lambda x: fmt(x, 4) if x else "Not RI/SP-metered"
-    )
+    def _payg_cell(r):
+        if r["PAYG Hourly Cost USD"]:
+            return fmt(r["PAYG Hourly Cost USD"], 4)
+        reason = _payg_blank_reason(r["Resource Type"], r["SKU"])
+        return (reason[:87] + "...") if len(reason) > 90 else reason
+
+    disp["PAYG Rate/hr"] = disp.apply(_payg_cell, axis=1)
     disp["Est. Monthly Cost"] = (
         disp["PAYG Hourly Cost USD"] * disp["Avg Daily Running Hours"] * 30
     ).apply(lambda x: fmt(x, 2) if x else "—")
@@ -734,7 +771,7 @@ def _render_sp_pool_economics(pool_label: str, pool_df: pd.DataFrame, existing_c
             options=["1-Year", "3-Year"],
             default=TERM_LABELS[default_term],
             key=f"{key_prefix}_term_display",
-            help="Drives the recommendation card below and the Cost Analysis tab's combined projection.",
+            help="Drives the recommendation card below and the Recommendations tab's combined savings projection.",
         )
         term_key = "1yr" if term_choice == "1-Year" else "3yr"
         st.session_state[f"{key_prefix}_term_widget"] = term_key
@@ -942,7 +979,7 @@ def _render_ri_coverage_tab():
         options=["1-Year", "3-Year"],
         default=TERM_LABELS[default_ri_term],
         key="ri_term_display",
-        help="Drives the real purchase-cost columns below and the Cost Analysis tab's combined projection.",
+        help="Drives the real purchase-cost columns below and the Recommendations tab's combined savings projection.",
     )
     ri_term_key = "1yr" if ri_term_choice == "1-Year" else "3yr"
     st.session_state["ri_term_widget"] = ri_term_key
@@ -1051,7 +1088,7 @@ def _render_ri_coverage_tab():
 # ═══════════════════════════════════════════════════════════════════════════════
 def _render_cost_analysis_tab():
     st.subheader(f"{selected_provider} Cost Analysis")
-    st.caption("Current spend baseline, commitment coverage, and the combined savings you'd actually get by implementing the open recommendations.")
+    st.caption("Current spend baseline and commitment coverage - see the Recommendations tab for the combined savings projection.")
     _finops_tag("Optimize Usage & Cost", "Rate Optimization")
 
     st.segmented_control(
@@ -1067,39 +1104,28 @@ def _render_cost_analysis_tab():
     else:
         st.info("No inventory data to chart yet.")
 
-    st.divider()
-    st.markdown("### 💡 Projected Savings If Recommendations Are Implemented")
+    st.caption("For the projected savings if open recommendations are implemented, see the **Recommendations** tab.")
 
+
+def _real_projected_savings():
+    """The commitment-pricing-based combined SP+RI savings projection - the
+    MORE ACCURATE of this app's two savings figures (the other being
+    generate_recommendations()'s safety-buffer heuristic, used for individual
+    per-item $ impacts where real cached pricing isn't available). Returns
+    None when real pricing genuinely isn't available (AWS, or nothing cached
+    yet for this tenant's SKUs) so the caller can fall back to the heuristic
+    total instead of showing a wrong/absent number."""
     if not is_azure or prices_df is None or prices_df.empty:
-        st.info(
-            "ℹ️ Real commitment-rate pricing isn't available yet for AWS (or there's no cached pricing for "
-            "this Azure tenant's SKUs) - this combined projection needs it to be trustworthy, so it isn't "
-            "shown rather than guessing. Individual recommendation $ impacts on the Recommendations tab still "
-            "use the safety-buffer heuristic.", icon="ℹ️",
-        )
-        return
-
+        return None
     sp_term = st.session_state.get("sp_compute_term_widget", "1yr")
     ri_term = st.session_state.get("ri_term_widget", "1yr")
-
     sp_pool_cmps = []
     if not compute_24x7.empty:
         sp_pool_cmps.append(savings_plan_term_comparison(compute_24x7, prices_df))
     if not db_running.empty:
         sp_pool_cmps.append(savings_plan_term_comparison(db_running, prices_df))
-
     ri_priced = ri_gap_pricing(ri_result.coverage_table, inv_raw, prices_df) if not ri_result.coverage_table.empty else pd.DataFrame()
-
-    combined = combined_monthly_savings(sp_pool_cmps, ri_priced, sp_term, ri_term)
-
-    st.caption(
-        f"Using the term choices selected on the Savings Plan Analysis tab ({combined['sp_term']} for Compute) "
-        f"and the RI Coverage tab ({combined['ri_term']}) - change them there to update this."
-    )
-    c1, c2, c3 = st.columns(3)
-    c1.metric(f"Savings Plan Savings ({combined['sp_term']})", fmt(combined["sp_monthly_savings"], 2) + "/mo")
-    c2.metric(f"Reserved Instance Purchase Savings ({combined['ri_term']})", fmt(combined["ri_monthly_savings"], 2) + "/mo")
-    c3.metric("Combined Total If Implemented", fmt(combined["total_monthly_savings"], 2) + "/mo")
+    return combined_monthly_savings(sp_pool_cmps, ri_priced, sp_term, ri_term)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1112,13 +1138,43 @@ def _render_recommendations_tab():
 
     high_count = sum(1 for r in recs if r.get("severity") == "HIGH")
     med_count  = sum(1 for r in recs if r.get("severity") == "MEDIUM")
-    total_savings_mo = sum(r.get("financial_impact_hr", 0.0) for r in recs) * 730
+    heuristic_savings_mo = sum(r.get("financial_impact_hr", 0.0) for r in recs) * 730
+
+    # Two savings figures exist in this app: this heuristic total (a rough,
+    # always-available safety-buffer estimate) and the real commitment-
+    # pricing-based projection below (accurate, but needs cached Azure
+    # pricing to compute). Previously these lived in two different tabs
+    # showing two different numbers for a similarly-worded metric - a real
+    # source of confusion. Now: the real figure REPLACES the heuristic one
+    # in the headline metric whenever it's available, with the heuristic
+    # kept only as an always-on fallback - one trustworthy number, not two
+    # competing ones.
+    real_savings = _real_projected_savings()
+    headline_savings_mo = real_savings["total_monthly_savings"] if real_savings else heuristic_savings_mo
+    savings_label = "Total Monthly Savings Potential" if real_savings else "Total Monthly Savings Potential (estimated)"
 
     with st.container(border=True):
         rc1, rc2, rc3 = st.columns(3)
         rc1.metric("Critical Priority Actions", f"{high_count} items", delta="Immediate Action Required" if high_count > 0 else "None", delta_color="inverse" if high_count > 0 else "off")
         rc2.metric("Purchase / Review Opportunities", f"{med_count} items", delta="Savings Available" if med_count > 0 else "Optimal", delta_color="normal" if med_count > 0 else "off")
-        rc3.metric("Total Monthly Savings Potential", fmt(total_savings_mo, 2) + "/mo", delta="Identified Opportunity")
+        rc3.metric(savings_label, fmt(headline_savings_mo, 2) + "/mo", delta="Identified Opportunity")
+
+    if real_savings:
+        with st.expander("💡 Savings Plan vs. Reserved Instance breakdown (real cached pricing)", expanded=False):
+            st.caption(
+                f"Using the term choices selected on the Savings Plan Analysis tab ({real_savings['sp_term']} for Compute) "
+                f"and the RI Coverage tab ({real_savings['ri_term']}) - change them there to update this."
+            )
+            b1, b2, b3 = st.columns(3)
+            b1.metric(f"Savings Plan ({real_savings['sp_term']})", fmt(real_savings["sp_monthly_savings"], 2) + "/mo")
+            b2.metric(f"Reserved Instance ({real_savings['ri_term']})", fmt(real_savings["ri_monthly_savings"], 2) + "/mo")
+            b3.metric("Combined Total", fmt(real_savings["total_monthly_savings"], 2) + "/mo")
+    else:
+        st.info(
+            "ℹ️ Real commitment-rate pricing isn't available yet for AWS (or there's no cached pricing for "
+            "this Azure tenant's SKUs) - the figure above is the safety-buffer estimate used for each "
+            "recommendation's individual $ impact below, not a real cached rate.", icon="ℹ️",
+        )
 
     fig_recs = get_recommendation_opportunity_chart(recs, is_dark=is_dark_theme)
     st.plotly_chart(fig_recs, use_container_width=True)

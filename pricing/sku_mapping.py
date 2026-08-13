@@ -356,7 +356,22 @@ def _plan_sql_family(sku: str, family: str, service_name: str, redundancy: str =
         return SkuQueryPlan(supported=False, reason=f"SKU '{sku}' doesn't match either the expected TIER_Generation_vCores (Provisioned, e.g. GP_Gen5_4) or TIER_Serverless_vCores pattern - can't size a reservation without a known vCore count. If this is a DTU-purchase-model database (e.g. 'S0', 'P1', Basic/Standard/Premium tiers), that's a separate, currently-unmapped naming scheme - verified live that DTU-tier SQL Database has zero Savings Plan and zero Reservation entries in the Retail API at all, so there would be nothing to fetch regardless.")
     tier, generation, vcores = parts[0].upper(), "_".join(parts[1:-1]), int(parts[-1])
 
-    if generation.upper() == "SERVERLESS":
+    # CORRECTED 2026-08, live-confirmed via the user's own real free-tier SQL
+    # Database: two genuinely different Serverless naming conventions exist
+    # and BOTH must be recognized. This app's own demo/seed data uses
+    # "TIER_Serverless_vCores" (e.g. "GP_Serverless_4", generation =
+    # "Serverless" outright) - but a REAL Azure Resource Graph scan reports
+    # "TIER_S_Generation_vCores" instead (e.g. "GP_S_Gen5_1" - confirmed both
+    # from a real exported ARM template AND a real live inventory scan of
+    # the user's own free-tier database). Missing the second form was a real
+    # silent-failure bug: the SKU fell through to the generic Provisioned
+    # branch below, constructed a non-existent armSkuName
+    # ("SQLDB_GP_Compute_S_Gen5_1"), and returned supported=True with a
+    # blank PAYG/SP/RI everywhere - no error, just empty cells in the UI.
+    # Caught only because the user ran an actual live scan and noticed the
+    # blanks - exactly the class of live-tenant-only bug flagged as
+    # unverified all session.
+    if generation.upper() == "SERVERLESS" or parts[1].upper() == "S":
         return _plan_sql_serverless(tier, vcores, family, service_name)
     if generation.upper().replace("-", "") in ("DC", "DCSERIES"):
         return _plan_sql_dc_series(tier, vcores, family, service_name)
