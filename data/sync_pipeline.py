@@ -22,16 +22,31 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-from db.schema import init_db, get_engine, CloudInventory, Commitment, SyncLog, CloudTenant
+from db.schema import (
+    init_db, get_engine, CloudInventory, Commitment, SyncLog, CloudTenant,
+    ReservationPurchase, SavingsPlanPurchase, CommitmentPriceCache,
+)
 
 # Live-tenant ingestion always operates in the "live" scope (db/schema.py's
 # demo/live split) - this pipeline exists specifically to sync real cloud API
 # data, never demo/benchmark data.
 _MODE = "live"
-from azure_conn.connector import load_credentials_from_env, fetch_live_inventory, test_connection, AzureCredentials
+from azure_conn.connector import (
+    load_credentials_from_env, fetch_live_inventory, fetch_live_reservations,
+    fetch_live_savings_plans, test_connection, AzureCredentials,
+)
 from aws.connector import load_aws_credentials_from_env, test_aws_connection
 from pricing.azure_retail_api import refresh_retail_prices
 from pricing.commitment_pricing import refresh_commitment_prices
+from pricing.commitment_mapping import derive_reservation_commitment_fields, derive_savings_plan_commitment_fields
+
+
+def _reservation_commitment_id(r: dict) -> str:
+    return f"LIVE-RI-{r.get('reservation_id') or r.get('name') or r.get('reservation_order_id')}"
+
+
+def _savings_plan_commitment_id(s: dict) -> str:
+    return f"LIVE-SP-{s.get('savings_plan_id') or s.get('name') or s.get('savings_plan_order_id')}"
 
 
 def run_ingestion_pipeline(provider: str = "Azure", creds=None, force_mock: bool = False, tenant_db_id=None) -> dict:
@@ -65,9 +80,13 @@ def run_ingestion_pipeline(provider: str = "Azure", creds=None, force_mock: bool
             if is_azure:
                 df_live = fetch_live_inventory(live_creds)
                 records = df_live.to_dict(orient="records")
+                reservation_records = fetch_live_reservations(live_creds).to_dict(orient="records")
+                savings_plan_records = fetch_live_savings_plans(live_creds).to_dict(orient="records")
             else:
-                # AWS live fetch fallback
-                records = []
+                # AWS live fetch fallback - Reservations/Savings Plans are
+                # Azure-only for now, same as inventory (aws/connector.py has
+                # no live fetch yet either).
+                records, reservation_records, savings_plan_records = [], [], []
 
             rates = refresh_retail_prices(engine, records, provider=provider) if records else {}
             for r in records:
@@ -81,12 +100,51 @@ def run_ingestion_pipeline(provider: str = "Azure", creds=None, force_mock: bool
             if records:
                 refresh_commitment_prices(engine, records, provider=provider)
 
+            # Derive this app's simplified Commitment rows from the raw
+            # purchase records (pricing/commitment_mapping.py) - Reservations
+            # need a real 1yr/3yr rate looked up (they carry no $ amount of
+            # their own); Savings Plans already carry their own $/hr rate
+            # (commitment.amount) and need no lookup. See that module's
+            # docstring for why this isn't a 1:1 field copy.
+            reservation_commitments = []
+            ri_pricing_lookup_rows = []
+            for r in reservation_records:
+                fields = derive_reservation_commitment_fields(r)
+                if fields is None:
+                    continue
+                lookup = fields.pop("_pricing_lookup")
+                fields["commitment_id"] = _reservation_commitment_id(r)
+                reservation_commitments.append((fields, lookup))
+                ri_pricing_lookup_rows.append({
+                    "resource_type": lookup["resource_type"], "sku": lookup["sku"],
+                    "region": lookup["region"], "os": lookup["os"], "redundancy": lookup["redundancy"],
+                })
+            if ri_pricing_lookup_rows:
+                refresh_commitment_prices(engine, ri_pricing_lookup_rows, provider="Azure")
+
+            savings_plan_commitments = []
+            for s in savings_plan_records:
+                fields = derive_savings_plan_commitment_fields(s)
+                if fields.get("hourly_usd_commitment") is None:
+                    continue   # commitment.grain wasn't 'Hourly' - can't fabricate a rate, skip rather than guess.
+                fields["commitment_id"] = _savings_plan_commitment_id(s)
+                savings_plan_commitments.append(fields)
+
             with Session(engine) as session:
                 # Replace this tenant's prior snapshot so removed/renamed Azure
                 # resources don't linger as stale rows across re-syncs.
                 if tenant_db_id is not None:
                     session.query(CloudInventory).filter(
                         CloudInventory.tenant_id == tenant_db_id
+                    ).delete(synchronize_session=False)
+                    session.query(ReservationPurchase).filter(
+                        ReservationPurchase.tenant_id == tenant_db_id
+                    ).delete(synchronize_session=False)
+                    session.query(SavingsPlanPurchase).filter(
+                        SavingsPlanPurchase.tenant_id == tenant_db_id
+                    ).delete(synchronize_session=False)
+                    session.query(Commitment).filter(
+                        Commitment.tenant_id == tenant_db_id
                     ).delete(synchronize_session=False)
 
                 for r in records:
@@ -108,6 +166,32 @@ def run_ingestion_pipeline(provider: str = "Azure", creds=None, force_mock: bool
                         tenant_id=tenant_db_id,
                     ))
                 synced_count = len(records)
+
+                for r in reservation_records:
+                    session.add(ReservationPurchase(**r, tenant_id=tenant_db_id))
+                for s in savings_plan_records:
+                    session.add(SavingsPlanPurchase(**s, tenant_id=tenant_db_id))
+
+                # Real 1yr/3yr Reservation rates, looked up from the cache
+                # refresh_commitment_prices() just populated above - keyed
+                # identically to CommitmentPriceCache's own columns.
+                ri_cache = {
+                    (row.resource_type, row.region, row.sku, row.os, row.redundancy, row.term): row.effective_hourly_rate_usd
+                    for row in session.query(CommitmentPriceCache).filter(
+                        CommitmentPriceCache.provider == "Azure", CommitmentPriceCache.instrument == "ReservedInstance",
+                    ).all()
+                }
+                ri_written = 0
+                for fields, lookup in reservation_commitments:
+                    rate = ri_cache.get((lookup["resource_type"], lookup["region"], lookup["sku"], lookup["os"], lookup["redundancy"], lookup["term_key"]))
+                    if rate is None:
+                        continue   # no real rate found for this SKU/region/term - don't fabricate one.
+                    session.add(Commitment(**fields, hourly_usd_commitment=rate, provider="Azure", tenant_id=tenant_db_id))
+                    ri_written += 1
+
+                for fields in savings_plan_commitments:
+                    session.add(Commitment(**fields, provider="Azure", tenant_id=tenant_db_id))
+
                 session.add(SyncLog(
                     synced_at=now_iso,
                     provider=provider,
@@ -116,7 +200,10 @@ def run_ingestion_pipeline(provider: str = "Azure", creds=None, force_mock: bool
                     source="Azure Function (24h Cron API)"
                 ))
                 session.commit()
-            message = f"Live API ingestion completed cleanly. Synced {synced_count} resources from {provider}."
+            message = (
+                f"Live API ingestion completed cleanly. Synced {synced_count} resources, "
+                f"{ri_written} reservation(s), and {len(savings_plan_commitments)} savings plan(s) from {provider}."
+            )
         except Exception as e:
             status = "FAILED"
             message = f"API Sync Failed: {str(e)}"

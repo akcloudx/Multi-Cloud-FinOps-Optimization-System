@@ -1015,6 +1015,19 @@ def _render_sp_pool_economics(pool_label: str, pool_df: pd.DataFrame, existing_c
         st.caption("ℹ️ Illustrative only — no cached commitment pricing yet for this pool's SKUs; re-run a sync from the tenant's Manage dialog on the Home page.")
 
 
+def _with_mapping_caveat(source_df: pd.DataFrame, display_df: pd.DataFrame) -> pd.DataFrame:
+    """Appends a caveat column to a commitment display table when any row
+    came from a live tenant's best-effort mapping (Azure genuinely can't
+    disambiguate the purchase record - see pricing/commitment_mapping.py) -
+    no-op (and no extra column) for demo data / unambiguous real rows, so
+    this never clutters the common case."""
+    if "is_inferred_mapping" not in source_df.columns or not source_df["is_inferred_mapping"].any():
+        return display_df
+    out = display_df.copy()
+    out["⚠️ Note"] = source_df["mapping_note"].where(source_df["is_inferred_mapping"], "").fillna("")
+    return out
+
+
 def _render_savings_plan_tab():
     st.subheader(f"{selected_provider} Savings Plan Analysis")
     st.caption("Shows which resources run continuously, compares them to what you've already committed, and recommends how much more to commit.")
@@ -1102,7 +1115,7 @@ def _render_savings_plan_tab():
     if not compute_sp_df.empty:
         sp_c = compute_sp_df[["commitment_id", "scope_sku", "scope_region", "hourly_usd_commitment", "term", "expiry_date"]].copy()
         sp_c["hourly_usd_commitment"] = sp_c["hourly_usd_commitment"].apply(lambda x: fmt(x, 4) + "/hr")
-        st.dataframe(sp_c, hide_index=True, width="stretch")
+        st.dataframe(_with_mapping_caveat(compute_sp_df, sp_c), hide_index=True, width="stretch")
 
     st.divider()
 
@@ -1141,7 +1154,7 @@ def _render_savings_plan_tab():
     if not db_sp_df.empty:
         sp_d = db_sp_df[["commitment_id", "scope_sku", "scope_region", "hourly_usd_commitment", "term", "expiry_date"]].copy()
         sp_d["hourly_usd_commitment"] = sp_d["hourly_usd_commitment"].apply(lambda x: fmt(x, 4) + "/hr")
-        st.dataframe(sp_d, hide_index=True, width="stretch")
+        st.dataframe(_with_mapping_caveat(db_sp_df, sp_d), hide_index=True, width="stretch")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1187,7 +1200,7 @@ def _render_ri_coverage_tab():
         if not ri_df.empty:
             ri_disp = ri_df[["commitment_id", "commitment_type", "scope_sku", "scope_region", "scope_os", "reserved_qty", "hourly_usd_commitment", "term", "expiry_date"]].copy()
             ri_disp["hourly_usd_commitment"] = ri_disp["hourly_usd_commitment"].apply(lambda x: fmt(x, 4) + "/hr each")
-            st.dataframe(ri_disp, hide_index=True, width="stretch")
+            st.dataframe(_with_mapping_caveat(ri_df, ri_disp), hide_index=True, width="stretch")
         else:
             st.info("No active Reserved Instance contracts found.")
 

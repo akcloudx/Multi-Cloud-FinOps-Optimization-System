@@ -152,6 +152,8 @@ def init_db(provider: str = "Azure", mode: str = "demo"):
     _ensure_column(engine, schema_name, "cloud_tenants", "last_synced_at", "VARCHAR(255)")
     _ensure_column(engine, schema_name, "cloud_tenants", "tenant_permission_status", "VARCHAR(50)")
     _ensure_column(engine, schema_name, "cloud_tenants", "tenant_missing_roles", "VARCHAR(255)")
+    _ensure_column(engine, schema_name, "commitments", "is_inferred_mapping", "BOOLEAN")
+    _ensure_column(engine, schema_name, "commitments", "mapping_note", "VARCHAR(500)")
     return engine
 
 
@@ -234,6 +236,15 @@ class Commitment(Base):
     provider                = Column(String(255), default="Azure")
     # NULL = demo/seed data. Non-NULL = live-ingested, scoped to that cloud_tenants.id.
     tenant_id               = Column(Integer, nullable=True)
+    # True only for rows derived (pricing/commitment_mapping.py) from a real
+    # live tenant's ReservationPurchase/SavingsPlanPurchase where Azure's own
+    # API genuinely can't disambiguate the target (e.g. SQL Database vs SQL
+    # Elastic Pool reservations share an identical purchase-record shape) -
+    # best-effort defaulted rather than dropped, but flagged so the UI can
+    # show a caveat instead of presenting a guess as fact. Always False for
+    # demo/seed rows and every unambiguous real mapping.
+    is_inferred_mapping     = Column(Boolean, default=False)
+    mapping_note            = Column(String(500), nullable=True)
 
 
 class ReconciliationLog(Base):

@@ -5,32 +5,16 @@ Azure Service Principal authentication and live data connection module.
 Handles:
   1. Credential validation (Service Principal via Client Secret)
   2. Live inventory fetch from Azure Resource Graph
-  3. Live reservation & savings plan fetch from Azure Consumption APIs
-  4. Required RBAC roles documentation
-
-REQUIRED AZURE RBAC ROLES for the Service Principal:
-  ┌─────────────────────────────┬───────────────────────────────┬───────────────────────────┐
-  │ Role                        │ Scope                         │ Purpose                   │
-  ├─────────────────────────────┼───────────────────────────────┼───────────────────────────┤
-  │ Reader                      │ Subscription                  │ List all Azure resources  │
-  │ Cost Management Reader      │ Subscription                  │ Read cost & usage data    │
-  │ Reservations Reader         │ Subscription or Tenant        │ Read RI & Reserved Cap.   │
-  └─────────────────────────────┴───────────────────────────────┴───────────────────────────┘
-
-HOW TO CREATE THE SERVICE PRINCIPAL (Azure CLI):
-  az ad sp create-for-rbac --name "finops-optimizer-sp" --role "Reader" \
-      --scopes /subscriptions/<SUBSCRIPTION_ID>
-
-  Then assign additional roles:
-  az role assignment create \
-      --assignee <APP_ID> \
-      --role "Cost Management Reader" \
-      --scope /subscriptions/<SUBSCRIPTION_ID>
-
-  az role assignment create \
-      --assignee <APP_ID> \
-      --role "Reservations Reader" \
-      --scope /subscriptions/<SUBSCRIPTION_ID>
+  3. Live reservation fetch from Microsoft.Capacity (fetch_live_reservations)
+     and live savings plan fetch from Microsoft.BillingBenefits
+     (fetch_live_savings_plans) - both tenant-wide "List All" REST APIs, not
+     Azure Consumption (see REQUIRED_TENANT_ROLES below for the real,
+     tenant-scoped roles this actually requires - a subscription-scoped
+     "Reservations Reader" grant, as this docstring used to describe, can
+     never satisfy it).
+  4. Required RBAC roles documentation (REQUIRED_SUBSCRIPTION_ROLES /
+     REQUIRED_TENANT_ROLES below - the authoritative, verified reference;
+     see each role's own "How to Assign" for the real az CLI command).
 """
 
 import sys, os, glob
@@ -74,16 +58,22 @@ except ImportError:
     HAS_RESOURCE_GRAPH = False
 
 try:
-    from azure.mgmt.consumption import ConsumptionManagementClient
-    HAS_CONSUMPTION = True
-except ImportError:
-    HAS_CONSUMPTION = False
-
-try:
     from azure.mgmt.authorization import AuthorizationManagementClient
     HAS_AUTHORIZATION = True
 except ImportError:
     HAS_AUTHORIZATION = False
+
+try:
+    from azure.mgmt.reservations import ReservationsMgmtClient
+    HAS_RESERVATIONS = True
+except ImportError:
+    HAS_RESERVATIONS = False
+
+try:
+    from azure.mgmt.billingbenefits import BillingBenefitsMgmtClient
+    HAS_BILLINGBENEFITS = True
+except ImportError:
+    HAS_BILLINGBENEFITS = False
 
 import base64
 import json
@@ -791,3 +781,171 @@ def _map_power_state(state: str) -> str:
     # PaaS resources (SQL DB, Storage, Redis, App Service Plans, ...) have no
     # powerState concept - they bill continuously while provisioned.
     return "Running"
+
+
+# ── Live Reservation / Savings Plan Fetch ────────────────────────────────────
+# Both "List All" APIs are genuinely tenant-wide (not subscription-scoped -
+# see REQUIRED_TENANT_ROLES above) and both embed 1/7/30-day utilization
+# directly in the same response - verified against Microsoft Learn AND the
+# actually-installed azure-mgmt-reservations 3.0.0 / azure-mgmt-billingbenefits
+# 1.0.0b2 SDK model source (2026-08), not guessed from search snippets. No
+# separate Microsoft.CostManagement/benefitUtilizationSummaries call needed.
+
+def _parse_utilization_aggregates(utilization) -> dict:
+    """Shared by both fetch functions below - the SDK model shape is
+    identical for Reservations (ReservationsPropertiesUtilization) and
+    Savings Plans (Utilization): {trend, aggregates: [{grain, grain_unit,
+    value, value_unit}]}. grain is the trailing-window size in days (1/7/30);
+    value is the already-computed utilization percentage (0-100) for that
+    window - confirmed against the installed SDK's model fields, not
+    inferred."""
+    result = {"trend": None, "1day": None, "7day": None, "30day": None}
+    if not utilization:
+        return result
+    result["trend"] = utilization.trend
+    for agg in (utilization.aggregates or []):
+        if agg.grain == 1:
+            result["1day"] = agg.value
+        elif agg.grain == 7:
+            result["7day"] = agg.value
+        elif agg.grain == 30:
+            result["30day"] = agg.value
+    return result
+
+
+def _iso(value) -> Optional[str]:
+    """date/datetime -> ISO string, matching db.schema.ReservationPurchase/
+    SavingsPlanPurchase's String-typed date columns. None-safe."""
+    return value.isoformat() if value is not None else None
+
+
+def fetch_live_reservations(creds: AzureCredentials) -> pd.DataFrame:
+    """Tenant-wide Reservation enumeration via Microsoft.Capacity/reservations
+    "List All" (GET /providers/Microsoft.Capacity/reservations?api-version=
+    2022-11-01). Requires Reservations Reader at /providers/Microsoft.Capacity
+    - see REQUIRED_TENANT_ROLES / check_tenant_role_assignments() above.
+    ReservationsMgmtClient is constructed from the credential alone (no
+    subscription_id) - confirmed against the installed SDK's client
+    constructor - reservations genuinely aren't subscription resources, the
+    same finding check_tenant_role_assignments() already made for RBAC.
+    Returns a DataFrame shaped field-for-field to db.schema.ReservationPurchase
+    (see db/seed.py's RESERVATION_PURCHASES for the same field set hand-built
+    from real API examples). No DB writes here - see data/sync_pipeline.py."""
+    if not HAS_AZURE_IDENTITY or not HAS_RESERVATIONS:
+        raise ImportError(
+            "Install required packages: pip install azure-identity azure-mgmt-reservations"
+        )
+
+    credential = ClientSecretCredential(
+        tenant_id=creds.tenant_id, client_id=creds.client_id, client_secret=creds.client_secret,
+    )
+    client = ReservationsMgmtClient(credential)
+
+    records = []
+    for r in client.reservation.list_all():
+        props = r.properties
+        order_id, reservation_id = "", ""
+        if r.id:
+            # id shape: /providers/Microsoft.Capacity/reservationOrders/{orderId}/reservations/{id}
+            head, _, tail = r.id.partition("/reservationOrders/")
+            order_id, _, reservation_id = tail.partition("/reservations/")
+        scope_props = props.applied_scope_properties if props else None
+        util = _parse_utilization_aggregates(props.utilization if props else None)
+        records.append({
+            "reservation_order_id":          order_id,
+            "reservation_id":                reservation_id or (r.name or ""),
+            "name":                          r.name or "",
+            "type":                          r.type or "",
+            "location":                      r.location or "",
+            "sku_name":                      r.sku.name if r.sku else "",
+            "sku_description":               props.sku_description if props else None,
+            "reserved_resource_type":        props.reserved_resource_type if props else "",
+            "instance_flexibility":          props.instance_flexibility if props else None,
+            "applied_scope_type":            props.applied_scope_type if props else "",
+            "applied_scope_display_name":    scope_props.display_name if scope_props else None,
+            "applied_scope_subscription_id": scope_props.subscription_id if scope_props else None,
+            "billing_plan":                  props.billing_plan if props else "",
+            "term":                          props.term if props else "",
+            "quantity":                      props.quantity if props and props.quantity is not None else 0,
+            "provisioning_state":            props.provisioning_state if props else "",
+            "renew":                         bool(props.renew) if props else False,
+            "purchase_date":                 _iso(props.purchase_date) if props else None,
+            "purchase_date_time":            _iso(props.purchase_date_time) if props else "",
+            "effective_date_time":           _iso(props.effective_date_time) if props else "",
+            "benefit_start_time":            _iso(props.benefit_start_time) if props else "",
+            "expiry_date":                   _iso(props.expiry_date) if props else None,
+            "expiry_date_time":              _iso(props.expiry_date_time) if props else "",
+            "utilization_trend":             util["trend"],
+            "utilization_1day_pct":          util["1day"],
+            "utilization_7day_pct":          util["7day"],
+            "utilization_30day_pct":         util["30day"],
+            "provider":                      "Azure",
+        })
+    return pd.DataFrame(records)
+
+
+def fetch_live_savings_plans(creds: AzureCredentials) -> pd.DataFrame:
+    """Tenant-wide Savings Plan enumeration via Microsoft.BillingBenefits/
+    savingsPlans "List All" (GET /providers/Microsoft.BillingBenefits/
+    savingsPlans?api-version=2022-11-01). Requires Savings Plan Reader at
+    /providers/Microsoft.BillingBenefits - see REQUIRED_TENANT_ROLES /
+    check_tenant_role_assignments() above. BillingBenefitsMgmtClient's
+    constructor requires *some* subscription_id (a real SDK requirement,
+    confirmed against the installed client's __init__ signature - same
+    pattern already documented for AuthorizationManagementClient in
+    check_tenant_role_assignments()) even though savings_plan.list_all()
+    itself queries tenant-wide, not that subscription.
+    commitment.amount at commitment.grain == 'Hourly' IS the real $/hr
+    commitment rate - unlike Reservations (which carry no $ amount at all in
+    this response), no separate pricing lookup is needed for Savings Plans;
+    see pricing/commitment_mapping.py. SavingsPlanModel exposes its
+    properties as flattened attributes (s.term, s.commitment, ... - not
+    nested under s.properties) - confirmed against the installed SDK model.
+    Returns a DataFrame shaped field-for-field to db.schema.SavingsPlanPurchase.
+    No DB writes here - see data/sync_pipeline.py."""
+    if not HAS_AZURE_IDENTITY or not HAS_BILLINGBENEFITS:
+        raise ImportError(
+            "Install required packages: pip install azure-identity azure-mgmt-billingbenefits"
+        )
+
+    credential = ClientSecretCredential(
+        tenant_id=creds.tenant_id, client_id=creds.client_id, client_secret=creds.client_secret,
+    )
+    client = BillingBenefitsMgmtClient(credential, creds.subscription_id)
+
+    records = []
+    for s in client.savings_plan.list_all():
+        order_id, plan_id = "", ""
+        if s.id:
+            # id shape: /providers/Microsoft.BillingBenefits/savingsPlanOrders/{orderId}/savingsPlans/{id}
+            head, _, tail = s.id.partition("/savingsPlanOrders/")
+            order_id, _, plan_id = tail.partition("/savingsPlans/")
+        commitment = s.commitment
+        util = _parse_utilization_aggregates(s.utilization)
+        records.append({
+            "savings_plan_order_id":    order_id,
+            "savings_plan_id":          plan_id or (s.name or ""),
+            "name":                     s.name or "",
+            "type":                     s.type or "",
+            "sku_name":                 s.sku.name if s.sku else "",
+            "billing_scope_id":         s.billing_scope_id or "",
+            "billing_plan":             s.billing_plan or "",
+            "commitment_grain":         commitment.grain if commitment else "",
+            "commitment_currency_code": commitment.currency_code if commitment else "",
+            "commitment_amount":        commitment.amount if commitment and commitment.amount is not None else 0.0,
+            "applied_scope_type":       s.applied_scope_type or "",
+            "display_name":             s.display_name,
+            "term":                     s.term or "",
+            "provisioning_state":       s.provisioning_state or "",
+            "renew":                    bool(s.renew),
+            "purchase_date_time":       _iso(s.purchase_date_time) or "",
+            "effective_date_time":      _iso(s.effective_date_time) or "",
+            "benefit_start_time":       _iso(s.benefit_start_time) or "",
+            "expiry_date_time":         _iso(s.expiry_date_time) or "",
+            "utilization_trend":        util["trend"],
+            "utilization_1day_pct":     util["1day"],
+            "utilization_7day_pct":     util["7day"],
+            "utilization_30day_pct":    util["30day"],
+            "provider":                 "Azure",
+        })
+    return pd.DataFrame(records)

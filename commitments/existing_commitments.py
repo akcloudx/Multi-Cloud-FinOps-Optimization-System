@@ -8,10 +8,13 @@ TWO SAVINGS PLAN TYPES (per Azure policy):
   - Savings Plan for Databases : 1-year ONLY. Covers SQL DB, SQL MI,
                                   PostgreSQL, MySQL, Cosmos DB, etc.
 
-REAL AZURE EQUIVALENT:
-  - Reservations : azure-mgmt-consumption → reservationSummaries / reservationDetails
-  - Savings Plans: Cost Management BenefitUtilizationSummaries API
-                   (Microsoft.CostManagement/benefitUtilizationSummaries)
+REAL AZURE EQUIVALENT (live tenant fetch - see azure_conn/connector.py's
+fetch_live_reservations/fetch_live_savings_plans and pricing/
+commitment_mapping.py for the derivation into this table):
+  - Reservations : azure-mgmt-reservations -> Microsoft.Capacity/reservations
+                   "List All" (embeds utilization directly)
+  - Savings Plans: azure-mgmt-billingbenefits -> Microsoft.BillingBenefits/
+                   savingsPlans "List All" (embeds utilization directly)
 """
 
 import pandas as pd
@@ -51,11 +54,13 @@ def get_all_commitments(provider: str = "Azure", mode: str = "demo", tenant_id=N
             "term":                  r.term,
             "expiry_date":           r.expiry_date,
             "provider":              r.provider,
+            "is_inferred_mapping":   bool(r.is_inferred_mapping),
+            "mapping_note":          r.mapping_note,
         }
         for r in rows
     ]
     columns = ["commitment_id", "commitment_type", "scope_sku", "scope_resource_type", "scope_region", "scope_os", "scope_redundancy",
-               "hourly_usd_commitment", "reserved_qty", "term", "expiry_date", "provider"]
+               "hourly_usd_commitment", "reserved_qty", "term", "expiry_date", "provider", "is_inferred_mapping", "mapping_note"]
     return pd.DataFrame(data, columns=columns)
 
 
