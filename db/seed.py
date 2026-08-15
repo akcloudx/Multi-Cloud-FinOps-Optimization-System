@@ -252,6 +252,16 @@ RI_ONLY_INVENTORY = [
      "payg_hourly_usd": 0.088, "avg_daily_running_hours": 24,
      "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
 
+    # Azure Cache for Redis Enterprise (aka "Azure Managed Redis") — a
+    # genuinely separate ARM resource type/SKU taxonomy from classic Redis
+    # above. RI covers: compute costs only. NOT: networking or storage.
+    {"resource_id": "REDISENT-Prod-01", "resource_name": "prod-cache-redisent",
+     "resource_type": "Azure Cache for Redis Enterprise",
+     "resource_state": "Running",
+     "region": "australiaeast", "os": "N/A", "sku": "Balanced_B10",
+     "payg_hourly_usd": 0.391, "avg_daily_running_hours": 24,
+     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+
     # Azure Synapse Analytics — Reserved Capacity (cDWU)
     # RI covers: cDWU usage only. NOT: storage or networking.
     {"resource_id": "SYNAPSE-Prod-01", "resource_name": "prod-dw-synapse",
@@ -598,6 +608,7 @@ RI_ONLY_ELIGIBLE_TYPES = {
     "Azure Blob Storage",
     "Azure Files",
     "Azure Cache for Redis",
+    "Azure Cache for Redis Enterprise",
     "Azure Synapse Analytics",
     "Azure Databricks",
     "Azure Disk Storage",
@@ -620,6 +631,7 @@ RI_COVERAGE_NOTES = {
     "Azure Blob Storage":               ("Storage capacity (GiB) for Blob and Data Lake Gen2", "Bandwidth, transaction rates"),
     "Azure Files":                      ("Storage capacity for Azure Files (hot/cool)", "Bandwidth, transaction rates"),
     "Azure Cache for Redis":            ("Compute costs only", "Networking, storage"),
+    "Azure Cache for Redis Enterprise": ("Compute costs only (all service tiers eligible)", "Networking, storage"),
     "Azure Synapse Analytics":          ("cDWU usage", "Storage, networking"),
     "Azure Databricks":                 ("DBU usage only", "Compute, storage, networking (charged separately)"),
     "Azure Disk Storage":               ("Premium SSD P30 and larger only", "Other disk types, sizes smaller than P30"),

@@ -43,15 +43,16 @@ Savings plan for Databases (1-yr ONLY) covers:
 
 NOT covered by ANY savings plan - Reserved Capacity is the only commitment
 option for these, and only for the tiers documented in ri_eligibility.py:
-  Azure Cache for Redis, Azure Blob Storage, Azure Files, Azure Disk Storage,
-  Azure Synapse Analytics, Azure Databricks.
+  Azure Cache for Redis, Azure Cache for Redis Enterprise, Azure Blob
+  Storage, Azure Files, Azure Disk Storage, Azure Synapse Analytics,
+  Azure Databricks.
 """
 
 import re
 from typing import Tuple
 
 _NO_SAVINGS_PLAN_TYPES = {
-    "Azure Cache for Redis", "Azure Blob Storage", "Azure Files",
+    "Azure Cache for Redis", "Azure Cache for Redis Enterprise", "Azure Blob Storage", "Azure Files",
     "Azure Disk Storage", "Azure Synapse Analytics", "Azure Databricks",
 }
 

@@ -47,6 +47,7 @@ _SERVICE_CATEGORY_MAP = {
     "Azure Database for PostgreSQL": "Databases",
     "Azure Cosmos DB": "Databases",
     "Azure Cache for Redis": "Databases",
+    "Azure Cache for Redis Enterprise": "Databases",
     "Azure Blob Storage": "Storage",
     "Azure Files": "Storage",
     "Azure Disk Storage": "Storage",

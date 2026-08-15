@@ -579,20 +579,33 @@ def _plan_synapse(sku: str) -> SkuQueryPlan:
     )
 
 
-# ── Azure Cache for Redis ────────────────────────────────────────────────────
+# ── Azure Cache for Redis (classic Microsoft.Cache/redis - Basic/Standard/
+# Premium only) ──────────────────────────────────────────────────────────────
 def _plan_redis(sku: str) -> SkuQueryPlan:
     # Verified live: classic Standard/Basic (C-series) Redis has ZERO
     # Reservation entries in the Retail Prices API - Azure genuinely doesn't
     # sell them (confirmed empty result set, not a naming mismatch). Premium
-    # (P-series) and Enterprise do. No Savings Plan exists for Redis at any
-    # tier (verified - 0 of 10 Premium Consumption items carried a
-    # savingsPlan array), consistent with this app's sp_eligibility.py
-    # already excluding Redis from Savings Plan entirely.
+    # (P-series) does. No Savings Plan exists for Redis at any tier
+    # (verified - 0 of 10 Premium Consumption items carried a savingsPlan
+    # array), consistent with this app's sp_eligibility.py already excluding
+    # Redis from Savings Plan entirely.
+    #
+    # CORRECTION (2026-08-15): this function used to also check for an
+    # "ENTERPRISE" token in the SKU string, but that was dead code - Redis
+    # Enterprise (aka Azure Managed Redis) is a genuinely SEPARATE ARM
+    # resource type (Microsoft.Cache/redisEnterprise, confirmed via
+    # Microsoft's own template reference) with `sku` as a TOP-LEVEL resource
+    # field, not nested under `properties.sku` like classic Redis - and a
+    # completely different SKU taxonomy (e.g. "Enterprise_E20",
+    # "Balanced_B10") that could never have matched this function's
+    # "{family}{capacity}_{tier}" parsing anyway even if the string check
+    # had passed. See _plan_redis_enterprise below, now built as its own
+    # resource type "Azure Cache for Redis Enterprise".
     s = (sku or "").upper()
-    if "PREMIUM" not in s and "ENTERPRISE" not in s:
+    if "PREMIUM" not in s:
         return SkuQueryPlan(
             supported=False,
-            reason="Azure only sells Reserved Instances for Premium/Enterprise Redis tiers - Standard/Basic (C-series) has no reservation offering at all (verified live: zero API results, not a lookup gap).",
+            reason="Azure only sells Reserved Instances for the Premium Redis tier - Standard/Basic (C-series) has no reservation offering at all (verified live: zero API results, not a lookup gap).",
         )
     # Expected format from azure_conn/connector.py: "{family}{capacity}_{tier}",
     # e.g. "P2_Premium" - matches armSkuName's "..._P2_Cache" / skuName "P2".
@@ -603,6 +616,49 @@ def _plan_redis(sku: str) -> SkuQueryPlan:
         supported=True, service_name="Redis Cache", match_field="skuName",
         consumption_match_value=tier_code, reservation_match_value=tier_code,
         product_contains="Premium",
+    )
+
+
+# ── Azure Cache for Redis Enterprise (Microsoft.Cache/redisEnterprise, aka
+# "Azure Managed Redis" - a genuinely separate ARM resource type/SKU
+# taxonomy from classic Redis, confirmed via Microsoft's own template
+# reference, 2026-08) ────────────────────────────────────────────────────────
+# This app stores these SKUs as the real ARM sku.name value directly (e.g.
+# "Balanced_B10", "Enterprise_E20", "MemoryOptimized_M50") - no
+# transformation needed, azure_conn/connector.py's existing generic
+# top-level `sku.name` fallback already captures this correctly.
+#
+# Verified live across all 6 real families (Balanced/MemoryOptimized/
+# ComputeOptimized/FlashOptimized - the newer "Azure Managed Redis"
+# branding - and the older Enterprise/EnterpriseFlash naming, which
+# coexists in the Retail API under the SAME serviceName "Redis Cache"):
+# skuName is always the bare size code (e.g. "B10", "E20", "M700") matching
+# the ARM sku.name's suffix exactly, every family has REAL Consumption AND
+# Reservation entries (unlike classic Redis, where Reservation is
+# Premium-only), and genuinely ZERO Savings Plan anywhere (0 of every
+# family's Consumption items carried a savingsPlan array) - matching
+# classic Redis's already-established "no Savings Plan for Redis" finding.
+_REDIS_ENTERPRISE_FAMILY_PRODUCTS = {
+    "BALANCED":         "Azure Managed Redis - Balanced",
+    "MEMORYOPTIMIZED":  "Azure Managed Redis - Memory Optimized",
+    "COMPUTEOPTIMIZED": "Azure Managed Redis - Compute Optimized",
+    "FLASHOPTIMIZED":   "Azure Managed Redis - Flash Optimized",
+    "ENTERPRISE":       "Azure Redis Cache Enterprise",
+    "ENTERPRISEFLASH":  "Azure Redis Cache Enterprise Flash",
+}
+
+
+def _plan_redis_enterprise(sku: str) -> SkuQueryPlan:
+    if not sku or "_" not in sku:
+        return SkuQueryPlan(supported=False, reason=f"SKU '{sku}' doesn't match the expected 'Balanced_B10'/'Enterprise_E20'-style convention.")
+    family, code = sku.split("_", 1)
+    product_contains = _REDIS_ENTERPRISE_FAMILY_PRODUCTS.get(family.upper().replace(" ", "").replace("-", ""))
+    if not product_contains:
+        return SkuQueryPlan(supported=False, reason=f"Unrecognized Redis Enterprise family '{family}' - expected Balanced, MemoryOptimized, ComputeOptimized, FlashOptimized, Enterprise, or EnterpriseFlash.")
+    return SkuQueryPlan(
+        supported=True, service_name="Redis Cache", match_field="skuName",
+        consumption_match_value=code, reservation_match_value=code,
+        product_contains=product_contains,
     )
 
 
@@ -1022,6 +1078,7 @@ _PLAN_RESOLVERS = {
     "Azure SQL Managed Instance":    _plan_sql_managed_instance,
     "Azure Synapse Analytics":       _plan_synapse,
     "Azure Cache for Redis":         _plan_redis,
+    "Azure Cache for Redis Enterprise": _plan_redis_enterprise,
     "Azure Cosmos DB":               _plan_cosmos_db,
     "Azure Databricks":              _plan_databricks,
     "Azure Blob Storage":            _plan_unmeasurable_storage,

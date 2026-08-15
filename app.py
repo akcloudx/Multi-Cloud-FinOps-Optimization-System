@@ -551,7 +551,8 @@ _TYPE_ICONS = {
     "Compute": "🖥️", "Azure SQL Database": "🗄️", "Azure SQL Managed Instance": "🗄️",
     "Azure Database for MySQL": "🐬", "Azure Database for PostgreSQL": "🐘",
     "Azure Cosmos DB": "🌐", "Azure Blob Storage": "📦", "Azure Files": "📁",
-    "Azure Cache for Redis": "⚡", "Azure Synapse Analytics": "📊",
+    "Azure Cache for Redis": "⚡", "Azure Cache for Redis Enterprise": "⚡",
+    "Azure Synapse Analytics": "📊",
     "Azure Databricks": "🧱", "App Service": "🌍", "Azure Disk Storage": "💽",
 }
 

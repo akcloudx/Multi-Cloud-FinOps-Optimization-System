@@ -245,6 +245,15 @@ Resources
     'microsoft.documentdb/databaseaccounts',
     'microsoft.storage/storageaccounts',
     'microsoft.cache/redis',
+    // Redis Enterprise (aka "Azure Managed Redis") is a genuinely SEPARATE
+    // resource type from classic Redis (Microsoft.Cache/redisEnterprise vs
+    // Microsoft.Cache/redis, confirmed via Microsoft's own ARM template
+    // reference, 2026-08) with its own SKU taxonomy (e.g. "Enterprise_E20",
+    // "Balanced_B10") and, unlike classic Redis, `sku` is a TOP-LEVEL
+    // resource field rather than nested under `properties.sku` - it's
+    // picked up by the existing generic top-level `topSku` fallback below
+    // with no dedicated extraction needed.
+    'microsoft.cache/redisenterprise',
     // The Synapse WORKSPACE resource itself has no billable SKU at all -
     // it's just a container/namespace (verified against Microsoft's own
     // ARM template reference, 2026-08: Microsoft.Synapse/workspaces has no
@@ -507,6 +516,7 @@ def _map_resource_type(azure_type: str) -> str:
         "microsoft.documentdb/databaseaccounts":        "Azure Cosmos DB",
         "microsoft.storage/storageaccounts":            "Azure Blob Storage",
         "microsoft.cache/redis":                        "Azure Cache for Redis",
+        "microsoft.cache/redisenterprise":               "Azure Cache for Redis Enterprise",
         "microsoft.synapse/workspaces/sqlpools":         "Azure Synapse Analytics",
         "microsoft.databricks/workspaces":              "Azure Databricks",
         "microsoft.web/serverfarms":                    "App Service",

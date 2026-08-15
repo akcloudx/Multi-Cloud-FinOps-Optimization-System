@@ -114,14 +114,25 @@ def _app_service_eligibility(sku: str) -> Tuple[bool, str]:
 
 def _redis_eligibility(sku: str) -> Tuple[bool, str]:
     # https://learn.microsoft.com/en-us/azure/azure-cache-for-redis/cache-reserved-pricing
-    # Basic and Standard tiers are NOT eligible - only Premium, Enterprise, and
-    # Enterprise Flash qualify.
+    # Basic and Standard tiers are NOT eligible - only Premium qualifies.
+    # Redis Enterprise (aka "Azure Managed Redis") is a genuinely separate
+    # ARM resource type (Microsoft.Cache/redisEnterprise, confirmed 2026-08)
+    # tracked under its own resource_type "Azure Cache for Redis Enterprise"
+    # - see _redis_enterprise_ri below, not handled here.
     s = (sku or "").lower()
     if not s or s == "n/a":
-        return True, "Assumed Premium/Enterprise tier (SKU not captured for this resource)."
-    if "premium" in s or "enterprise" in s:
-        return True, "Premium/Enterprise tier - eligible for Azure Cache for Redis reservations."
-    return False, "Basic and Standard tiers are not eligible for Azure Cache for Redis reservations - only Premium, Enterprise, and Enterprise Flash qualify."
+        return True, "Assumed Premium tier (SKU not captured for this resource)."
+    if "premium" in s:
+        return True, "Premium tier - eligible for Azure Cache for Redis reservations."
+    return False, "Basic and Standard tiers are not eligible for Azure Cache for Redis reservations - only Premium qualifies."
+
+
+def _redis_enterprise_ri(sku: str) -> Tuple[bool, str]:
+    # Verified live across all 6 real families (Balanced/MemoryOptimized/
+    # ComputeOptimized/FlashOptimized/Enterprise/EnterpriseFlash) - every
+    # one has real Reservation catalog entries, unlike classic Redis where
+    # only Premium does. Genuinely always eligible at this resource type.
+    return True, "Azure Cache for Redis Enterprise (Azure Managed Redis) - eligible for Reserved Capacity at every service tier."
 
 
 def _storage_eligibility(sku: str) -> Tuple[bool, str]:
@@ -226,6 +237,7 @@ _RULES = {
     "Azure Cosmos DB":               _cosmos_db_ri,
     "Azure Blob Storage":            _storage_eligibility,
     "Azure Cache for Redis":         _redis_eligibility,
+    "Azure Cache for Redis Enterprise": _redis_enterprise_ri,
     "Azure Synapse Analytics":       _synapse_ri,
     "Azure Databricks":              lambda sku: (True, "Databricks Commit Units (DBCU) prepurchase apply as a pooled discount across all workloads/tiers, not a per-resource reservation match."),
     "App Service":                   _app_service_eligibility,
