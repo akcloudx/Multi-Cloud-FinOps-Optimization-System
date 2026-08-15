@@ -245,7 +245,16 @@ Resources
     'microsoft.documentdb/databaseaccounts',
     'microsoft.storage/storageaccounts',
     'microsoft.cache/redis',
-    'microsoft.synapse/workspaces',
+    // The Synapse WORKSPACE resource itself has no billable SKU at all -
+    // it's just a container/namespace (verified against Microsoft's own
+    // ARM template reference, 2026-08: Microsoft.Synapse/workspaces has no
+    // top-level sku object). The actual billable Dedicated SQL Pool is a
+    // SEPARATE child resource type with its own top-level sku.name in
+    // exactly this app's "DW500c"-style convention already - querying the
+    // workspace instead of this meant no live tenant's Synapse Dedicated
+    // SQL Pool ever got a real SKU captured at all, a real, previously-
+    // undiscovered gap found while re-verifying this service, 2026-08.
+    'microsoft.synapse/workspaces/sqlpools',
     'microsoft.databricks/workspaces',
     'microsoft.web/serverfarms'
 )
@@ -498,7 +507,7 @@ def _map_resource_type(azure_type: str) -> str:
         "microsoft.documentdb/databaseaccounts":        "Azure Cosmos DB",
         "microsoft.storage/storageaccounts":            "Azure Blob Storage",
         "microsoft.cache/redis":                        "Azure Cache for Redis",
-        "microsoft.synapse/workspaces":                 "Azure Synapse Analytics",
+        "microsoft.synapse/workspaces/sqlpools":         "Azure Synapse Analytics",
         "microsoft.databricks/workspaces":              "Azure Databricks",
         "microsoft.web/serverfarms":                    "App Service",
     }

@@ -176,6 +176,24 @@ def _cosmos_db_ri(sku: str) -> Tuple[bool, str]:
     return True, "Provisioned throughput (Standard or Autoscale) - eligible for Reserved Capacity, purchased as a subscription-wide RU/s pool rather than per-resource."
 
 
+def _synapse_ri(sku: str) -> Tuple[bool, str]:
+    # This app's SKU is captured directly from the real Dedicated SQL Pool
+    # child resource's top-level sku.name (Microsoft.Synapse/workspaces/
+    # sqlPools, e.g. "DW500c" - a separate, billable resource type from the
+    # workspace container itself, confirmed via Microsoft's own ARM
+    # template reference, 2026-08 - see azure_conn/connector.py). A
+    # genuine, correctly-formatted "DW<n>c" SKU is always the real
+    # Dedicated SQL Pool, which IS eligible - Serverless SQL Pool and
+    # Apache Spark Pools are architecturally incapable of ever producing
+    # this SKU shape (Serverless has no dedicated resource/SKU at all;
+    # Spark Pools bill per vCore-hour via a completely different resource
+    # type this app doesn't currently ingest), so no separate exclusion
+    # check is needed here - the SKU shape itself is the signal.
+    if not re.match(r"^DW\d+c$", (sku or "").strip(), re.IGNORECASE):
+        return False, f"SKU '{sku}' doesn't match the Dedicated SQL Pool 'DW<n>c' convention - Serverless SQL Pool and Apache Spark Pools are architecturally different resources not eligible for classic Reserved Capacity."
+    return True, "Dedicated SQL Pool (cDWU) - eligible for Reserved Capacity, but only sold at the DW100c unit (larger tiers priced as a multiple - see pricing/sku_mapping.py)."
+
+
 def _disk_eligibility(sku: str) -> Tuple[bool, str]:
     # https://learn.microsoft.com/en-us/azure/virtual-machines/disks-reserved-capacity
     # Only Premium SSD disks at size P30 and larger (P30-P80) are eligible.
@@ -208,7 +226,7 @@ _RULES = {
     "Azure Cosmos DB":               _cosmos_db_ri,
     "Azure Blob Storage":            _storage_eligibility,
     "Azure Cache for Redis":         _redis_eligibility,
-    "Azure Synapse Analytics":       lambda sku: (True, "Assumed Dedicated SQL Pool (cDWU) - a Serverless SQL Pool alone is not eligible for classic reserved capacity."),
+    "Azure Synapse Analytics":       _synapse_ri,
     "Azure Databricks":              lambda sku: (True, "Databricks Commit Units (DBCU) prepurchase apply as a pooled discount across all workloads/tiers, not a per-resource reservation match."),
     "App Service":                   _app_service_eligibility,
     "Azure Disk Storage":            _disk_eligibility,
