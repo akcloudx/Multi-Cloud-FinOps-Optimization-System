@@ -15,7 +15,11 @@ Savings plan for Compute (1-yr or 3-yr) covers:
   Azure Virtual Machines, Azure App Service (Premium v3/v4 & Isolated v2 only -
   same tier restriction as App Service reservations), Azure Functions Premium
   plan only (not Consumption/Y1), Azure Container Instances, Azure Dedicated
-  Host, Azure Container Apps, Azure Spring Apps for Enterprise.
+  Host, Azure Container Apps (Dedicated workload profile only - the Consumption
+  profile bills per-second with no fixed hourly rate to discount), Azure
+  Spring Apps for Enterprise (the "...Enterprise" product specifically - a
+  sibling "Azure Spring Apps" product shares meter names but carries no real
+  savingsPlan data).
 
 Savings plan for Databases (1-yr ONLY) covers:
   Azure SQL Database AND Azure SQL Elastic Pool (vCore purchasing model only -
@@ -26,7 +30,11 @@ Savings plan for Databases (1-yr ONLY) covers:
   Managed Instance, Azure Database for PostgreSQL Flexible Server (NOT legacy
   Single Server), Azure Database for MySQL Flexible Server (NOT legacy Single
   Server), Azure Cosmos DB provisioned throughput (NOT Serverless capacity
-  mode).
+  mode), Azure Database Migration Service (all three tiers - Basic/General
+  Purpose/Premium), Azure DocumentDB (eligible per Microsoft's official
+  coverage list and real live pricing/savingsPlan data confirmed - but this
+  app deliberately doesn't price it yet, see pricing/sku_mapping.py for the
+  real, disclosed reason).
 
   CORRECTED 2026-08: an earlier version of this file claimed legacy DTU-tier
   SQL Database was ALSO covered ("ALL compute tiers... including... legacy
@@ -45,7 +53,15 @@ NOT covered by ANY savings plan - Reserved Capacity is the only commitment
 option for these, and only for the tiers documented in ri_eligibility.py:
   Azure Cache for Redis, Azure Cache for Redis Enterprise, Azure Blob
   Storage, Azure Files, Azure Disk Storage, Azure Synapse Analytics,
-  Azure Databricks.
+  Azure Databricks, Azure Data Factory, Azure Data Explorer, Azure Backup
+  Storage, Azure NetApp Files, Microsoft Fabric.
+
+Explicitly OUT OF SCOPE, not modeled at all (2026-08 decision, see
+[[project-sku-mapping-per-service]]): SQL Server on Azure Virtual Machines
+hourly licenses and SQL Server enabled by Azure Arc hourly licenses - both
+are real Savings-Plan-for-Databases-eligible line items per Microsoft's
+official list, but conflict with this app's existing license-cost-exclusion
+design (and Arc would need a whole new hybrid-resource ingestion path).
 """
 
 import re
@@ -55,6 +71,11 @@ _NO_SAVINGS_PLAN_TYPES = {
     "Azure Cache for Redis", "Azure Cache for Redis Enterprise", "Azure Blob Storage", "Azure Files",
     "Azure Disk Storage", "Azure Synapse Analytics", "Azure Databricks",
     "Microsoft Fabric",  # verified live 2026-08 - zero savingsPlan data on any Fabric Capacity meter, not on either official SP coverage list either
+    # Reserved-Capacity-only services added during the 2026-08 RI-coverage audit -
+    # none of these are on either official Savings Plan coverage list, and none
+    # have a per-resource SKU this app could price a Savings Plan against anyway
+    # (see ri_eligibility.py's _UNMEASURABLE_TYPES for why).
+    "Azure Data Factory", "Azure Data Explorer", "Azure Backup Storage", "Azure NetApp Files",
 }
 
 

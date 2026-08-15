@@ -849,7 +849,7 @@ def _render_savings_plan_tab():
                 },
                 {
                     "Savings Plan Type": "Savings Plan for Databases (1-yr ONLY)",
-                    "What Is Covered": "Azure SQL Database, SQL Managed Instance, Database for PostgreSQL, Database for MySQL, Cosmos DB provisioned throughput",
+                    "What Is Covered": "Azure SQL Database, SQL Elastic Pool, SQL Managed Instance, Database for PostgreSQL, Database for MySQL, Cosmos DB provisioned throughput, Database Migration Service, Azure DocumentDB",
                     "What Is NOT Covered": "Software licenses (AHB), database backup storage, networking, 3-year term (1-yr only per Azure policy)"
                 }
             ]
