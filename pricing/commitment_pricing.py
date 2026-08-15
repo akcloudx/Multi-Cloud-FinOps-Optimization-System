@@ -125,7 +125,7 @@ def _normalize_name(s: str) -> str:
     return (s or "").strip().lower().replace(" ", "")
 
 
-_HOURLY_UNITS = {"1hour", "1/hour"}
+_HOURLY_UNITS = {"1hour", "1/hour", "1gbhour"}
 
 
 def _is_hourly(item: dict) -> bool:
@@ -134,17 +134,28 @@ def _is_hourly(item: dict) -> bool:
     for the exact same per-hour billing (verified live: DW500c's only
     Consumption item is tagged '1/Hour'). A strict '== \"1 Hour\"' check
     silently dropped every Synapse price, making it look unpriceable when
-    it isn't."""
+    it isn't. '1 GB Hour' (2026-08, Container Instances' memory meter) is
+    ALSO a genuine hourly-equivalent rate - it's $/GB per hour, still
+    billed continuously per hour, just with an extra per-GB dimension this
+    app already multiplies out via consumption_multiplier_2 - excluding it
+    made every memory-based resource-consumption lookup silently return
+    None."""
     return _normalize_name(item.get("unitOfMeasure", "")) in _HOURLY_UNITS
 
 
 def _query_retail_items(price_type: str, region: str, plan: SkuQueryPlan, match_value: str) -> list:
     """Fetches Retail Prices API items for one price_type ('Consumption' or
     'Reservation'), scoped by the query plan. armSkuName matches are pushed
-    server-side (exact, efficient); skuName matches are filtered client-side
-    after a serviceName-scoped fetch, since skuName has inconsistent spacing
-    across tiers (e.g. App Service's "P2 v3" vs "P1mv4") that OData `eq`
-    can't reliably normalize."""
+    server-side (exact, efficient); skuName/meterName matches are filtered
+    client-side after a serviceName-scoped fetch, since both have
+    inconsistent spacing across tiers (e.g. App Service's "P2 v3" vs
+    "P1mv4") that OData `eq` can't reliably normalize.
+    match_field == "meterName" (2026-08, added for resource-based-
+    consumption services like Container Instances) exists because skuName
+    alone sometimes can't distinguish two genuinely different meters under
+    the same product - e.g. Container Instances' "Standard vCPU Duration"
+    and "Standard Memory Duration" both have skuName "Standard" and empty
+    armSkuName, and are ONLY distinguishable by meterName."""
     filter_parts = [
         f"armRegionName eq '{region}'",
         f"priceType eq '{price_type}'",
@@ -167,6 +178,9 @@ def _query_retail_items(price_type: str, region: str, plan: SkuQueryPlan, match_
     if plan.match_field == "skuName" and match_value:
         target = _normalize_name(match_value)
         items = [i for i in items if _normalize_name(i.get("skuName", "")) == target]
+    elif plan.match_field == "meterName" and match_value:
+        target = _normalize_name(match_value)
+        items = [i for i in items if _normalize_name(i.get("meterName", "")) == target]
     return items
 
 
@@ -193,24 +207,14 @@ def _compute_only_items(items: list, plan: SkuQueryPlan, os_: str) -> list:
     return _os_matched_items(items, os_)
 
 
-def _fetch_azure_sp_rates(resource_type: str, sku: str, region: str, os_: str, redundancy: str = "N/A") -> dict:
-    """Returns {"payg": float|None, "1yr": float|None, "3yr": float|None},
-    all already $/hr, COMPUTE COST ONLY - OS license (e.g. Windows Server)
-    is deliberately excluded everywhere, not folded into either side, per
-    explicit product decision. Savings Plan rates are natively hourly in
-    the API. redundancy ("Zone Redundant"/"Locally Redundant"/"N/A")
-    selects the matching meter for services where that changes the real
-    price (SQL Database/Elastic Pool) - see _filter_by_redundancy."""
+def _fetch_one_meter_rates(plan: SkuQueryPlan, region: str, os_: str, redundancy: str, match_value: str, multiplier: float) -> dict:
+    """Core single-meter lookup shared by the primary meter and (for
+    resource-based-consumption services) the secondary meter - see
+    SkuQueryPlan.consumption_match_value_2. Returns
+    {"payg": float|None, "1yr": float|None, "3yr": float|None}."""
     result = {"payg": None, "1yr": None, "3yr": None}
-    if not sku or sku == "N/A" or not region:
-        return result
-
-    plan = resolve_sku_query(resource_type, sku, redundancy)
-    if not plan.supported:
-        return result
-
     try:
-        items = _query_retail_items("Consumption", region, plan, plan.consumption_match_value)
+        items = _query_retail_items("Consumption", region, plan, match_value)
     except Exception:
         return result
     items = [i for i in items if _is_hourly(i)]
@@ -224,7 +228,7 @@ def _fetch_azure_sp_rates(resource_type: str, sku: str, region: str, os_: str, r
     # distinction at all (databases, storage, ...).
     os_matched = _compute_only_items(items, plan, os_)
     payg_item = min(os_matched, key=lambda i: float(i["retailPrice"]))
-    result["payg"] = float(payg_item["retailPrice"]) * plan.consumption_multiplier
+    result["payg"] = float(payg_item["retailPrice"]) * multiplier
 
     # Savings Plan rates attach to a specific meter - search within the SAME
     # compute-only subset first, so PAYG and the committed rate always come
@@ -243,11 +247,50 @@ def _fetch_azure_sp_rates(resource_type: str, sku: str, region: str, os_: str, r
         term, rate = sp.get("term"), sp.get("unitPrice")
         if rate is None:
             continue
-        scaled_rate = float(rate) * plan.savings_plan_multiplier * plan.consumption_multiplier
+        scaled_rate = float(rate) * plan.savings_plan_multiplier * multiplier
         if term == "1 Year":
             result["1yr"] = scaled_rate
         elif term == "3 Years":
             result["3yr"] = scaled_rate
+    return result
+
+
+def _fetch_azure_sp_rates(resource_type: str, sku: str, region: str, os_: str, redundancy: str = "N/A") -> dict:
+    """Returns {"payg": float|None, "1yr": float|None, "3yr": float|None},
+    all already $/hr, COMPUTE COST ONLY - OS license (e.g. Windows Server)
+    is deliberately excluded everywhere, not folded into either side, per
+    explicit product decision. Savings Plan rates are natively hourly in
+    the API. redundancy ("Zone Redundant"/"Locally Redundant"/"N/A")
+    selects the matching meter for services where that changes the real
+    price (SQL Database/Elastic Pool) - see _filter_by_redundancy."""
+    result = {"payg": None, "1yr": None, "3yr": None}
+    if not sku or sku == "N/A" or not region:
+        return result
+
+    plan = resolve_sku_query(resource_type, sku, redundancy)
+    if not plan.supported:
+        return result
+
+    result = _fetch_one_meter_rates(plan, region, os_, redundancy, plan.consumption_match_value, plan.consumption_multiplier)
+
+    # Resource-based-consumption services (Container Instances, Container
+    # Apps Dedicated profile - see SkuQueryPlan.consumption_multiplier_2)
+    # bill vCPU-hours and GB-hours as two genuinely separate meters that
+    # must both be priced and ADDED together, not one meter scaled by a
+    # single quantity. If the primary meter came back empty, or the second
+    # meter (when one is configured) can't be priced, the WHOLE result is
+    # unreliable - a half-priced resource is worse than an honestly blank
+    # one, so this returns all-None rather than silently under-reporting.
+    if plan.consumption_multiplier_2 and result["payg"] is not None:
+        secondary = _fetch_one_meter_rates(plan, region, os_, redundancy, plan.consumption_match_value_2, plan.consumption_multiplier_2)
+        if secondary["payg"] is None:
+            return {"payg": None, "1yr": None, "3yr": None}
+        result["payg"] += secondary["payg"]
+        for term in ("1yr", "3yr"):
+            if result[term] is not None and secondary[term] is not None:
+                result[term] += secondary[term]
+            else:
+                result[term] = None
     return result
 
 

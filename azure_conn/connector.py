@@ -264,6 +264,19 @@ Resources
     // SQL Pool ever got a real SKU captured at all, a real, previously-
     // undiscovered gap found while re-verifying this service, 2026-08.
     'microsoft.synapse/workspaces/sqlpools',
+    // Dedicated Host has `sku` as a top-level field (e.g. "DSv3-Type3",
+    // confirmed via Microsoft's own ARM template reference, 2026-08) -
+    // picked up by the existing generic top-level `topSku` fallback below
+    // with no dedicated extraction needed, same as Redis Enterprise.
+    'microsoft.compute/hostgroups/hosts',
+    // Container Instances has no SKU at all - it bills continuously for
+    // whatever vCPU/memory the container GROUP actually requests, captured
+    // below from properties.containers[0].properties.resources.requests
+    // (confirmed real ARM path via Microsoft's own template reference,
+    // 2026-08). Deliberately only reads the FIRST container in the group -
+    // a real, disclosed limitation for the less-common multi-container
+    // group pattern (see resolvedSku's aciSku comment below).
+    'microsoft.containerinstance/containergroups',
     'microsoft.databricks/workspaces',
     'microsoft.web/serverfarms'
 )
@@ -328,7 +341,19 @@ Resources
     // that gap is handled (capacity mode/tier alone still lets eligibility
     // correctly distinguish Serverless from Provisioned, just not price it).
     cosmosCapabilities = tostring(properties.capabilities),
-    cosmosMultiWrite = tobool(properties.enableMultipleWriteLocations)
+    cosmosMultiWrite = tobool(properties.enableMultipleWriteLocations),
+    // Container Instances has no discrete SKU - it bills per actual vCPU/
+    // memory requested. Real ARM path (confirmed via Microsoft's own
+    // template reference, 2026-08): properties.containers is an array,
+    // each element's properties.resources.requests.{cpu,memoryInGB} holds
+    // that container's request. Only the FIRST container is read here
+    // (properties.containers[0]) - a real, disclosed limitation for
+    // multi-container groups, which would need summing across the whole
+    // array (a bigger KQL change - mv-expand/mv-apply - not done this
+    // round given how much less common multi-container groups are than
+    // the single-container case this covers correctly).
+    aciCpu = todouble(properties.containers[0].properties.resources.requests.cpu),
+    aciMemoryGB = todouble(properties.containers[0].properties.resources.requests.memoryInGB)
 | extend
     // SQL DB/MI reservations & savings plans are priced per vCore (see
     // pricing/sku_mapping.py) - properties.currentSku.name alone (e.g.
@@ -415,6 +440,15 @@ Resources
         type == 'microsoft.documentdb/databaseaccounts',
             'Provisioned_GeneralPurpose',
         ""
+    ),
+    // "vCPU{n}_Mem{m}" (e.g. "vCPU1_Mem1.5") - the convention
+    // pricing/sku_mapping.py's _plan_container_instances parses, built
+    // from the first container's real requested cpu/memoryInGB (see the
+    // aciCpu/aciMemoryGB extraction above for the multi-container caveat).
+    aciSku = case(
+        type == 'microsoft.containerinstance/containergroups' and isnotnull(aciCpu) and isnotnull(aciMemoryGB),
+            strcat("vCPU", tostring(aciCpu), "_Mem", tostring(aciMemoryGB)),
+        ""
     )
 | extend
     resolvedSku = case(
@@ -425,6 +459,7 @@ Resources
         isnotempty(redisSku), redisSku,
         isnotempty(pgMysqlSku), pgMysqlSku,
         isnotempty(cosmosSku), cosmosSku,
+        isnotempty(aciSku), aciSku,
         isnotempty(topSku), topSku,
         'N/A'
     ),
@@ -518,6 +553,8 @@ def _map_resource_type(azure_type: str) -> str:
         "microsoft.cache/redis":                        "Azure Cache for Redis",
         "microsoft.cache/redisenterprise":               "Azure Cache for Redis Enterprise",
         "microsoft.synapse/workspaces/sqlpools":         "Azure Synapse Analytics",
+        "microsoft.compute/hostgroups/hosts":           "Azure Dedicated Host",
+        "microsoft.containerinstance/containergroups":  "Azure Container Instances",
         "microsoft.databricks/workspaces":              "Azure Databricks",
         "microsoft.web/serverfarms":                    "App Service",
     }

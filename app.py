@@ -554,6 +554,9 @@ _TYPE_ICONS = {
     "Azure Cache for Redis": "⚡", "Azure Cache for Redis Enterprise": "⚡",
     "Azure Synapse Analytics": "📊",
     "Azure Databricks": "🧱", "App Service": "🌍", "Azure Disk Storage": "💽",
+    "Azure Dedicated Host": "🖲️", "Azure Container Instances": "📦",
+    "Azure Container Apps": "🐳", "Azure Spring Apps Enterprise": "🌱",
+    "Azure DocumentDB": "🍃", "Azure Database Migration Service": "🚚",
 }
 
 

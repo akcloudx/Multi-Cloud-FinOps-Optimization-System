@@ -243,6 +243,12 @@ _RULES = {
     "App Service":                   _app_service_eligibility,
     "Azure Disk Storage":            _disk_eligibility,
     "Azure Files":                   lambda sku: (True, "Eligible for Azure Files reservations, but only sold in 10 TiB / 100 TiB blocks (Hot/Cool tier capacity)."),
+    "Azure Dedicated Host":          lambda sku: (True, "Eligible for Reserved Instances - verified live, real Reservation catalog entries exist for most VM-family Dedicated Host types (some newer/niche series may not have rolled out RI yet, handled safely by the pricing layer's live lookup)."),
+    "Azure Container Instances":     lambda sku: (False, "Azure Container Instances has no Reservation offering at all - verified live, it's a pure consumption service with no capacity to reserve. (It IS eligible for Savings Plan for Compute - see sp_eligibility.py.)"),
+    "Azure Container Apps":          lambda sku: (False, "Azure Container Apps has no Reservation offering at all - verified live, zero Reservation entries exist for any workload profile. (The Dedicated profile IS eligible for Savings Plan for Compute - see sp_eligibility.py.)"),
+    "Azure Spring Apps Enterprise":  lambda sku: (False, "Azure Spring Apps Enterprise has no Reservation offering at all - verified live, zero Reservation entries exist. (It IS eligible for Savings Plan for Compute - see sp_eligibility.py.)"),
+    "Azure DocumentDB":              lambda sku: (True, "Eligible for Reserved Instances - verified live, real Reservation catalog entries exist (Coordinator Node 1 vCore, confirmed 1yr/3yr pricing). This app doesn't price DocumentDB yet (see sp_eligibility.py/pricing/sku_mapping.py for the real, disclosed reason), but the underlying Azure product genuinely does sell reservations for it."),
+    "Azure Database Migration Service": lambda sku: (False, "Azure Database Migration Service has no Reservation offering at all - verified live, zero Reservation entries exist across all three tiers. (It IS eligible for Savings Plan for Databases - see sp_eligibility.py.)"),
 }
 
 

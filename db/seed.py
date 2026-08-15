@@ -216,6 +216,18 @@ DATABASE_INVENTORY = [
      "redundancy": "Locally Redundant",
      "payg_hourly_usd": 1.449104, "avg_daily_running_hours": 24,
      "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+
+    # Azure Database Migration Service — General Purpose, 4 vCores, real
+    # ARM sku.tier/sku.capacity convention stored as "{Tier}_{N}vCores" (see
+    # pricing/sku_mapping.py's _plan_database_migration_service). Live-
+    # verified australiaeast rate for "4 vCore" on the General Purpose
+    # Compute product.
+    {"resource_id": "DMS-Prod-01", "resource_name": "prod-sqlmigration-dms",
+     "resource_type": "Azure Database Migration Service",
+     "resource_state": "Running",
+     "region": "australiaeast", "os": "N/A", "sku": "GeneralPurpose_4vCores",
+     "payg_hourly_usd": 0.2025, "avg_daily_running_hours": 10,
+     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
 ]
 
 
@@ -290,7 +302,66 @@ RI_ONLY_INVENTORY = [
      "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
 ]
 
-INVENTORY = COMPUTE_INVENTORY + DATABASE_INVENTORY + RI_ONLY_INVENTORY
+
+# ── Compute Savings Plan inventory (non-VM) ─────────────────────────────────────
+# Azure Dedicated Host: RI AND Savings Plan for Compute both eligible (same
+# "Virtual Machines" Retail catalog Dedicated Host pricing lives under).
+# Azure Container Instances: Savings Plan for Compute eligible, but has NO
+# Reservation offering at all - verified live, zero Reservation entries exist.
+# Rates below are real australiaeast Consumption prices, live-queried 2026-08-15.
+
+COMPUTE_SP_INVENTORY = [
+    # Azure Dedicated Host — DSv3 Type3, $5.28/hr (australiaeast, live-verified)
+    {"resource_id": "DEDHOST-Prod-01", "resource_name": "prod-dedicated-host-01",
+     "resource_type": "Azure Dedicated Host",
+     "resource_state": "Running",
+     "region": "australiaeast", "os": "N/A", "sku": "DSv3-Type3",
+     "payg_hourly_usd": 5.280, "avg_daily_running_hours": 24,
+     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+
+    # Azure Container Instances — 2 vCPU / 4 GB group, live-verified australiaeast
+    # rates: Standard vCPU $0.0486/hr x 2 + Standard Memory $0.00532/GB-hr x 4
+    {"resource_id": "ACI-Prod-01", "resource_name": "prod-batch-containergroup",
+     "resource_type": "Azure Container Instances",
+     "resource_state": "Running",
+     "region": "australiaeast", "os": "N/A", "sku": "vCPU2_Mem4",
+     "payg_hourly_usd": 0.118, "avg_daily_running_hours": 24,
+     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+
+    # Azure Container Apps — Dedicated profile, D4 node (4 vCPU / 16 GiB,
+    # General Purpose), live-verified australiaeast rates: Dedicated vCPU
+    # $0.080859/hr x 4 + Dedicated Memory $0.006638/hr x 16. Real per-node
+    # billing model (NOT per-container-request like Container Instances) -
+    # see pricing/sku_mapping.py's _plan_container_apps for the real
+    # workload-profile billing research this SKU convention is based on.
+    # Live-tenant ingestion of this resource type isn't built yet (the
+    # billable unit is a node inside a managedEnvironment's workloadProfiles
+    # array, not a standalone ARM resource Resource Graph can list the way
+    # Dedicated Host's hostGroups/hosts can) - this demo row exists to prove
+    # the pricing math end-to-end, not to represent a live-scannable resource.
+    {"resource_id": "ACA-Prod-01", "resource_name": "prod-api-containerapps-d4",
+     "resource_type": "Azure Container Apps",
+     "resource_state": "Running",
+     "region": "australiaeast", "os": "N/A", "sku": "Dedicated_D4",
+     "payg_hourly_usd": 0.4296, "avg_daily_running_hours": 24,
+     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+
+    # Azure Spring Apps Enterprise — one app instance within the base bundle
+    # (<=6 vCPU, <=12 GB), live-verified australiaeast flat rate $0.8408/hr
+    # ("Enterprise vCPU and Memory Group Duration"). See pricing/sku_mapping.py's
+    # _plan_spring_apps_enterprise for why this app only prices the in-bundle
+    # case (overage-above-threshold pricing isn't built). Live-tenant
+    # ingestion isn't built yet either - same disclosed-gap status as
+    # Container Apps' demo row.
+    {"resource_id": "SPRING-Prod-01", "resource_name": "prod-orders-springapps",
+     "resource_type": "Azure Spring Apps Enterprise",
+     "resource_state": "Running",
+     "region": "australiaeast", "os": "N/A", "sku": "Enterprise",
+     "payg_hourly_usd": 0.8408, "avg_daily_running_hours": 24,
+     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+]
+
+INVENTORY = COMPUTE_INVENTORY + DATABASE_INVENTORY + RI_ONLY_INVENTORY + COMPUTE_SP_INVENTORY
 
 
 # ── Commitment Contracts ───────────────────────────────────────────────────────
@@ -592,7 +663,8 @@ SAVINGS_PLAN_PURCHASES = [
 
 COMPUTE_SP_ELIGIBLE_TYPES = {
     "Compute", "App Service", "Azure Functions",
-    "Container Instances", "Dedicated Host", "Container Apps", "Spring Apps",
+    "Azure Container Instances", "Azure Dedicated Host",
+    "Azure Container Apps", "Azure Spring Apps Enterprise",
 }
 
 DATABASE_SP_ELIGIBLE_TYPES = {

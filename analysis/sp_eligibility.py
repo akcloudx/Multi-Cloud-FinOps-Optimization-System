@@ -167,10 +167,32 @@ def _vm_sp(sku: str) -> Tuple[bool, str]:
     return True, "Savings Plan for Compute is available for this VM series."
 
 
+def _container_apps_sp(sku: str) -> Tuple[bool, str]:
+    # Consumption profile bills per-second/per-request (scale-to-zero
+    # serverless) with no fixed hourly rate to discount - the same shape as
+    # Functions' Y1 Consumption plan (see _app_service_or_functions_sp), and
+    # this app's pricing/sku_mapping.py can't and doesn't price it for
+    # exactly that reason. Dedicated profile (the only mapped shape) bills
+    # per fixed-size node and IS real Savings-Plan-eligible - verified live
+    # 2026-08 (both the vCPU and memory meters carry real savingsPlan data,
+    # despite Microsoft Learn's own overview page just listing "Azure
+    # Container Apps" as one line with no profile-level distinction).
+    s = (sku or "")
+    if s.startswith("Dedicated_"):
+        return True, "Dedicated workload profile - eligible for Savings Plan for Compute, verified live on both the vCPU and memory meters."
+    if s == "Consumption" or not s or s == "N/A":
+        return False, "Consumption workload profile bills per-second/per-request with no fixed hourly rate - not eligible for any commitment discount (same reasoning as Azure Functions' Y1 Consumption plan)."
+    return False, f"'{sku}' isn't a workload profile shape this app recognizes for Savings Plan eligibility."
+
+
 _COMPUTE_SP_RULES = {
     "Compute":       _vm_sp,
     "App Service":   _app_service_or_functions_sp,
     "Azure Functions": _app_service_or_functions_sp,
+    "Azure Dedicated Host": lambda sku: (True, "Eligible for Savings Plan for Compute - verified live, real savingsPlan pricing exists on the same 'Virtual Machines' service catalog Dedicated Host pricing lives under."),
+    "Azure Container Instances": lambda sku: (True, "Eligible for Savings Plan for Compute - verified live on both the vCPU and memory meters. Not eligible for Reserved Capacity (see ri_eligibility.py) - Azure genuinely sells no reservation for this service."),
+    "Azure Container Apps": _container_apps_sp,
+    "Azure Spring Apps Enterprise": lambda sku: (True, "Eligible for Savings Plan for Compute - verified live on the Enterprise vCPU and Memory Group Duration meter, specifically on the 'Azure Spring Apps Enterprise' product (SP:True) - the sibling 'Azure Spring Apps' product shares the same meter name but carries no savingsPlan data."),
 }
 
 _DATABASE_SP_RULES = {
@@ -183,6 +205,8 @@ _DATABASE_SP_RULES = {
     "Azure Database for MySQL":      _flexible_server_sp,
     "Azure Database for PostgreSQL": _flexible_server_sp,
     "Azure Cosmos DB":               _cosmos_db_sp,
+    "Azure DocumentDB":              lambda sku: (True, "Eligible for Savings Plan for Databases per Microsoft's official coverage list - real Retail API pricing/savingsPlan data confirmed live, but this app deliberately doesn't price it yet (see pricing/sku_mapping.py for the real, disclosed reason: an unconfirmed M-tier-to-vCore mapping and an unconfirmed Coordinator Node billing threshold)."),
+    "Azure Database Migration Service": lambda sku: (True, "Eligible for Savings Plan for Databases - verified live, real savingsPlan data exists on all three tiers (Basic/General Purpose/Premium)."),
 }
 
 

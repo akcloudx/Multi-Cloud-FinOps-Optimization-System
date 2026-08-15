@@ -34,8 +34,8 @@ class SkuQueryPlan:
     consumption_match_value: str = ""    # value to match for Consumption/SavingsPlan lookup
     reservation_match_value: str = ""    # value to match for Reservation lookup (can differ from consumption side)
     product_contains: str = ""           # optional productName substring to disambiguate tiers sharing a skuName
-    reservation_multiplier: int = 1      # multiply the matched Reservation unit price by this (e.g. vCore count)
-    consumption_multiplier: int = 1      # multiply the matched Consumption retailPrice (PAYG) by this - NOT
+    reservation_multiplier: float = 1    # multiply the matched Reservation unit price by this (e.g. vCore count)
+    consumption_multiplier: float = 1    # multiply the matched Consumption retailPrice (PAYG) by this - NOT
                                           # needed for General Purpose/Business Critical Provisioned SQL DB/MI
                                           # (their Consumption armSkuName already encodes the vCore count and
                                           # is pre-scaled), but IS needed for Hyperscale Provisioned and every
@@ -81,6 +81,19 @@ class SkuQueryPlan:
     # surface even with reservation_match_value="" (caught live: exactly
     # this happened for DC-series). _fetch_azure_ri_rates checks this field
     # FIRST and returns no data immediately, without querying, whenever set.
+    consumption_match_value_2: str = ""  # a SECOND, separately-priced meter to ADD to the primary one - added
+    consumption_multiplier_2: float = 0  # 2026-08 for resource-based-consumption services (Container Instances,
+                                          # Container Apps Dedicated profile) that bill vCPU-hours and GB-hours as
+                                          # two genuinely independent meters under the same product, rather than
+                                          # one meter scaled by a single quantity like every other service this
+                                          # app models. consumption_multiplier_2 = 0 (the default) means "no
+                                          # second meter" - _fetch_azure_sp_rates skips this path entirely unless
+                                          # a resolver explicitly sets both fields. PAYG and each Savings Plan
+                                          # term are computed as (meter1_rate * consumption_multiplier) +
+                                          # (meter2_rate * consumption_multiplier_2). Reservation is NOT extended
+                                          # to support this - none of the services that need it sell Reservations
+                                          # at all (verified live), so reservation_unsupported_reason should
+                                          # always be set alongside this.
 
 
 # ── Compute (VMs) ────────────────────────────────────────────────────────────
@@ -91,6 +104,157 @@ def _plan_compute(sku: str) -> SkuQueryPlan:
         supported=True, service_name=None, match_field="armSkuName",
         consumption_match_value=sku, reservation_match_value=sku,
         os_license_is_separable=True,
+    )
+
+
+# ── Azure Container Instances ────────────────────────────────────────────────
+def _plan_container_instances(sku: str) -> SkuQueryPlan:
+    # ACI has no discrete SKU tier at all - it bills continuously for the
+    # actual vCPU and memory (GB) a container GROUP requests, as two
+    # genuinely separate meters ("Standard vCPU Duration" $/vCPU-hour,
+    # "Standard Memory Duration" $/GB-hour), summed together. This app
+    # stores the SKU as "vCPU{n}_Mem{m}" (e.g. "vCPU1_Mem1.5"), built from
+    # azure_conn/connector.py summing properties.containers[].properties.
+    # resources.requests.{cpu,memoryInGB} - see that file's comment for a
+    # disclosed, narrow limitation (only the first container in a group is
+    # counted, not summed across multiple containers in the same group).
+    #
+    # Verified live: both meters share the SAME skuName ("Standard") and
+    # BOTH have empty armSkuName - only `meterName` ("Standard vCPU
+    # Duration" vs "Standard Memory Duration") actually distinguishes them,
+    # which is why this needed match_field="meterName" support added to
+    # commitment_pricing.py's _query_retail_items (neither armSkuName nor
+    # skuName could do this alone). product_contains="Container Instances"
+    # also server-side-matches the sibling "Container Instances with GPU"
+    # product, but that product's meters use skuName "V100"/"K80"/"P100"
+    # (GPU model names, never "Standard"), so there's no real collision -
+    # confirmed live, not guessed. GPU-attached instances aren't priced
+    # here at all (a real, disclosed, separate dimension not built).
+    #
+    # Zero Reservation entries exist for this service (verified live,
+    # every region checked) - Container Instances is Consumption-only,
+    # genuinely can't be reserved. Real Savings Plan data DOES exist on
+    # both meters (confirmed live) - a real, current Compute SP-eligible
+    # service, unlike this app's earlier false assumption that "no
+    # discrete SKU" meant "not modelable at all."
+    if not sku or "_Mem" not in sku or not sku.startswith("vCPU"):
+        return SkuQueryPlan(supported=False, reason=f"SKU '{sku}' doesn't match the expected 'vCPU1_Mem1.5' convention.")
+    vcpu_str, mem_str = sku[len("vCPU"):].split("_Mem", 1)
+    try:
+        vcpu, mem_gb = float(vcpu_str), float(mem_str)
+    except ValueError:
+        return SkuQueryPlan(supported=False, reason=f"Could not parse vCPU/memory values from SKU '{sku}'.")
+    return SkuQueryPlan(
+        supported=True, service_name="Container Instances", match_field="meterName",
+        consumption_match_value="Standard vCPU Duration", consumption_multiplier=vcpu,
+        consumption_match_value_2="Standard Memory Duration", consumption_multiplier_2=mem_gb,
+        product_contains="Container Instances",
+        reservation_unsupported_reason="Azure Container Instances has no Reservation offering at all - verified live, it's a pure consumption service with no capacity to reserve.",
+    )
+
+
+# ── Azure Container Apps (Dedicated workload profile only) ────────────────────
+# Real Dedicated-profile billing model (Microsoft Learn "Workload profiles in
+# Azure Container Apps", verified 2026-08): unlike Container Instances, a
+# Dedicated Container Apps profile does NOT bill per-container resource
+# request - it bills per RUNNING NODE of a fixed, named size ("D4"/"D8"/"E16"/
+# etc, exactly like a VM SKU), regardless of how many apps/replicas share that
+# node ("Billing is based on the number of running profile instances" - the
+# doc's own words). Each name has a fixed, documented vCPU/memory allocation
+# (confirmed via `az containerapp env workload-profile list-supported`'s own
+# output table, not guessed): General Purpose D4/D8/D16/D32 = 4/8/16/32 vCPU,
+# 16/32/64/128 GiB; Memory Optimized E4/E8/E16/E32 = 4/8/16/32 vCPU, 32/64/128/
+# 256 GiB. This app stores the SKU as "Dedicated_{ProfileName}" (e.g.
+# "Dedicated_D4"). GPU profiles (NC24-A100 etc) and Confidential Compute
+# profiles (DC4 etc) are real but niche - not mapped, same as this session's
+# other niche-hardware exclusions.
+#
+# Verified live (australiaeast/eastus, correct pinned api-version - see
+# below): "Dedicated vCPU Usage" and "Dedicated Memory Usage" are two
+# genuinely separate meters under serviceName "Azure Container Apps" (same
+# dual-meter shape as Container Instances), summed via consumption_
+# multiplier/_2 set to the profile's fixed vCPU/GiB. ZERO Reservation entries
+# exist for this service at all (confirmed live, 0 results, both regions) -
+# matches Container Instances' pure-consumption pattern. Real Savings Plan
+# data DOES exist on both meters (e.g. australiaeast Dedicated vCPU Usage:
+# $0.080859 PAYG -> $0.06873015 1yr/$0.06711297 3yr) - a first manual check
+# using an unversioned Retail API request found NO savingsPlan data at all
+# and nearly got documented here as a real gap; re-checked with this app's
+# actual pinned api-version (2023-01-01-preview, commitment_pricing.py) and
+# found it immediately - the SAME api-version pitfall already documented for
+# PostgreSQL/MySQL earlier this session (see [[feedback-calculator-scraping-
+# methodology]]) caught again, this time before it was written down wrong.
+#
+# Deliberately EXCLUDED, disclosed not silently dropped: the flat "Dedicated
+# Plan Management" $0.1/hour fee - this is a genuinely per-ENVIRONMENT charge
+# (shared across every app/node in that environment), not a per-node cost, so
+# folding it into a single node's rate would double it whenever >1 node runs
+# and understate it whenever <1 (same class of "shared pooled cost, not
+# resource-scoped" exclusion as Elastic Pool/Cosmos DB's pooled RI). The
+# Consumption profile is NOT mapped here at all - it bills per-second/
+# per-request with no $/hr concept, architecturally incompatible with this
+# app's PAYG-hourly model (same reasoning as Cosmos DB Serverless) - handled
+# by check_sp_eligibility's own explicit "Consumption" branch, not silently
+# guessed at here.
+_CONTAINER_APPS_DEDICATED_PROFILES = {
+    # name: (vCPU, memory_GiB) - from `list-supported`'s own documented table
+    "D4": (4, 16), "D8": (8, 32), "D16": (16, 64), "D32": (32, 128),
+    "E4": (4, 32), "E8": (8, 64), "E16": (16, 128), "E32": (32, 256),
+}
+
+
+def _plan_container_apps(sku: str) -> SkuQueryPlan:
+    if not sku or not sku.startswith("Dedicated_"):
+        return SkuQueryPlan(supported=False, reason=f"SKU '{sku}' isn't a Dedicated-profile SKU this app maps - the Consumption profile bills per-second with no hourly rate, and GPU/Confidential Compute Dedicated profiles aren't mapped.")
+    profile_name = sku[len("Dedicated_"):]
+    spec = _CONTAINER_APPS_DEDICATED_PROFILES.get(profile_name)
+    if spec is None:
+        return SkuQueryPlan(supported=False, reason=f"Dedicated profile '{profile_name}' isn't one of the mapped General Purpose (D4/D8/D16/D32) or Memory Optimized (E4/E8/E16/E32) sizes.")
+    vcpu, mem_gib = spec
+    return SkuQueryPlan(
+        supported=True, service_name="Azure Container Apps", match_field="meterName",
+        consumption_match_value="Dedicated vCPU Usage", consumption_multiplier=vcpu,
+        consumption_match_value_2="Dedicated Memory Usage", consumption_multiplier_2=mem_gib,
+        reservation_unsupported_reason="Azure Container Apps has no Reservation offering at all - verified live, zero Reservation entries exist for any workload profile.",
+    )
+
+
+# ── Azure Dedicated Host ─────────────────────────────────────────────────────
+def _plan_dedicated_host(sku: str) -> SkuQueryPlan:
+    # This app stores the real ARM sku.name directly (e.g. "DSv3-Type3") -
+    # Microsoft.Compute/hostGroups/hosts has `sku` as a top-level field with
+    # sku.name in exactly this hyphenated form (confirmed via Microsoft's
+    # own ARM template reference, 2026-08). Verified live: pricing lives
+    # under serviceName "Virtual Machines" (the SAME service as regular
+    # Compute VMs, not its own), productName "{Series} Series Dedicated
+    # Host" (e.g. "DSv3 Series Dedicated Host"), with real Consumption,
+    # Reservation, AND Savings Plan data - genuinely a different pricing
+    # dimension from renting the equivalent VM size, priced per physical
+    # host, not per vCore/instance. skuName uses a space instead of the
+    # real sku.name's hyphen (e.g. "Dsv3 Type3"), so the hyphen is
+    # translated to a space before matching (client-side normalization
+    # already lowercases and strips spaces, but doesn't touch hyphens).
+    # Some newer/niche series (e.g. Confidential Compute's ECasv6) have
+    # Consumption but no Reservation/Savings Plan yet - handled safely by
+    # the normal "query live, no data if genuinely absent" pattern, not
+    # matrix-tested exhaustively given how niche this resource type is.
+    #
+    # product_contains is REQUIRED here, not optional - a real bug caught
+    # while building this (2026-08): _query_retail_items doesn't follow the
+    # Retail API's NextPageLink, so an unscoped query against the huge
+    # "Virtual Machines" service catalog silently only checks its first
+    # page and can miss a real match entirely (a genuine gap in this app's
+    # broader pagination handling, not specific to Dedicated Host - every
+    # OTHER resolver already happens to scope tightly enough via
+    # service_name+product_contains to never hit this in practice).
+    if not sku or "-" not in sku:
+        return SkuQueryPlan(supported=False, reason=f"SKU '{sku}' doesn't match the expected 'DSv3-Type3'-style convention.")
+    series = sku.split("-", 1)[0]
+    match_value = sku.replace("-", " ")
+    return SkuQueryPlan(
+        supported=True, service_name="Virtual Machines", match_field="skuName",
+        consumption_match_value=match_value, reservation_match_value=match_value,
+        product_contains=f"{series} Series Dedicated Host",
     )
 
 
@@ -1045,6 +1209,103 @@ def _plan_cosmos_db(sku: str) -> SkuQueryPlan:
     )
 
 
+# ── Azure Spring Apps Enterprise ────────────────────────────────────────────
+# Real billing model (Microsoft's own pricing page, verified 2026-08, pinned
+# api-version): genuinely NOT a linear per-vCPU/per-GB rate like Container
+# Instances/Container Apps - it's a flat BUNDLE fee. "For each app instance
+# in the Enterprise Plan, Azure Spring Apps charges for one base unit price
+# of 'Enterprise vCPU and memory group duration', which includes 12 GB of
+# memory and 6 vCPUs" (Microsoft's own words) - one flat $/hr charge per app
+# instance covers UP TO 6 vCPU and UP TO 12 GB, regardless of the instance's
+# actual configured size within that range. Usage beyond either threshold is
+# billed via separate "Enterprise Overage vCPU Duration"/"Enterprise Overage
+# Memory Duration" meters - a genuinely different shape (base-bundle-plus-
+# overage-above-a-threshold) than this session's existing linear dual-meter
+# engine can express (which sums two ALWAYS-linear meters, no threshold/base
+# concept). Rather than guess at combining base+overage without a live config
+# to verify the math against, this app ONLY maps the common in-bundle case
+# (<=6 vCPU AND <=12 GB, true for most real Spring Boot microservice sizing)
+# as a flat single-meter rate - the SAME simplicity as Compute/App Service,
+# once the real model was understood. Configs exceeding either threshold are
+# explicitly unsupported here, disclosed not silently wrong.
+#
+# product_contains="Azure Spring Apps Enterprise" is REQUIRED - verified live
+# a sibling productName "Azure Spring Apps" (the older Standard/Basic tiers,
+# SP:False) carries the IDENTICAL meterName "Enterprise vCPU and Memory Group
+# Duration" at the same $0.8408/hr, with no savingsPlan data - matching this
+# session's existing documented distinction (SP:True only lives on the
+# "...Enterprise" productName specifically). Zero Reservation entries exist
+# for this service at all (verified live, 0 results) - Consumption + Savings
+# Plan only, same pattern as Container Instances/Container Apps.
+def _plan_spring_apps_enterprise(sku: str) -> SkuQueryPlan:
+    if sku != "Enterprise":
+        return SkuQueryPlan(supported=False, reason=f"SKU '{sku}' isn't mapped - this app only prices an app instance within the base bundle (<=6 vCPU, <=12 GB memory), stored as the literal SKU 'Enterprise'. Instances exceeding either threshold would need Overage-meter pricing this app doesn't build yet.")
+    return SkuQueryPlan(
+        supported=True, service_name="Azure Spring Cloud", match_field="meterName",
+        consumption_match_value="Enterprise vCPU and Memory Group Duration", consumption_multiplier=1,
+        product_contains="Azure Spring Apps Enterprise",
+        reservation_unsupported_reason="Azure Spring Apps Enterprise has no Reservation offering at all - verified live, zero Reservation entries exist for this service.",
+    )
+
+
+# ── Azure Database Migration Service ────────────────────────────────────────
+# Real ARM schema (Microsoft.DataMigration/services, verified 2026-08, via
+# Microsoft's own template reference): SKU is a genuinely clean, structured
+# top-level `sku` object - `sku.tier` (string) + `sku.capacity` (int, the raw
+# vCore count) - no string-parsing needed at all, unlike almost every other
+# service this session. This app stores it as "{Tier}_{N}vCores" (e.g.
+# "GeneralPurpose_4vCores"), built directly from those two fields.
+#
+# Verified live (australiaeast, pinned api-version): skuName in the Retail
+# API is literally "{N} vCore" (e.g. "4 vCore") for ALL three tiers - tiers
+# are only distinguishable via productName ("Azure Database Migration
+# Service {Tier} Compute"), so product_contains is REQUIRED (a plain skuName
+# match alone would silently pick whichever tier's price the API returns
+# first, wrong 2 times out of 3 - confirmed live that "4 vCore" prices
+# $0.2025/hr General Purpose vs $0.404/hr Premium, exactly 2x apart). Real
+# Savings Plan data confirmed on all three tiers. Zero Reservation entries
+# exist anywhere for this service (verified live, 0 results) - Consumption +
+# Savings Plan for Databases only.
+#
+# One real, disclosed naming uncertainty (not guessed past): the generic ARM
+# schema reference's own field description says sku.tier examples are
+# "'Basic', 'General Purpose', or 'Business Critical'" - but the ACTUAL live
+# Retail API billing catalog's third tier is named "Premium", not "Business
+# Critical" (confirmed live, productName is literally "...Premium Compute").
+# This app treats "Premium" as authoritative (matches real billing, not a
+# generic doc description) - if a live tenant's sku.tier literally reports
+# "Business Critical" instead, that would be the SAME kind of ARM-vs-billing
+# label divergence already confirmed elsewhere this session (MySQL's
+# "MemoryOptimized" ARM tier vs "Business Critical" Retail productName) -
+# flagged here since live ingestion for this service isn't built yet, so it
+# couldn't be directly confirmed either way.
+_DMS_TIER_PRODUCT = {
+    "Basic": "Azure Database Migration Service Basic Compute",
+    "GeneralPurpose": "Azure Database Migration Service General Purpose Compute",
+    "Premium": "Azure Database Migration Service Premium Compute",
+}
+
+
+def _plan_database_migration_service(sku: str) -> SkuQueryPlan:
+    parts = (sku or "").split("_", 1)
+    if len(parts) != 2 or not parts[1].endswith("vCores"):
+        return SkuQueryPlan(supported=False, reason=f"SKU '{sku}' doesn't match the expected '{{Tier}}_{{N}}vCores' convention (e.g. 'GeneralPurpose_4vCores').")
+    tier, vcore_part = parts
+    product = _DMS_TIER_PRODUCT.get(tier)
+    if product is None:
+        return SkuQueryPlan(supported=False, reason=f"Tier '{tier}' isn't one of Basic/GeneralPurpose/Premium.")
+    try:
+        vcores = int(vcore_part[:-len("vCores")])
+    except ValueError:
+        return SkuQueryPlan(supported=False, reason=f"Could not parse vCore count from SKU '{sku}'.")
+    match_value = f"{vcores} vCore"
+    return SkuQueryPlan(
+        supported=True, service_name="Azure Database Migration Service", match_field="skuName",
+        consumption_match_value=match_value, product_contains=product,
+        reservation_unsupported_reason="Azure Database Migration Service has no Reservation offering at all - verified live, zero Reservation entries exist. Consumption + Savings Plan for Databases only.",
+    )
+
+
 def _plan_databricks(sku: str) -> SkuQueryPlan:
     # Verified live: zero Reservation-type entries exist for Azure Databricks
     # in the Retail Prices API at all. Databricks Commit Units (DBCU) are
@@ -1065,6 +1326,28 @@ def _plan_deferred(reason: str):
 
 _PLAN_RESOLVERS = {
     "Compute":                       _plan_compute,
+    "Azure Dedicated Host":          _plan_dedicated_host,
+    "Azure Container Instances":     _plan_container_instances,
+    "Azure Container Apps":          _plan_container_apps,
+    "Azure Spring Apps Enterprise":  _plan_spring_apps_enterprise,
+    "Azure Database Migration Service": _plan_database_migration_service,
+    "Azure DocumentDB": _plan_deferred(
+        "Real ARM resource type confirmed (Microsoft.DocumentDB/mongoClusters, "
+        "tier at properties.compute.tier e.g. 'M30') and real Retail API pricing "
+        "confirmed live (Worker Node / Coordinator Node / Burstable vCore tiers, "
+        "real Savings Plan data present) - but deliberately NOT priced this round. "
+        "Two real gaps found, not guessed past: (1) the M-tier name (M30/M40/M50/"
+        "M60/M80/M200) to Worker-Node-vCore-count mapping is only confirmed for "
+        "M30=2/M40=4/M50=8 vCore via Microsoft's own docs - extrapolating the "
+        "rest by pattern would be a guess; (2) whether a non-sharded (default) "
+        "cluster bills as a single Worker Node only, or ALSO incurs a Coordinator "
+        "Node cost (which has its own real Reservation entry - 'Coordinator Node "
+        "1 vCore' - but also a genuine $0 'Coordinator Node Free' tier, so the "
+        "threshold isn't obvious) isn't confirmed anywhere in public docs. Same "
+        "class of deliberate stop as MI Instance Pools - eligible per Microsoft's "
+        "own Savings Plan for Databases list, not guessed at for a number that "
+        "could be wrong by a real margin."
+    ),
     "App Service":                   _plan_app_service,
     "Azure SQL Database":            _plan_sql_database,
     "Azure SQL Elastic Pool":        _plan_sql_database,   # deliberately identical resolver - verified live

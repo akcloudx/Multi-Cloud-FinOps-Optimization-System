@@ -53,6 +53,12 @@ _SERVICE_CATEGORY_MAP = {
     "Azure Disk Storage": "Storage",
     "Azure Synapse Analytics": "Analytics",
     "Azure Databricks": "Analytics",
+    "Azure Dedicated Host": "Compute",
+    "Azure Container Instances": "Compute",
+    "Azure Container Apps": "Compute",
+    "Azure Spring Apps Enterprise": "Web and Mobile",
+    "Azure DocumentDB": "Databases",
+    "Azure Database Migration Service": "Databases",
 }
 
 _PROVIDER_NAMES = {
