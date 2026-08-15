@@ -6,6 +6,11 @@ Every connected Service Principal / IAM credential set is a row in cloud_tenants
 Exactly one tenant per provider can be "active" at a time (CloudTenant.is_active) -
 that's the tenant whose live-ingested CloudInventory rows (tenant_id FK) the
 dashboard shows when in Live mode.
+
+2026-08: always operates in the "live" scope (db/schema.py's demo/live split) -
+tenant registration is a Live Cloud API concept only, Demo Mode skips the
+tenant-connection gate entirely (see ui/auth_page.py), so there is no such
+thing as a "demo tenant" to register in the first place.
 """
 
 from datetime import datetime
@@ -15,11 +20,13 @@ from sqlalchemy.orm import Session
 
 from db.schema import get_engine, init_db, CloudTenant, CloudInventory, Commitment
 
+_MODE = "live"
+
 
 def list_tenants(provider: str = "Azure") -> list[CloudTenant]:
     """All saved tenants for a provider, oldest first. Detached from the session."""
-    init_db(provider)
-    engine = get_engine(provider)
+    init_db(provider, _MODE)
+    engine = get_engine(provider, _MODE)
     with Session(engine) as session:
         rows = session.query(CloudTenant).filter(
             CloudTenant.provider == provider
@@ -30,8 +37,8 @@ def list_tenants(provider: str = "Azure") -> list[CloudTenant]:
 
 def get_active_tenant(provider: str = "Azure") -> Optional[CloudTenant]:
     """The one tenant currently selected for Live mode viewing, or None."""
-    init_db(provider)
-    engine = get_engine(provider)
+    init_db(provider, _MODE)
+    engine = get_engine(provider, _MODE)
     with Session(engine) as session:
         row = session.query(CloudTenant).filter(
             CloudTenant.provider == provider, CloudTenant.is_active == True  # noqa: E712
@@ -46,8 +53,8 @@ def upsert_tenant(provider: str, tenant_name: str, tenant_id: str,
     """Insert a new tenant, or update in place if one already exists for this
     exact (provider, tenant_id, subscription_id, client_id). Either way it
     becomes the active tenant for the provider. Returns the tenant's DB id."""
-    init_db(provider)
-    engine = get_engine(provider)
+    init_db(provider, _MODE)
+    engine = get_engine(provider, _MODE)
     now_iso = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     with Session(engine) as session:
         existing = session.query(CloudTenant).filter(
@@ -77,8 +84,8 @@ def upsert_tenant(provider: str, tenant_name: str, tenant_id: str,
 
 
 def set_active_tenant(provider: str, tenant_db_id: int) -> None:
-    init_db(provider)
-    engine = get_engine(provider)
+    init_db(provider, _MODE)
+    engine = get_engine(provider, _MODE)
     with Session(engine) as session:
         session.query(CloudTenant).filter(CloudTenant.provider == provider).update({"is_active": False})
         session.query(CloudTenant).filter(CloudTenant.id == tenant_db_id).update({"is_active": True})
@@ -87,8 +94,8 @@ def set_active_tenant(provider: str, tenant_db_id: int) -> None:
 
 def delete_tenant(provider: str, tenant_db_id: int) -> None:
     """Removes the tenant and every CloudInventory/Commitment row ingested for it."""
-    init_db(provider)
-    engine = get_engine(provider)
+    init_db(provider, _MODE)
+    engine = get_engine(provider, _MODE)
     with Session(engine) as session:
         session.query(CloudInventory).filter(CloudInventory.tenant_id == tenant_db_id).delete(synchronize_session=False)
         session.query(Commitment).filter(Commitment.tenant_id == tenant_db_id).delete(synchronize_session=False)
@@ -97,7 +104,7 @@ def delete_tenant(provider: str, tenant_db_id: int) -> None:
 
 
 def resource_count(provider: str, tenant_db_id: int) -> int:
-    init_db(provider)
-    engine = get_engine(provider)
+    init_db(provider, _MODE)
+    engine = get_engine(provider, _MODE)
     with Session(engine) as session:
         return session.query(CloudInventory).filter(CloudInventory.tenant_id == tenant_db_id).count()

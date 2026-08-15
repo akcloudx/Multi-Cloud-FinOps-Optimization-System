@@ -23,6 +23,11 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from db.schema import init_db, get_engine, CloudInventory, Commitment, SyncLog, CloudTenant
+
+# Live-tenant ingestion always operates in the "live" scope (db/schema.py's
+# demo/live split) - this pipeline exists specifically to sync real cloud API
+# data, never demo/benchmark data.
+_MODE = "live"
 from azure_conn.connector import load_credentials_from_env, fetch_live_inventory, test_connection, AzureCredentials
 from aws.connector import load_aws_credentials_from_env, test_aws_connection
 from pricing.azure_retail_api import refresh_retail_prices
@@ -42,8 +47,8 @@ def run_ingestion_pipeline(provider: str = "Azure", creds=None, force_mock: bool
       Azure) are removed, so live inventory never accumulates stale resources.
       None only for the legacy no-tenant demo-refresh path.
     """
-    engine = get_engine(provider)
-    init_db(provider)
+    engine = get_engine(provider, _MODE)
+    init_db(provider, _MODE)
     now_iso = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
 
     is_azure = (provider.upper() == "AZURE")
@@ -150,8 +155,8 @@ def run_ingestion_pipeline(provider: str = "Azure", creds=None, force_mock: bool
 
 def get_latest_sync_log(provider: str = "Azure") -> dict:
     """Returns the timestamp and status of the latest 24h cron ingestion run."""
-    engine = get_engine(provider)
-    init_db(provider)
+    engine = get_engine(provider, _MODE)
+    init_db(provider, _MODE)
     with Session(engine) as session:
         latest = session.query(SyncLog).filter_by(provider=provider).order_by(SyncLog.id.desc()).first()
         if latest:

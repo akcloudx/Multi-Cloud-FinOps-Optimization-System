@@ -218,8 +218,8 @@ AWS_RI_COVERAGE_NOTES = {
 
 def seed_aws_if_empty(engine=None):
     if engine is None:
-        engine = get_engine("AWS")
-    init_db("AWS")
+        engine = get_engine("AWS", "demo")
+    init_db("AWS", "demo")
     with Session(engine) as session:
         if session.query(CloudInventory).filter_by(provider="AWS").count() == 0:
             session.bulk_insert_mappings(CloudInventory, AWS_INVENTORY)

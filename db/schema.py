@@ -2,6 +2,22 @@
 db/schema.py
 Star Schema for Multi-Cloud FinOps Optimization System.
 Compatible with SQLite and Microsoft Azure SQL Database.
+
+Demo and live data are genuinely separate stores (2026-08 redesign) - every
+table lives in one of 4 scopes, keyed by (provider, mode): azure_demo,
+azure_live, aws_demo, aws_live. This replaced the old design where demo vs
+live was just a CloudInventory.tenant_id NULL-vs-set flag inside one shared
+table - that made it impossible to point a user at "the real Azure SQL
+Database" and have them see a physically distinct set of tables for demo
+data, which is exactly what was being verified when this redesign happened.
+
+In production (real Azure SQL Database), the 4 scopes are 4 SQL Server
+SCHEMAS inside the ONE `finops-db` database - schemas are free, so this adds
+zero cost over the single-schema design, while still being real structural
+separation (a `SELECT * FROM azure_demo.cloud_inventory` and a
+`SELECT * FROM azure_live.cloud_inventory` are genuinely different tables,
+not the same table filtered by a column). Locally (SQLite doesn't support
+real schemas the same way), each scope is a separate .db file instead.
 """
 
 import os
@@ -11,69 +27,127 @@ from sqlalchemy import (
 from sqlalchemy.orm import declarative_base
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(__file__))
-AZURE_DB_PATH = os.path.join(_PROJECT_ROOT, "azure_finops.db")
-AWS_DB_PATH   = os.path.join(_PROJECT_ROOT, "aws_finops.db")
 
 Base = declarative_base()
-_engines = {}
+_VALID_MODES = {"demo", "live"}
+
+# Raw connection to the physical SQL Server, ONE per provider, shared across
+# both modes (demo and live are the SAME server/database in production, just
+# different schemas) - never call this engine directly for table reads/writes,
+# always go through get_engine(provider, mode) below.
+_base_mssql_engines = {}
+# Fully mode-scoped engines actually used everywhere else, keyed by
+# (PROVIDER, mode). For mssql, these are schema_translate_map proxies over
+# the shared base engine above. For sqlite, these are their own standalone
+# per-file engines (no sharing possible/needed).
+_mode_engines = {}
 
 
-def get_engine(provider: str = "Azure"):
-    """Return a singleton SQLAlchemy engine for the specified cloud provider."""
-    global _engines
+def _schema_name(provider_key: str, mode: str) -> str:
+    return f"{provider_key.lower()}_{mode}"
+
+
+def _sqlite_path(provider_key: str, mode: str) -> str:
+    return os.path.join(_PROJECT_ROOT, f"{provider_key.lower()}_finops_{mode}.db")
+
+
+def get_engine(provider: str = "Azure", mode: str = "demo"):
+    """Return a singleton SQLAlchemy engine scoped to BOTH the cloud provider
+    (Azure/AWS) and the environment mode (demo/live). See this module's
+    docstring for why these are genuinely separate stores, not a shared-table
+    flag. `mode` has no default that quietly does the wrong thing on purpose -
+    every caller must say which one it means; a typo raises immediately
+    rather than silently mixing demo and live data."""
+    global _base_mssql_engines, _mode_engines
+    mode = (mode or "").lower()
+    if mode not in _VALID_MODES:
+        raise ValueError(f"mode must be 'demo' or 'live', got {mode!r}")
     provider_key = provider.upper()
-    if provider_key not in _engines:
-        db_url = os.getenv("DATABASE_URL")
-        # In Azure production environment (App Service / Function App), use Azure SQL Database
-        if not db_url and (os.getenv("WEBSITE_SITE_NAME") or os.getenv("FUNCTIONS_WORKER_RUNTIME")):
-            db_url = "mssql+pymssql://finopsadmin:P%40ssw0rd2026%21FinOps@finops-sql-e0b96fd6.database.windows.net:1433/finops-db"
+    cache_key = (provider_key, mode)
+    if cache_key in _mode_engines:
+        return _mode_engines[cache_key]
 
-        if db_url and "mssql" in db_url:
-            if "pymssql" not in db_url and "pyodbc" not in db_url:
-                db_url = db_url.replace("mssql://", "mssql+pymssql://")
-            try:
-                engine = create_engine(db_url, echo=False, future=True, pool_pre_ping=True)
-                with engine.connect() as conn:
+    db_url = os.getenv("DATABASE_URL")
+    # In Azure production environment (App Service / Function App), use Azure SQL Database
+    if not db_url and (os.getenv("WEBSITE_SITE_NAME") or os.getenv("FUNCTIONS_WORKER_RUNTIME")):
+        db_url = "mssql+pymssql://finopsadmin:P%40ssw0rd2026%21FinOps@finops-sql-e0b96fd6.database.windows.net:1433/finops-db"
+
+    if db_url and "mssql" in db_url:
+        if "pymssql" not in db_url and "pyodbc" not in db_url:
+            db_url = db_url.replace("mssql://", "mssql+pymssql://")
+        try:
+            if provider_key not in _base_mssql_engines:
+                base_engine = create_engine(db_url, echo=False, future=True, pool_pre_ping=True)
+                with base_engine.connect() as conn:
                     pass
-                _engines[provider_key] = engine
+                _base_mssql_engines[provider_key] = base_engine
                 print(f"[Info] Successfully connected to Production Azure SQL Database for {provider_key}")
-                return _engines[provider_key]
-            except Exception as ex:
-                print(f"[Warning] Azure SQL Database connection attempt failed ({ex}).")
+            schema_name = _schema_name(provider_key, mode)
+            engine = _base_mssql_engines[provider_key].execution_options(schema_translate_map={None: schema_name})
+            _mode_engines[cache_key] = engine
+            return engine
+        except Exception as ex:
+            print(f"[Warning] Azure SQL Database connection attempt failed ({ex}).")
 
-        # Fallback to local SQLite ONLY for offline local desktop development
-        db_path = AWS_DB_PATH if provider_key == "AWS" else AZURE_DB_PATH
-        db_url = f"sqlite:///{db_path}"
-        _engines[provider_key] = create_engine(db_url, echo=False, future=True)
-    return _engines[provider_key]
+    # Fallback to local SQLite ONLY for offline local desktop development
+    db_path = _sqlite_path(provider_key, mode)
+    db_url = f"sqlite:///{db_path}"
+    _mode_engines[cache_key] = create_engine(db_url, echo=False, future=True)
+    return _mode_engines[cache_key]
 
 
-def _ensure_column(engine, table_name: str, column_name: str, column_type_sql: str):
+def _ensure_schema_exists(engine, schema_name: str):
+    """SQL Server requires a schema to exist before CREATE TABLE can target
+    it (unlike the default 'dbo' schema, which always exists) - a no-op for
+    SQLite, which has no equivalent concept (each mode is already its own
+    separate file there)."""
+    if engine.dialect.name != "mssql":
+        return
+    with engine.connect() as conn:
+        raw = conn.execution_options(schema_translate_map=None)
+        exists = raw.execute(text("SELECT 1 FROM sys.schemas WHERE name = :n"), {"n": schema_name}).first()
+        if not exists:
+            raw.execute(text(f"CREATE SCHEMA [{schema_name}]"))
+            raw.commit()
+
+
+def _ensure_column(engine, schema_name, table_name: str, column_name: str, column_type_sql: str):
     """Add a column to an already-existing table if missing (SQLAlchemy's create_all
     only creates missing tables, never alters existing ones). No 'COLUMN' keyword in
-    the SQL - SQLite accepts it but SQL Server's ALTER TABLE ADD syntax does not."""
+    the SQL - SQLite accepts it but SQL Server's ALTER TABLE ADD syntax does not.
+    schema_name is only meaningful for mssql - reflection (unlike schema_translate_map)
+    doesn't automatically scope to the translated schema, so it must be passed
+    explicitly here, and the raw ALTER TABLE text must be schema-qualified by hand
+    too (schema_translate_map only rewrites compiled Table/Column objects, never
+    hand-written SQL strings)."""
+    is_mssql = engine.dialect.name == "mssql"
     inspector = inspect(engine)
-    if table_name not in inspector.get_table_names():
+    existing_tables = inspector.get_table_names(schema=schema_name) if is_mssql else inspector.get_table_names()
+    if table_name not in existing_tables:
         return
-    existing_cols = {c["name"] for c in inspector.get_columns(table_name)}
+    existing_cols = {c["name"] for c in (inspector.get_columns(table_name, schema=schema_name) if is_mssql else inspector.get_columns(table_name))}
     if column_name not in existing_cols:
+        qualified = f"[{schema_name}].{table_name}" if is_mssql else table_name
         with engine.begin() as conn:
-            conn.execute(text(f"ALTER TABLE {table_name} ADD {column_name} {column_type_sql}"))
+            conn.execute(text(f"ALTER TABLE {qualified} ADD {column_name} {column_type_sql}"))
 
 
-def init_db(provider: str = "Azure"):
-    """Create all tables for the specified cloud provider if they don't exist yet,
-    and migrate any columns added after a table already existed in the wild."""
-    engine = get_engine(provider)
+def init_db(provider: str = "Azure", mode: str = "demo"):
+    """Create all tables for the specified (provider, mode) scope if they
+    don't exist yet, and migrate any columns added after a table already
+    existed in the wild."""
+    engine = get_engine(provider, mode)
+    schema_name = _schema_name(provider.upper(), mode)
+    _ensure_schema_exists(engine, schema_name)
     Base.metadata.create_all(engine)
-    _ensure_column(engine, "cloud_inventory", "tenant_id", "INTEGER")
-    _ensure_column(engine, "commitments", "tenant_id", "INTEGER")
-    _ensure_column(engine, "commitment_price_cache", "resource_type", "VARCHAR(255)")
-    _ensure_column(engine, "cloud_inventory", "redundancy", "VARCHAR(255)")
-    _ensure_column(engine, "commitment_price_cache", "redundancy", "VARCHAR(255)")
-    _ensure_column(engine, "commitments", "scope_redundancy", "VARCHAR(255)")
-    _ensure_column(engine, "commitments", "scope_resource_type", "VARCHAR(255)")
-    _ensure_column(engine, "cloud_inventory", "ha_replica_count", "INTEGER")
+    _ensure_column(engine, schema_name, "cloud_inventory", "tenant_id", "INTEGER")
+    _ensure_column(engine, schema_name, "commitments", "tenant_id", "INTEGER")
+    _ensure_column(engine, schema_name, "commitment_price_cache", "resource_type", "VARCHAR(255)")
+    _ensure_column(engine, schema_name, "cloud_inventory", "redundancy", "VARCHAR(255)")
+    _ensure_column(engine, schema_name, "commitment_price_cache", "redundancy", "VARCHAR(255)")
+    _ensure_column(engine, schema_name, "commitments", "scope_redundancy", "VARCHAR(255)")
+    _ensure_column(engine, schema_name, "commitments", "scope_resource_type", "VARCHAR(255)")
+    _ensure_column(engine, schema_name, "cloud_inventory", "ha_replica_count", "INTEGER")
     return engine
 
 

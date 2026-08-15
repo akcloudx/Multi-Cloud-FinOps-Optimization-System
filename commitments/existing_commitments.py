@@ -22,13 +22,14 @@ _COMPUTE_SP_TYPE  = "Savings Plan for Compute"
 _DATABASE_SP_TYPE = "Savings Plan for Databases"
 
 
-def get_all_commitments(provider: str = "Azure", tenant_id=None) -> pd.DataFrame:
-    """Returns active commitment contracts (RI + Savings Plans) for provider.
-    tenant_id=None (default) returns demo/seed commitments only. Live tenants
-    don't have fetched RI/SP data yet (Resource Graph only covers inventory),
-    so a real tenant_id correctly returns empty rather than falling back to demo."""
-    engine = get_engine(provider)
-    init_db(provider)
+def get_all_commitments(provider: str = "Azure", mode: str = "demo", tenant_id=None) -> pd.DataFrame:
+    """Returns active commitment contracts (RI + Savings Plans) for the given
+    (provider, mode) scope. tenant_id only matters within "live" mode (which
+    connected tenant's commitments to read) - live tenants don't have fetched
+    RI/SP data yet (Resource Graph only covers inventory), so a real tenant_id
+    correctly returns empty rather than falling back to demo data."""
+    engine = get_engine(provider, mode)
+    init_db(provider, mode)
     with Session(engine) as session:
         query = session.query(Commitment)
         if tenant_id is None:
@@ -58,48 +59,48 @@ def get_all_commitments(provider: str = "Azure", tenant_id=None) -> pd.DataFrame
     return pd.DataFrame(data, columns=columns)
 
 
-def get_existing_savings_plans(provider: str = "Azure", tenant_id=None) -> pd.DataFrame:
+def get_existing_savings_plans(provider: str = "Azure", mode: str = "demo", tenant_id=None) -> pd.DataFrame:
     """Returns ALL Savings Plan commitments."""
-    df = get_all_commitments(provider, tenant_id)
+    df = get_all_commitments(provider, mode, tenant_id)
     sp_types = [_COMPUTE_SP_TYPE, _DATABASE_SP_TYPE, "Compute Savings Plan", "EC2 Instance Savings Plan"]
     mask = df["commitment_type"].isin(sp_types)
     return df[mask].reset_index(drop=True)
 
 
-def get_compute_savings_plans(provider: str = "Azure", tenant_id=None) -> pd.DataFrame:
+def get_compute_savings_plans(provider: str = "Azure", mode: str = "demo", tenant_id=None) -> pd.DataFrame:
     """Returns Compute Savings Plan commitments."""
-    df = get_all_commitments(provider, tenant_id)
+    df = get_all_commitments(provider, mode, tenant_id)
     mask = df["commitment_type"].isin([_COMPUTE_SP_TYPE, "Compute Savings Plan"])
     return df[mask].reset_index(drop=True)
 
 
-def get_database_savings_plans(provider: str = "Azure", tenant_id=None) -> pd.DataFrame:
+def get_database_savings_plans(provider: str = "Azure", mode: str = "demo", tenant_id=None) -> pd.DataFrame:
     """Returns Database / EC2 Instance Savings Plan commitments."""
-    df = get_all_commitments(provider, tenant_id)
+    df = get_all_commitments(provider, mode, tenant_id)
     mask = df["commitment_type"].isin([_DATABASE_SP_TYPE, "EC2 Instance Savings Plan"])
     return df[mask].reset_index(drop=True)
 
 
-def get_existing_reservations(provider: str = "Azure", tenant_id=None) -> pd.DataFrame:
+def get_existing_reservations(provider: str = "Azure", mode: str = "demo", tenant_id=None) -> pd.DataFrame:
     """Returns Reserved Instance / Reserved Capacity commitments."""
-    df = get_all_commitments(provider, tenant_id)
+    df = get_all_commitments(provider, mode, tenant_id)
     mask = df["commitment_type"].isin(["Reserved Instance", "Reserved Capacity"])
     return df[mask].reset_index(drop=True)
 
 
-def get_total_compute_sp_hr(provider: str = "Azure", tenant_id=None) -> float:
+def get_total_compute_sp_hr(provider: str = "Azure", mode: str = "demo", tenant_id=None) -> float:
     """Total Savings Plan for Compute $/hr pool."""
-    df = get_compute_savings_plans(provider, tenant_id)
+    df = get_compute_savings_plans(provider, mode, tenant_id)
     return float(df["hourly_usd_commitment"].sum()) if not df.empty else 0.0
 
 
-def get_total_database_sp_hr(provider: str = "Azure", tenant_id=None) -> float:
+def get_total_database_sp_hr(provider: str = "Azure", mode: str = "demo", tenant_id=None) -> float:
     """Total Savings Plan for Databases $/hr pool."""
-    df = get_database_savings_plans(provider, tenant_id)
+    df = get_database_savings_plans(provider, mode, tenant_id)
     return float(df["hourly_usd_commitment"].sum()) if not df.empty else 0.0
 
 
-def get_total_sp_commitment_hr(provider: str = "Azure", tenant_id=None) -> float:
+def get_total_sp_commitment_hr(provider: str = "Azure", mode: str = "demo", tenant_id=None) -> float:
     """Total $/hr across all Savings Plans."""
-    return get_total_compute_sp_hr(provider, tenant_id) + get_total_database_sp_hr(provider, tenant_id)
+    return get_total_compute_sp_hr(provider, mode, tenant_id) + get_total_database_sp_hr(provider, mode, tenant_id)
 

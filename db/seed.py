@@ -105,7 +105,7 @@ DATABASE_INVENTORY = [
      "resource_state": "Running",
      "region": "australiaeast", "os": "N/A", "sku": "GP_Gen5_4",
      "redundancy": "Locally Redundant",
-     "payg_hourly_usd": 0.526, "avg_daily_running_hours": 24,
+     "payg_hourly_usd": 0.724552, "avg_daily_running_hours": 24,   # real live-fetched rate, refreshed 2026-08 (was stale at 0.526)
      "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
 
     # Azure SQL Database — same SKU/region as SQLDB-Prod-01 above, but Zone
@@ -149,7 +149,7 @@ DATABASE_INVENTORY = [
      "resource_state": "Running",
      "region": "australiaeast", "os": "N/A", "sku": "GP_Gen5_8",
      "redundancy": "Locally Redundant",
-     "payg_hourly_usd": 1.008, "avg_daily_running_hours": 24,
+     "payg_hourly_usd": 1.449112, "avg_daily_running_hours": 24,   # real live-fetched rate, refreshed 2026-08 (was stale at 1.008)
      "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
 
     # Azure SQL Managed Instance — Business Critical, Premium-series, 4 vCores,
@@ -200,7 +200,15 @@ DATABASE_INVENTORY = [
      "resource_state": "Running",
      "region": "australiaeast", "os": "N/A", "sku": "GP_Serverless_4",
      "redundancy": "Locally Redundant",
-     "payg_hourly_usd": 0.263, "avg_daily_running_hours": 10,
+     # Real live-fetched rate, refreshed 2026-08 (was stale at 0.263 - that
+     # value predated this app's Serverless resolver being built and looked
+     # hand-picked to represent "cheap because it auto-pauses", a concept
+     # this app's flat avg_daily_running_hours model doesn't actually
+     # represent anywhere else). Serverless genuinely IS billed at a premium
+     # per-active-vCore-hour vs Provisioned at the same vCore count -
+     # confirmed real, not a bug: the tradeoff only pays off if the resource
+     # actually pauses during idle time, which this app doesn't model.
+     "payg_hourly_usd": 2.483568, "avg_daily_running_hours": 10,
      "subscription": "sub-dev-002", "provider": "Azure", "is_orphaned": False},
 
     # Azure SQL Elastic Pool — General Purpose, Gen5, 8 vCores shared across
@@ -280,7 +288,7 @@ RI_ONLY_INVENTORY = [
      "resource_type": "Azure Synapse Analytics",
      "resource_state": "Running",
      "region": "australiaeast", "os": "N/A", "sku": "DW500c",
-     "payg_hourly_usd": 6.000, "avg_daily_running_hours": 10,
+     "payg_hourly_usd": 8.45, "avg_daily_running_hours": 10,   # real live-fetched rate, refreshed 2026-08 (was stale at 6.000)
      "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
 
     # Azure Databricks — Reserved Capacity (DBU)
@@ -436,6 +444,49 @@ COMMITMENTS = [
      "hourly_usd_commitment": 0.140,   # ~25% saving vs 0.188 PAYG
      "reserved_qty": 1,
      "term": "1-year", "expiry_date": "2026-10-01", "provider": "Azure"},
+
+    # ── Reserved Instance — Azure Dedicated Host (covers physical host compute
+    #    costs only). Rate is the real live-fetched 1yr RI rate for DSv3-Type3.
+    {"commitment_id": "RI-DEDHOST-DSV3T3-AE",
+     "commitment_type": "Reserved Instance",
+     "scope_sku": "DSv3-Type3", "scope_resource_type": "Azure Dedicated Host",
+     "scope_region": "australiaeast", "scope_os": "N/A", "scope_redundancy": "N/A",
+     "hourly_usd_commitment": 3.1378995433789956,   # ~40% saving vs 5.28 PAYG
+     "reserved_qty": 1,
+     "term": "1-year", "expiry_date": "2026-10-15", "provider": "Azure"},
+
+    # ── Reserved Instance — Azure Cache for Redis Enterprise (covers compute
+    #    costs only). Real live-fetched 1yr RI rate for Balanced_B10.
+    {"commitment_id": "RI-REDISENT-B10-AE",
+     "commitment_type": "Reserved Instance",
+     "scope_sku": "Balanced_B10", "scope_resource_type": "Azure Cache for Redis Enterprise",
+     "scope_region": "australiaeast", "scope_os": "N/A", "scope_redundancy": "N/A",
+     "hourly_usd_commitment": 0.2541095890410959,   # ~35% saving vs 0.391 PAYG
+     "reserved_qty": 1,
+     "term": "1-year", "expiry_date": "2027-01-10", "provider": "Azure"},
+
+    # ── Reserved Capacity — Azure Synapse Analytics (covers cDWU usage ONLY).
+    #    Real live-fetched 1yr rate for DW500c (5 x DW100c reservation units,
+    #    already scaled - see pricing/sku_mapping.py's reservation_multiplier).
+    {"commitment_id": "RI-SYNAPSE-DW500C-AE",
+     "commitment_type": "Reserved Capacity",
+     "scope_sku": "DW500c", "scope_resource_type": "Azure Synapse Analytics",
+     "scope_region": "australiaeast", "scope_os": "N/A", "scope_redundancy": "N/A",
+     "hourly_usd_commitment": 5.323630136986301,   # ~37% saving vs 8.45 PAYG
+     "reserved_qty": 1,
+     "term": "1-year", "expiry_date": "2026-11-20", "provider": "Azure"},
+
+    # ── Reserved Instance — Azure SQL Managed Instance (covers compute costs
+    #    ONLY). Deliberately covers SQLMI-Prod-01 (GP_Gen5_8) only - SQLMI-Prod-02
+    #    (BC Premium-series, Zone Redundant) is intentionally left uncovered as a
+    #    realistic gap, matching the SQL Database ZR pattern already established.
+    {"commitment_id": "RI-SQLMI-GP-GEN5-8-AE",
+     "commitment_type": "Reserved Instance",
+     "scope_sku": "GP_Gen5_8", "scope_resource_type": "Azure SQL Managed Instance",
+     "scope_region": "australiaeast", "scope_os": "N/A", "scope_redundancy": "Locally Redundant",
+     "hourly_usd_commitment": 0.9415525114155251,   # ~35% saving vs 1.449112 PAYG
+     "reserved_qty": 1,
+     "term": "1-year", "expiry_date": "2026-12-15", "provider": "Azure"},
 
     # ── Savings Plan for Compute (flexible $/hr pool, 1-yr or 3-yr) ────────────
     # Covers: VMs, App Service, Functions Premium, Container Instances,
@@ -625,6 +676,160 @@ RESERVATION_PURCHASES = [
         "utilization_30day_pct": 98.4,
         "provider": "Azure",
     },
+
+    # Corresponds to Commitment "RI-DEDHOST-DSV3T3-AE" - covers DEDHOST-Prod-01.
+    # reserved_resource_type "DedicatedHost" and sku_name "DSv3 Type3" (space,
+    # not hyphen) both verified against the real ReservedResourceType enum
+    # (https://learn.microsoft.com/en-us/rest/api/reserved-vm-instances/reservation/get)
+    # and this app's own live-verified pricing/sku_mapping.py reservation_match_value.
+    # instance_flexibility is None - that field is documented as only applying
+    # to the VirtualMachines reserved resource type.
+    {
+        "reservation_order_id": "a1b2c3d4-0005-4a1a-9c1a-000000000005",
+        "reservation_id": "a1b2c3d4-0005-4a1a-9c1a-100000000005",
+        "name": "a1b2c3d4-0005-4a1a-9c1a-100000000005",
+        "type": "Microsoft.Capacity/reservationOrders/reservations",
+        "location": "australiaeast",
+        "sku_name": "DSv3 Type3",
+        "sku_description": "DSv3-Type3 Dedicated Host",
+        "reserved_resource_type": "DedicatedHost",
+        "instance_flexibility": None,
+        "applied_scope_type": "Single",
+        "applied_scope_display_name": "sub-prod-001",
+        "applied_scope_subscription_id": "/subscriptions/sub-prod-001",
+        "billing_plan": "Upfront",
+        "term": "P1Y",
+        "quantity": 1,
+        "provisioning_state": "Succeeded",
+        "renew": True,
+        "purchase_date": "2025-10-15",
+        "purchase_date_time": "2025-10-15T11:30:00.0000000Z",
+        "effective_date_time": "2025-10-15T11:30:00.0000000Z",
+        "benefit_start_time": "2025-10-15T11:30:00.0000000Z",
+        "expiry_date": "2026-10-15",
+        "expiry_date_time": "2026-10-15T11:30:00.0000000Z",
+        "utilization_trend": "Flat",
+        "utilization_1day_pct": 100.0,
+        "utilization_7day_pct": 100.0,
+        "utilization_30day_pct": 100.0,
+        "provider": "Azure",
+    },
+
+    # Corresponds to Commitment "RI-REDISENT-B10-AE" - covers REDISENT-Prod-01.
+    # reserved_resource_type "RedisCache" - the real ReservedResourceType enum
+    # has only ONE Redis value (no separate Enterprise variant); Enterprise vs
+    # classic is distinguished by sku_name shape alone ("B10" bare size code,
+    # matching Enterprise's real armSkuName convention - see pricing/
+    # sku_mapping.py's _plan_redis_enterprise - vs classic Redis's "P2"/"C1"-
+    # style codes).
+    {
+        "reservation_order_id": "a1b2c3d4-0006-4a1a-9c1a-000000000006",
+        "reservation_id": "a1b2c3d4-0006-4a1a-9c1a-100000000006",
+        "name": "a1b2c3d4-0006-4a1a-9c1a-100000000006",
+        "type": "Microsoft.Capacity/reservationOrders/reservations",
+        "location": "australiaeast",
+        "sku_name": "B10",
+        "sku_description": "Balanced B10 (Azure Managed Redis)",
+        "reserved_resource_type": "RedisCache",
+        "instance_flexibility": None,
+        "applied_scope_type": "Single",
+        "applied_scope_display_name": "sub-prod-001",
+        "applied_scope_subscription_id": "/subscriptions/sub-prod-001",
+        "billing_plan": "Monthly",
+        "term": "P1Y",
+        "quantity": 1,
+        "provisioning_state": "Succeeded",
+        "renew": False,
+        "purchase_date": "2026-01-10",
+        "purchase_date_time": "2026-01-10T13:45:00.0000000Z",
+        "effective_date_time": "2026-01-10T13:45:00.0000000Z",
+        "benefit_start_time": "2026-01-10T13:45:00.0000000Z",
+        "expiry_date": "2027-01-10",
+        "expiry_date_time": "2027-01-10T13:45:00.0000000Z",
+        "utilization_trend": "Flat",
+        "utilization_1day_pct": 100.0,
+        "utilization_7day_pct": 100.0,
+        "utilization_30day_pct": 100.0,
+        "provider": "Azure",
+    },
+
+    # Corresponds to Commitment "RI-SYNAPSE-DW500C-AE" - covers SYNAPSE-Prod-01.
+    # reserved_resource_type "SqlDataWarehouse" (Synapse Dedicated SQL Pool's
+    # real enum value, matching the classic "SQL Data Warehouse" product name
+    # this service is built on). sku_name "DW100c" - the ONLY real Reservation
+    # unit sold (verified live earlier this session), NOT "DW500c" - quantity=5
+    # represents the real Azure purchase quantity (5 x DW100c = 500 DWU),
+    # matching the same "app's simplified reserved_qty=1 resource vs real
+    # Azure's scaled unit quantity" distinction already established for SQL DB.
+    {
+        "reservation_order_id": "a1b2c3d4-0007-4a1a-9c1a-000000000007",
+        "reservation_id": "a1b2c3d4-0007-4a1a-9c1a-100000000007",
+        "name": "a1b2c3d4-0007-4a1a-9c1a-100000000007",
+        "type": "Microsoft.Capacity/reservationOrders/reservations",
+        "location": "australiaeast",
+        "sku_name": "DW100c",
+        "sku_description": "Synapse Analytics Dedicated SQL Pool - DW100c",
+        "reserved_resource_type": "SqlDataWarehouse",
+        "instance_flexibility": None,
+        "applied_scope_type": "Single",
+        "applied_scope_display_name": "sub-prod-001",
+        "applied_scope_subscription_id": "/subscriptions/sub-prod-001",
+        "billing_plan": "Upfront",
+        "term": "P1Y",
+        "quantity": 5,
+        "provisioning_state": "Succeeded",
+        "renew": True,
+        "purchase_date": "2025-11-20",
+        "purchase_date_time": "2025-11-20T09:00:00.0000000Z",
+        "effective_date_time": "2025-11-20T09:00:00.0000000Z",
+        "benefit_start_time": "2025-11-20T09:00:00.0000000Z",
+        "expiry_date": "2026-11-20",
+        "expiry_date_time": "2026-11-20T09:00:00.0000000Z",
+        "utilization_trend": "Flat",
+        "utilization_1day_pct": 100.0,
+        "utilization_7day_pct": 100.0,
+        "utilization_30day_pct": 100.0,
+        "provider": "Azure",
+    },
+
+    # Corresponds to Commitment "RI-SQLMI-GP-GEN5-8-AE" - covers SQLMI-Prod-01
+    # ONLY (SQLMI-Prod-02, BC Premium-series Zone Redundant, is deliberately
+    # left uncovered as a realistic gap). sku_name "SQLMI_GP_Compute_Gen5" and
+    # reserved_resource_type "SqlDatabases" (no separate "SqlManagedInstance"
+    # enum value exists - same real-world quirk already confirmed for SQL
+    # Elastic Pool) both verified against pricing/sku_mapping.py's live-tested
+    # reservation_match_value. quantity=8 is the real vCore count, matching
+    # the SQL Database record's quantity=4-is-vCores convention above.
+    {
+        "reservation_order_id": "a1b2c3d4-0008-4a1a-9c1a-000000000008",
+        "reservation_id": "a1b2c3d4-0008-4a1a-9c1a-100000000008",
+        "name": "a1b2c3d4-0008-4a1a-9c1a-100000000008",
+        "type": "Microsoft.Capacity/reservationOrders/reservations",
+        "location": "australiaeast",
+        "sku_name": "SQLMI_GP_Compute_Gen5",
+        "sku_description": "SQL Managed Instance General Purpose - Gen5",
+        "reserved_resource_type": "SqlDatabases",
+        "instance_flexibility": None,
+        "applied_scope_type": "Single",
+        "applied_scope_display_name": "sub-prod-001",
+        "applied_scope_subscription_id": "/subscriptions/sub-prod-001",
+        "billing_plan": "Upfront",
+        "term": "P1Y",
+        "quantity": 8,
+        "provisioning_state": "Succeeded",
+        "renew": True,
+        "purchase_date": "2025-12-15",
+        "purchase_date_time": "2025-12-15T10:15:00.0000000Z",
+        "effective_date_time": "2025-12-15T10:15:00.0000000Z",
+        "benefit_start_time": "2025-12-15T10:15:00.0000000Z",
+        "expiry_date": "2026-12-15",
+        "expiry_date_time": "2026-12-15T10:15:00.0000000Z",
+        "utilization_trend": "Flat",
+        "utilization_1day_pct": 100.0,
+        "utilization_7day_pct": 96.8,
+        "utilization_30day_pct": 95.2,
+        "provider": "Azure",
+    },
 ]
 
 # Azure SQL Database's own Savings Plan purchase record is deliberately NOT
@@ -731,9 +936,11 @@ RI_COVERAGE_NOTES = {
 
 
 def seed_if_empty(engine=None):
+    # Demo/benchmark data always lives in the "demo" scope - never the caller's
+    # choice, since this function's entire purpose is seeding THAT scope specifically.
     if engine is None:
-        engine = get_engine()
-    init_db()
+        engine = get_engine("Azure", "demo")
+    init_db("Azure", "demo")
     with Session(engine) as session:
         if session.query(CloudInventory).filter_by(provider="Azure").count() == 0:
             session.bulk_insert_mappings(CloudInventory, INVENTORY)

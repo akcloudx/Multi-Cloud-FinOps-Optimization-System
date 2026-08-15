@@ -27,18 +27,20 @@ from sqlalchemy.orm import Session
 from db.schema import init_db, get_engine, CloudInventory
 
 
-def get_compute_inventory(provider: str = "Azure", tenant_id=None) -> pd.DataFrame:
+def get_compute_inventory(provider: str = "Azure", mode: str = "demo", tenant_id=None) -> pd.DataFrame:
     """
-    Returns the normalized inventory DataFrame from SQL DB for the specified provider.
-    Columns match FOCUS schema for multi-cloud compatibility.
+    Returns the normalized inventory DataFrame from SQL DB for the specified
+    (provider, mode) scope. Columns match FOCUS schema for multi-cloud
+    compatibility.
 
-    tenant_id: None (default) returns demo/seed rows only (tenant_id IS NULL) -
-    it never mixes in live-ingested data. Pass an active tenant's DB id to get
-    that tenant's live inventory instead. There is no "all rows" mode - demo and
-    live data must never be shown together.
+    mode: "demo" or "live" - which physically separate scope to read from
+    (db/schema.py's demo/live split). tenant_id only matters within "live"
+    (which specific connected tenant's rows to read, when more than one is
+    registered) - within "demo" it's always None, since the demo scope only
+    ever holds seed rows with tenant_id IS NULL by construction.
     """
-    engine = get_engine(provider)
-    init_db(provider)
+    engine = get_engine(provider, mode)
+    init_db(provider, mode)
 
     with Session(engine) as session:
         query = session.query(CloudInventory)

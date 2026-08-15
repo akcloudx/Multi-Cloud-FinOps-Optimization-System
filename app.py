@@ -63,10 +63,14 @@ from db.aws_seed import seed_aws_if_empty, AWS_COMPUTE_SP_TYPES, AWS_DATABASE_SP
 
 @st.cache_resource
 def init_all_databases():
+    # Only the demo scope is eagerly seeded here - the live scope for each
+    # provider initializes lazily on first real use (tenant registration,
+    # first sync) via db/tenants.py and data/sync_pipeline.py, both of which
+    # already call init_db() inline before every operation.
     try:
-        init_db("Azure")
+        init_db("Azure", "demo")
         seed_if_empty()
-        init_db("AWS")
+        init_db("AWS", "demo")
         seed_aws_if_empty()
     except Exception as e:
         print(f"[Warning] Database initialization error: {e}")
@@ -79,7 +83,7 @@ except Exception as _db_err:
 # Auth gate — must run before anything else renders. Halts here (st.stop())
 # until someone is logged in; see ui/auth_page.py for why this is deliberately
 # minimal (placeholder ahead of real Entra ID / OIDC login).
-from ui.auth_page import require_login, render_logout_control
+from ui.auth_page import require_login, render_logout_control, render_switch_mode_control
 current_user = require_login()
 
 # require_login() only injects CSS on the pre-auth screens (it returns early
@@ -517,12 +521,23 @@ def page_users():
 
     from db.users import list_users, create_user as _create_user
 
+    # Demo and live accounts are separate scopes now (db/schema.py) - this
+    # page always reflects whichever scope the current session is in, same
+    # as every other data read in the app. In Demo Mode this correctly shows
+    # only the single fixed demo account with no "add a user" ability to
+    # abuse - real account management only makes sense in Live Cloud API mode.
+    users_mode = "live" if is_live_mode else "demo"
+
     with st.container(border=True):
-        for u in list_users():
+        for u in list_users(mode=users_mode):
             ucols = st.columns([3, 3, 2])
             ucols[0].markdown(f"**{u.display_name or u.username}** (`{u.username}`)")
             ucols[1].caption(f"Added {u.created_at[:10]} · Last login: {u.last_login_at[:10] if u.last_login_at else 'never'}")
             ucols[2].caption("🟢 Active" if u.is_active else "⚪ Inactive")
+
+    if not is_live_mode:
+        st.info("Switch to **Live Cloud API** mode to add or manage real user accounts - the demo account is fixed.", icon="ℹ️")
+        return
 
     with st.expander("➕ Add a new user", expanded=False):
         with st.form("add_user_form"):
@@ -540,7 +555,7 @@ def page_users():
                 st.error("Use at least 8 characters for the password.")
             else:
                 try:
-                    _create_user(nu_username, nu_pw1, nu_display)
+                    _create_user(nu_username, nu_pw1, nu_display, mode="live")
                     st.success(f"User '{nu_username}' added.")
                     st.rerun()
                 except ValueError as e:
@@ -1365,16 +1380,13 @@ with st.sidebar:
     if not selected_provider:
         selected_provider = "Azure"
 
-    env_mode = st.radio(
-        "Data Source Environment",
-        options=["Demo / Benchmark Mode", "Live Cloud API"],
-        index=0,
-        key="env_mode_widget",
-        on_change=reset_app_cache,
-        help="Switch between pre-loaded benchmark infrastructure and live Cloud API connections.",
-    )
+    # Deliberately NOT a free-switching widget - see
+    # ui.auth_page.render_switch_mode_control's docstring for why: demo and
+    # live are separate login accounts and separate data now, so switching
+    # means signing out and back in, not flipping a toggle mid-session.
+    env_mode = render_switch_mode_control()
 
-    if st.button("🔁 Manage Tenant Connection", use_container_width=True, help="Connect, switch, or review your active Azure tenant."):
+    if env_mode == "Live Cloud API" and st.button("🔁 Manage Tenant Connection", use_container_width=True, help="Connect, switch, or review your active Azure tenant."):
         st.session_state["setup_complete"] = False
         st.rerun()
 
@@ -1443,11 +1455,11 @@ is_live_mode = (env_mode == "Live Cloud API")
 
 @st.cache_data(show_spinner=False)
 def load_benchmark_data(days: int, buffer: float, provider: str, sp_eligible_types: tuple):
-    inv_raw       = get_compute_inventory(provider=provider)
-    sp_df         = get_existing_savings_plans(provider=provider)
-    compute_sp_df = get_compute_savings_plans(provider=provider)
-    db_sp_df      = get_database_savings_plans(provider=provider)
-    ri_df         = get_existing_reservations(provider=provider)
+    inv_raw       = get_compute_inventory(provider=provider, mode="demo")
+    sp_df         = get_existing_savings_plans(provider=provider, mode="demo")
+    compute_sp_df = get_compute_savings_plans(provider=provider, mode="demo")
+    db_sp_df      = get_database_savings_plans(provider=provider, mode="demo")
+    ri_df         = get_existing_reservations(provider=provider, mode="demo")
     wf            = run_waterfall(inv_raw, ri_df, sp_df, simulate_days=days)
     sp_res        = savings_plan_analysis(inv_raw, sp_df, safety_buffer=buffer, eligible_types=list(sp_eligible_types))
     ri_res        = reservation_analysis(inv_raw, ri_df)
@@ -1460,11 +1472,11 @@ def load_live_data(provider: str, tenant_id: int, days: int, buffer: float, sp_e
     live-ingested rows (tenant_id FK) from SQL DB - never demo/seed rows, and
     never another tenant's rows. The app never calls cloud APIs directly here;
     everything was already fetched and cached in SQL DB by the ingestion pipeline."""
-    inv_raw       = get_compute_inventory(provider=provider, tenant_id=tenant_id)
-    sp_df         = get_existing_savings_plans(provider=provider, tenant_id=tenant_id)
-    compute_sp_df = get_compute_savings_plans(provider=provider, tenant_id=tenant_id)
-    db_sp_df      = get_database_savings_plans(provider=provider, tenant_id=tenant_id)
-    ri_df         = get_existing_reservations(provider=provider, tenant_id=tenant_id)
+    inv_raw       = get_compute_inventory(provider=provider, mode="live", tenant_id=tenant_id)
+    sp_df         = get_existing_savings_plans(provider=provider, mode="live", tenant_id=tenant_id)
+    compute_sp_df = get_compute_savings_plans(provider=provider, mode="live", tenant_id=tenant_id)
+    db_sp_df      = get_database_savings_plans(provider=provider, mode="live", tenant_id=tenant_id)
+    ri_df         = get_existing_reservations(provider=provider, mode="live", tenant_id=tenant_id)
     wf            = run_waterfall(inv_raw, ri_df, sp_df, simulate_days=days)
     sp_res        = savings_plan_analysis(inv_raw, sp_df, safety_buffer=buffer, eligible_types=list(sp_eligible_types))
     ri_res        = reservation_analysis(inv_raw, ri_df)
@@ -1511,7 +1523,7 @@ else:
 # Real Savings Plan / Reserved Instance commitment pricing cache (Phase A) -
 # a lightweight local DB read (the API calls already happened during
 # sync/seed), so it's not wrapped in @st.cache_data.
-prices_df = get_commitment_prices(get_engine(selected_provider), provider=selected_provider)
+prices_df = get_commitment_prices(get_engine(selected_provider, "live" if is_live_mode else "demo"), provider=selected_provider)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DERIVED SLICES & METRICS

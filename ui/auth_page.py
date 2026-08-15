@@ -92,7 +92,7 @@ def _render_demo_login():
         submitted = st.form_submit_button("Sign In", type="primary", use_container_width=True)
 
     if submitted:
-        user = verify_login(username, password)
+        user = verify_login(username, password, mode="demo")
         if user:
             st.session_state["auth_user"] = user
             # Demo Mode skips the tenant-connection gate entirely - straight
@@ -158,7 +158,7 @@ def _render_production_login_form():
         submitted = st.form_submit_button("Sign In", type="primary", use_container_width=True)
 
     if submitted:
-        user = verify_login(username, password)
+        user = verify_login(username, password, mode="live")
         if user:
             st.session_state["auth_user"] = user
             # Production Mode still needs a cloud tenant - the (now
@@ -170,6 +170,18 @@ def _render_production_login_form():
             st.error("Invalid username or password.")
 
 
+def _clear_session():
+    """Drops every piece of session state tied to being signed in, sending
+    the next rerun back to the mode-choice screen. Shared by both the
+    explicit Log out button and the Switch Mode button below - switching
+    between Demo and Live is a full sign-out, not an in-session toggle (see
+    render_switch_mode_control for why)."""
+    st.session_state.pop("auth_user", None)
+    st.session_state.pop("_login_mode_choice", None)
+    st.session_state.pop("setup_complete", None)
+    st.session_state.pop("env_mode_widget", None)
+
+
 def render_logout_control():
     """Small sidebar widget showing who's signed in with a logout button."""
     user = st.session_state.get("auth_user")
@@ -177,8 +189,29 @@ def render_logout_control():
         return
     st.caption(f"Signed in as **{user['display_name'] or user['username']}**")
     if st.button("Log out", use_container_width=True):
-        del st.session_state["auth_user"]
-        st.session_state.pop("_login_mode_choice", None)
-        st.session_state.pop("setup_complete", None)
-        st.session_state.pop("env_mode_widget", None)
+        _clear_session()
         st.rerun()
+
+
+def render_switch_mode_control():
+    """Read-only display of the current Demo/Live mode, plus a button that
+    signs out and returns to the mode-choice screen to switch.
+
+    Deliberately NOT a free in-session toggle (that's how this worked before
+    2026-08, and how the sidebar "Data Source Environment" radio used to
+    behave) - now that demo and live have genuinely separate data AND
+    genuinely separate login accounts (db/schema.py's demo/live split), a
+    silent in-session switch would let someone authenticated as the shared
+    Demo user reach the Live scope's real User Management page (add/view
+    real accounts) without ever signing in as a real user. Same reasoning
+    Salesforce uses for sandbox vs production: separate logins, no toggle,
+    because mixing them up silently is a real, recurring incident pattern
+    elsewhere - not a hypothetical."""
+    env_mode = st.session_state.get("env_mode_widget", "Demo / Benchmark Mode")
+    other_mode = "Live Cloud API" if env_mode == "Demo / Benchmark Mode" else "Demo / Benchmark Mode"
+    st.caption(f"**Data Source Environment:** {env_mode}")
+    if st.button(f"🔁 Switch to {other_mode}", use_container_width=True,
+                 help="Switching signs you out - sign back in for the other mode. Demo and Live are fully separate accounts and data now, not just a view toggle."):
+        _clear_session()
+        st.rerun()
+    return env_mode
