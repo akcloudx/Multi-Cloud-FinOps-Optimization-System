@@ -54,6 +54,7 @@ from typing import Tuple
 _NO_SAVINGS_PLAN_TYPES = {
     "Azure Cache for Redis", "Azure Cache for Redis Enterprise", "Azure Blob Storage", "Azure Files",
     "Azure Disk Storage", "Azure Synapse Analytics", "Azure Databricks",
+    "Microsoft Fabric",  # verified live 2026-08 - zero savingsPlan data on any Fabric Capacity meter, not on either official SP coverage list either
 }
 
 

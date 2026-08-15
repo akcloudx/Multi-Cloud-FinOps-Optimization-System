@@ -292,6 +292,17 @@ RI_ONLY_INVENTORY = [
      "payg_hourly_usd": 0.550, "avg_daily_running_hours": 10,
      "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
 
+    # Microsoft Fabric — Reserved Capacity (per-CU), F64 (64 Capacity Units).
+    # RI covers: capacity usage only. NOT: storage or networking. Not
+    # Savings-Plan-eligible at all (see analysis/sp_eligibility.py). Real
+    # live-fetched australiaeast rate: 64 x $0.21/CU-hr.
+    {"resource_id": "FABRIC-Prod-01", "resource_name": "prod-analytics-fabric",
+     "resource_type": "Microsoft Fabric",
+     "resource_state": "Running",
+     "region": "australiaeast", "os": "N/A", "sku": "F64",
+     "payg_hourly_usd": 13.44, "avg_daily_running_hours": 24,
+     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+
     # Azure Disk Storage — Reserved (P30+ Premium SSD only)
     # RI covers: Premium SSD P30 and larger. NOT: other disk types or smaller sizes.
     {"resource_id": "DISK-Prod-01", "resource_name": "prod-vm-disk-p30",
@@ -688,6 +699,7 @@ RI_ONLY_ELIGIBLE_TYPES = {
     "Azure NetApp Files",
     "Azure Data Explorer",
     "Azure Data Factory",
+    "Microsoft Fabric",
     "App Service",          # App Service stamp fee RI
 }
 
@@ -708,6 +720,10 @@ RI_COVERAGE_NOTES = {
     "Azure Databricks":                 ("DBU usage only", "Compute, storage, networking (charged separately)"),
     "Azure Disk Storage":               ("Premium SSD P30 and larger only", "Other disk types, sizes smaller than P30"),
     "Azure Data Factory":               ("Integration runtime compute cost", "Data movement, storage"),
+    "Azure Data Explorer":              ("Services markup fee only (subscription-wide, ~30% saving)", "Cluster compute, networking, storage - billed and reserved separately"),
+    "Azure Backup Storage":              ("Vault-standard tier backup data (100 TiB/1 PiB blocks)", "Vault-archive tier, Protected Instance cost, early deletion/bandwidth charges"),
+    "Azure NetApp Files":                ("Standard/Premium/Ultra capacity pools, hot tier only (100 TiB/1 PiB blocks)", "Flexible service level, cool-tier consumption, cross-region replication, backup add-ons"),
+    "Microsoft Fabric":                  ("Capacity Unit (CU) usage, 1yr/3yr give the same ~40% discount", "Storage, networking - not eligible for any Savings Plan"),
     "App Service":                      ("Stamp fee / compute", "Workers and associated resources"),
 }
 

@@ -1306,6 +1306,46 @@ def _plan_database_migration_service(sku: str) -> SkuQueryPlan:
     )
 
 
+# ── Microsoft Fabric ─────────────────────────────────────────────────────────
+# Real ARM schema (Microsoft.Fabric/capacities, verified 2026-08 via
+# Microsoft's own template reference): `sku` is a clean top-level object -
+# `sku.name` is the real F-SKU string (e.g. "F64") and `sku.tier` is always
+# the literal constant "Fabric" (no useful info). CU count is derived
+# directly from the F-number (F64 = 64 CUs) - Microsoft's own `list-
+# supported`-style CLI output and pricing docs confirm this 1:1 mapping.
+#
+# Verified live (australiaeast, pinned api-version): EVERY Fabric workload
+# meter (Power BI, Data Warehouse, OneLake operations, Spark, High Scale
+# Dataflow, etc - dozens of them) bills the IDENTICAL flat $0.21/CU-hour
+# rate under productName "Fabric Capacity" - these aren't separate additive
+# charges, they're different attribution/reporting channels for the SAME
+# underlying provisioned capacity (confirmed: a Fabric capacity's real cost
+# is CU_count x $0.21/hr regardless of which workload actually ran). This
+# app prices off the "Power BI" armSkuName specifically (the one universal,
+# always-present meter) rather than summing multiple meters - summing would
+# multiply the cost by however many workload types happen to be catalogued,
+# which would be wrong.
+#
+# Reservation is refreshingly simple - exactly ONE Reservation SKU exists
+# (armSkuName "Fabric_Capacity_CU_Hour", productName "Fabric Capacity
+# Reservation"), quoted per-CU (confirmed: dividing the quoted total-term
+# price by term-hours gives ~$0.1249/hr for BOTH 1yr and 3yr - a real,
+# slightly unusual finding that this service's 3yr commitment doesn't
+# discount any deeper than 1yr, not a bug) - `reservation_multiplier` scales
+# it by the real CU count, same pattern as every other per-unit-priced
+# reservation this app already handles (SQL DB/MI, Cosmos DB).
+def _plan_fabric_capacity(sku: str) -> SkuQueryPlan:
+    if not sku or not sku.upper().startswith("F") or not sku[1:].isdigit():
+        return SkuQueryPlan(supported=False, reason=f"SKU '{sku}' doesn't match the expected 'F64'-style Fabric capacity convention.")
+    cu_count = int(sku[1:])
+    return SkuQueryPlan(
+        supported=True, service_name="Microsoft Fabric", match_field="armSkuName",
+        consumption_match_value="Power BI", consumption_multiplier=cu_count,
+        reservation_match_value="Fabric_Capacity_CU_Hour", reservation_multiplier=cu_count,
+        product_contains="Fabric Capacity",
+    )
+
+
 def _plan_databricks(sku: str) -> SkuQueryPlan:
     # Verified live: zero Reservation-type entries exist for Azure Databricks
     # in the Retail Prices API at all. Databricks Commit Units (DBCU) are
@@ -1331,6 +1371,7 @@ _PLAN_RESOLVERS = {
     "Azure Container Apps":          _plan_container_apps,
     "Azure Spring Apps Enterprise":  _plan_spring_apps_enterprise,
     "Azure Database Migration Service": _plan_database_migration_service,
+    "Microsoft Fabric": _plan_fabric_capacity,
     "Azure DocumentDB": _plan_deferred(
         "Real ARM resource type confirmed (Microsoft.DocumentDB/mongoClusters, "
         "tier at properties.compute.tier e.g. 'M30') and real Retail API pricing "

@@ -557,6 +557,7 @@ _TYPE_ICONS = {
     "Azure Dedicated Host": "🖲️", "Azure Container Instances": "📦",
     "Azure Container Apps": "🐳", "Azure Spring Apps Enterprise": "🌱",
     "Azure DocumentDB": "🍃", "Azure Database Migration Service": "🚚",
+    "Microsoft Fabric": "🧵",
 }
 
 

@@ -59,6 +59,7 @@ _SERVICE_CATEGORY_MAP = {
     "Azure Spring Apps Enterprise": "Web and Mobile",
     "Azure DocumentDB": "Databases",
     "Azure Database Migration Service": "Databases",
+    "Microsoft Fabric": "Analytics",
 }
 
 _PROVIDER_NAMES = {

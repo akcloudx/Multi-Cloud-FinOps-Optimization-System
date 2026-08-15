@@ -278,7 +278,13 @@ Resources
     // group pattern (see resolvedSku's aciSku comment below).
     'microsoft.containerinstance/containergroups',
     'microsoft.databricks/workspaces',
-    'microsoft.web/serverfarms'
+    'microsoft.web/serverfarms',
+    // Microsoft Fabric capacities have `sku` as a top-level field (e.g.
+    // "F64", confirmed via Microsoft's own ARM template reference, 2026-08)
+    // - picked up by the existing generic top-level `topSku` fallback below
+    // with no dedicated extraction needed, same as Dedicated Host/Redis
+    // Enterprise.
+    'microsoft.fabric/capacities'
 )
 // Every Azure SQL logical server auto-creates a "master" system database -
 // it's not billable and not user-managed, so exclude it from inventory.
@@ -557,6 +563,7 @@ def _map_resource_type(azure_type: str) -> str:
         "microsoft.containerinstance/containergroups":  "Azure Container Instances",
         "microsoft.databricks/workspaces":              "Azure Databricks",
         "microsoft.web/serverfarms":                    "App Service",
+        "microsoft.fabric/capacities":                   "Microsoft Fabric",
     }
     return mapping.get(azure_type, azure_type)
 
