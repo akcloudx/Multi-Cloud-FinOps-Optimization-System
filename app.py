@@ -979,8 +979,16 @@ def _render_savings_plan_tab():
 # ANALYZE — RI COVERAGE
 # ═══════════════════════════════════════════════════════════════════════════════
 def _render_ri_coverage_tab():
+    """Mirrors the Savings Plan tab's clarity principles: a clean, primary
+    table for the resources where a gap is a literal purchase recommendation
+    (coverage_model == 'instance'), with pooled-capacity, volume-based, and
+    not-eligible resources moved into their own labeled expanders instead of
+    all being crammed into one wide table with paragraph-length notes stuffed
+    into a 'Coverage Note' column - that was the actual complaint (this tab
+    hadn't been touched by the Savings Plan cleanup, so it looked worse by
+    comparison once that one got simplified)."""
     st.subheader(f"{selected_provider} Reserved Instance & Reserved Capacity Coverage")
-    st.caption(f"Rigid profile matching (SKU, Region, OS) for active reservation contracts.")
+    st.caption("Compares what's running against what you've already reserved, resource by resource, and flags real gaps to fix.")
     _finops_tag("Optimize Usage & Cost", "Rate Optimization")
 
     with st.expander(f"📋 {selected_provider} Reservation Coverage Rules", expanded=False):
@@ -1001,104 +1009,106 @@ def _render_ri_coverage_tab():
         options=["1-Year", "3-Year"],
         default=TERM_LABELS[default_ri_term],
         key="ri_term_display",
-        help="Drives the real purchase-cost columns below and the Recommendations tab's combined savings projection.",
+        help="Drives the purchase-cost columns below and the Recommendations tab's combined savings projection.",
     )
     ri_term_key = "1yr" if ri_term_choice == "1-Year" else "3yr"
     st.session_state["ri_term_widget"] = ri_term_key
 
-    st.markdown("#### Active Reservation Contracts")
-    if not ri_df.empty:
-        ri_disp = ri_df[["commitment_id", "commitment_type", "scope_sku", "scope_region", "scope_os", "reserved_qty", "hourly_usd_commitment", "term", "expiry_date"]].copy()
-        ri_disp["hourly_usd_commitment"] = ri_disp["hourly_usd_commitment"].apply(lambda x: fmt(x, 4) + "/hr each")
-        st.dataframe(ri_disp, hide_index=True, width="stretch")
-    else:
-        st.info("No active Reserved Instance contracts found.")
+    with st.expander("📄 Active Reservation Contracts", expanded=False):
+        if not ri_df.empty:
+            ri_disp = ri_df[["commitment_id", "commitment_type", "scope_sku", "scope_region", "scope_os", "reserved_qty", "hourly_usd_commitment", "term", "expiry_date"]].copy()
+            ri_disp["hourly_usd_commitment"] = ri_disp["hourly_usd_commitment"].apply(lambda x: fmt(x, 4) + "/hr each")
+            st.dataframe(ri_disp, hide_index=True, width="stretch")
+        else:
+            st.info("No active Reserved Instance contracts found.")
 
-    st.markdown("#### 📊 Active Reservation & Capacity Coverage Tracker")
-    st.caption(
-        "Eligibility is checked against real Azure Reservation rules per service/SKU/tier "
-        "(e.g. App Service reservations only cover Premium v3/v4 & Isolated v2; Azure SQL "
-        "reservations require the vCore Provisioned tier, not Serverless or DTU) - a resource "
-        "that Azure doesn't sell reservations for is marked **Not RI-Eligible**, not a coverage gap. "
-        "Cosmos DB, SQL DB/MI, Databricks, and Synapse reservations apply as **pooled capacity** "
-        "across all matching resources automatically, so their gap is a rough signal, not a literal "
-        "purchase instruction. Storage and Files reservations are sold in blocks (100 TB+/10 TiB+) "
-        "far larger than any single resource and can't be assessed by resource count at all - marked "
-        "**Volume-Based**."
-    )
-    _POOLED_CAPACITY_NOTE = (
-        "Reserved capacity for this service is purchased as pooled capacity/throughput "
-        "(RU/s, DBCU, cDWU, or vCore-hours) and Azure applies it automatically across "
-        "ALL matching resources in scope - it isn't bought per resource instance, so this "
-        "count is a rough signal only. Compare actual usage against your reservation size "
-        "in Azure Cost Management before purchasing more."
-    )
-    _UNMEASURABLE_NOTE = (
-        "Reserved capacity for this service is sold in blocks far larger than a single "
-        "resource (Storage: 100 TB / 1 PB; Files: 10 TiB / 100 TiB) and applies "
-        "automatically across your whole subscription's matching usage, not per resource. "
-        "This dashboard tracks resource count, not actual data volume stored, so "
-        "per-resource coverage genuinely cannot be assessed here - check total data "
-        "volume in Azure Cost Management or Storage metrics before considering a purchase."
-    )
     raw_cov = ri_result.coverage_table
     if is_azure and prices_df is not None and not prices_df.empty and not raw_cov.empty:
         cov = ri_gap_pricing(raw_cov, inv_raw, prices_df).copy()
     else:
         cov = raw_cov.copy()
 
-    if not cov.empty:
-        def _status(row):
-            if not row.get("is_eligible", True):
-                return "🚫 Not RI-Eligible"
-            if row.get("coverage_model") == "unmeasurable":
-                return "📏 Volume-Based (Not Tracked)"
-            if row["gap"] > 0:
-                if row.get("coverage_model") == "capacity":
-                    return f"ℹ️ {int(row['gap'])} Uncovered (pooled)"
-                return f"⚠️ Short by {int(row['gap'])}"
-            if row["excess"] > 0: return f"ℹ️ {int(row['excess'])} Idle"
-            return "✅ Fully Covered"
+    if cov.empty:
+        st.info("No reservation-eligible resources found yet.")
+        return
 
-        def _note(row):
-            if not row.get("is_eligible", True):
-                return row.get("eligibility_reason", "")
-            if row.get("coverage_model") == "unmeasurable":
-                return _UNMEASURABLE_NOTE
-            if row.get("coverage_model") == "capacity" and (row["gap"] > 0 or row["excess"] > 0):
-                return _POOLED_CAPACITY_NOTE
-            return ""
+    def _status(row):
+        if row["gap"] > 0:
+            return f"⚠️ Short by {int(row['gap'])}"
+        if row["excess"] > 0:
+            return f"ℹ️ {int(row['excess'])} Idle"
+        return "✅ Fully Covered"
 
-        cov["Status"] = cov.apply(_status, axis=1)
-        cov["Coverage Note"] = cov.apply(_note, axis=1)
+    cov["Status"] = cov.apply(_status, axis=1)
 
+    elig = cov[cov["is_eligible"]]
+    ineligible = cov[~cov["is_eligible"]]
+    instance_cov = elig[elig["coverage_model"] == "instance"]
+    capacity_cov = elig[elig["coverage_model"] == "capacity"]
+    unmeasurable_cov = elig[elig["coverage_model"] == "unmeasurable"]
+
+    with st.container(border=True):
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Fully Covered", int(((instance_cov["gap"] == 0) & (instance_cov["excess"] == 0)).sum()))
+        m2.metric("Needs More RI", int((instance_cov["gap"] > 0).sum()))
+        m3.metric("Idle / Unused RI", int((instance_cov["excess"] > 0).sum()))
+        m4.metric("Not RI-Eligible", len(ineligible))
+
+    st.markdown("#### Per-Resource Coverage")
+    st.caption("Each row is one resource profile (SKU + region + OS). Reservations for these types are bought per unit, so a gap here is a real, literal purchase recommendation.")
+    if not instance_cov.empty:
         rate_col = f"RI Rate {ri_term_choice} ($/hr)"
         savings_col = f"Monthly Savings if Purchased ({ri_term_choice})"
-        has_pricing_cols = rate_col in cov.columns
-        if has_pricing_cols:
-            cov[rate_col] = cov[rate_col].apply(lambda x: fmt(x, 4) if pd.notna(x) else "—")
-            cov[savings_col] = cov[savings_col].apply(lambda x: fmt(x, 2) if pd.notna(x) else "—")
-
-        cov = cov.rename(columns={
+        has_pricing_cols = rate_col in instance_cov.columns
+        show = instance_cov.rename(columns={
             "Resource Type": "Service", "SKU": "SKU / Tier",
             "running_count": "Running", "reserved_qty": "Reserved",
-            "gap": "Uncovered Gap", "excess": "Unused Idle",
-        })
-        display_cols = ["Service", "SKU / Tier", "Region", "OS", "Running", "Reserved",
-                         "Uncovered Gap", "Unused Idle", "Status"]
+        }).copy()
         if has_pricing_cols:
-            display_cols += [rate_col, savings_col]
-        display_cols.append("Coverage Note")
-        st.dataframe(
-            cov[[c for c in display_cols if c in cov.columns]],
-            hide_index=True, width="stretch",
-            column_config={"Coverage Note": st.column_config.TextColumn("Coverage Note", width="large")},
-        )
+            show[rate_col] = show[rate_col].apply(lambda x: fmt(x, 4) if pd.notna(x) else "—")
+            show[savings_col] = show[savings_col].apply(lambda x: fmt(x, 2) if pd.notna(x) else "—")
+        cols = ["Service", "SKU / Tier", "Region", "OS", "Running", "Reserved", "Status"]
+        if has_pricing_cols:
+            cols += [rate_col, savings_col]
+        st.dataframe(show[[c for c in cols if c in show.columns]], hide_index=True, width="stretch")
         if not has_pricing_cols:
             st.caption(
-                "ℹ️ Real purchase-cost columns aren't shown - "
+                "ℹ️ Purchase-cost columns aren't shown - "
                 + ("AWS Reserved Instance pricing isn't wired up yet." if not is_azure else "no cached pricing yet for these SKUs; re-run a sync on the Tenants page.")
             )
+    else:
+        st.caption("No per-instance-reservable resources in inventory yet.")
+
+    if not capacity_cov.empty:
+        with st.expander(f"ℹ️ {len(capacity_cov)} pooled-capacity resource(s) - not a per-instance purchase", expanded=False):
+            st.caption(
+                "Azure applies these reservations automatically across ALL matching resources in your "
+                "subscription (RU/s, DBCU, cDWU, or vCore-hours), not to one specific resource - so the gap "
+                "below is a rough signal, not a literal purchase instruction. Compare actual usage against "
+                "your reservation size in Azure Cost Management before buying more."
+            )
+            show_c = capacity_cov.rename(columns={
+                "Resource Type": "Service", "SKU": "SKU / Tier",
+                "running_count": "Running", "reserved_qty": "Reserved",
+            })
+            st.dataframe(show_c[["Service", "SKU / Tier", "Region", "Running", "Reserved", "Status"]], hide_index=True, width="stretch")
+
+    if not unmeasurable_cov.empty:
+        with st.expander(f"📏 {len(unmeasurable_cov)} volume-based resource(s) - not tracked here", expanded=False):
+            st.caption(
+                "Reserved capacity for these services is sold in blocks far larger than a single resource "
+                "(Storage: 100 TB / 1 PB; Files: 10 TiB / 100 TiB) and applies across your whole "
+                "subscription's usage, not per resource. This dashboard tracks resource count, not data "
+                "volume, so coverage genuinely can't be assessed here - check total volume in Azure Cost "
+                "Management or Storage metrics before considering a purchase."
+            )
+            show_u = unmeasurable_cov.rename(columns={"Resource Type": "Service", "SKU": "SKU / Tier"})
+            st.dataframe(show_u[["Service", "SKU / Tier", "Region"]], hide_index=True, width="stretch")
+
+    if not ineligible.empty:
+        with st.expander(f"🚫 {len(ineligible)} resource(s) not eligible for any Reservation", expanded=False):
+            show_i = ineligible.rename(columns={"Resource Type": "Service", "SKU": "SKU / Tier", "eligibility_reason": "Why not eligible"})
+            st.dataframe(show_i[["Service", "SKU / Tier", "Region", "Why not eligible"]], hide_index=True, width="stretch")
 
     if not ri_result.orphaned_ri_drain.empty:
         st.error(f"**{len(ri_result.orphaned_ri_drain)} stopped resource(s) draining active reservations**!")
