@@ -642,8 +642,8 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str, show_type_col: 
         reason = _payg_blank_reason(r["Resource Type"], r["SKU"])
         return (reason[:87] + "...") if len(reason) > 90 else reason
 
-    disp["PAYG Rate/hr"] = disp.apply(_payg_cell, axis=1)
-    disp["Est. Monthly Cost"] = (
+    disp["PAYG Cost/hr"] = disp.apply(_payg_cell, axis=1)
+    disp["Est. Monthly PAYG Cost"] = (
         disp["PAYG Hourly Cost USD"] * disp["Avg Daily Running Hours"] * 30
     ).apply(lambda x: fmt(x, 2) if x else "—")
 
@@ -692,10 +692,10 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str, show_type_col: 
         )
         return
 
-    all_cols = ["Resource ID", "Resource Name"]
+    all_cols = ["Resource ID", "Resource Name", "Subscription"]
     if show_type_col:
         all_cols.append("Resource Type")
-    all_cols += ["Status", "Region", "OS", "SKU", "PAYG Rate/hr", "Est. Monthly Cost", "Subscription"]
+    all_cols += ["Status", "Region", "OS", "SKU", "Est. Monthly PAYG Cost", "PAYG Cost/hr"]
     all_cols = [c for c in all_cols if c in filtered.columns]
     default_cols = [c for c in all_cols if c != "Resource ID"]  # Resource ID hidden by default - toggle back on if needed
 
@@ -706,10 +706,10 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str, show_type_col: 
     st.dataframe(
         filtered[chosen_cols], hide_index=True, width="stretch",
         column_config={
-            "Resource Type":     st.column_config.TextColumn("Service"),
-            "Status":            st.column_config.TextColumn("Power State"),
-            "PAYG Rate/hr":      st.column_config.TextColumn("PAYG Rate/hr"),
-            "Est. Monthly Cost": st.column_config.TextColumn("Est. Monthly Cost"),
+            "Resource Type":          st.column_config.TextColumn("Service"),
+            "Status":                 st.column_config.TextColumn("Power State"),
+            "Est. Monthly PAYG Cost": st.column_config.TextColumn("Est. Monthly PAYG Cost"),
+            "PAYG Cost/hr":           st.column_config.TextColumn("PAYG Cost/hr"),
         },
     )
 
@@ -760,98 +760,95 @@ def _render_inventory_tab():
 # ANALYZE — SAVINGS PLAN ANALYSIS
 # ═══════════════════════════════════════════════════════════════════════════════
 def _render_sp_pool_economics(pool_label: str, pool_df: pd.DataFrame, existing_commitment_hr: float,
-                               key_prefix: str, safety_buffer_frac: float):
-    """Real committed-rate economics for one Savings Plan pool (Compute or
-    Database): a 1yr-vs-3yr comparison table using Phase A's cached rates,
-    a term selector that drives the recommendation card, and - only for the
-    fraction of the steady-state footprint the safety buffer says to commit -
-    the real $ this would actually cost and save. Falls back to the flat
-    safety-buffer heuristic (with an explicit note) when no real pricing is
-    cached yet, e.g. AWS."""
+                               key_prefix: str, safety_buffer_frac: float, available_terms=("1yr", "3yr")):
+    """Plain eligible -> committed -> remaining -> recommended flow for one
+    Savings Plan pool (Compute or Database):
+      1. which resources are eligible (shown as a table)
+      2. their total PAYG $/hr
+      3. how much of that is already committed
+      4. how much is left, and how much of THAT the safety buffer recommends
+         committing next.
+    Real 1yr/3yr committed-rate pricing (where cached) lives in a collapsed
+    detail section below - useful, but deliberately not driving the headline
+    numbers, which stay in directly-comparable PAYG-dollar terms instead of
+    silently mixing PAYG and committed-rate units the way the old version did.
+    available_terms restricts which term(s) can be modeled - e.g. Database
+    Savings Plans are 1-year only per Azure policy, so that pool never gets a
+    3-year option here."""
     if pool_df.empty:
-        st.caption("No steady-state (24×7) resources in this pool yet.")
+        st.caption(f"No resources are currently eligible for {pool_label} Savings Plan.")
         return
 
-    inventory_baseline_hr = float(pool_df["PAYG Hourly Cost USD"].sum())
-    cmp_df = savings_plan_term_comparison(pool_df, prices_df) if (is_azure and prices_df is not None and not prices_df.empty) else None
-    has_real_pricing = cmp_df is not None and int(cmp_df["Priced Resources"].sum()) > 0
+    baseline_hr = float(pool_df["PAYG Hourly Cost USD"].sum())
+    remaining_hr = max(0.0, baseline_hr - existing_commitment_hr)
+    recommended_hr = round(remaining_hr * safety_buffer_frac, 4)
+    leakage_hr = max(0.0, existing_commitment_hr - baseline_hr)
 
-    if has_real_pricing:
-        st.markdown(f"**Real committed-rate comparison — {pool_label}**")
-        show_df = cmp_df[["Term", "PAYG $/hr", "Committed $/hr", "Discount %", "Monthly Savings"]].copy()
-        show_df["PAYG $/hr"] = cmp_df["PAYG $/hr"].apply(lambda x: fmt(x, 4))
-        show_df["Committed $/hr"] = cmp_df["Committed $/hr"].apply(lambda x: fmt(x, 4))
-        show_df["Discount %"] = cmp_df["Discount %"].apply(lambda x: f"{x:.1f}%")
-        show_df["Monthly Savings"] = cmp_df["Monthly Savings"].apply(lambda x: fmt(x, 2))
-        st.dataframe(show_df, hide_index=True, width="stretch")
+    with st.expander(f"📋 {len(pool_df)} eligible resource(s) in this pool", expanded=len(pool_df) <= 6):
+        elig_show = pool_df[["Resource Name", "Resource Type", "SKU", "PAYG Hourly Cost USD"]].copy()
+        elig_show["PAYG Hourly Cost USD"] = elig_show["PAYG Hourly Cost USD"].apply(lambda x: fmt(x, 4))
+        elig_show = elig_show.rename(columns={"PAYG Hourly Cost USD": "PAYG Cost/hr"})
+        st.dataframe(elig_show, hide_index=True, width="stretch")
 
+    with st.container(border=True):
+        cc1, cc2, cc3, cc4 = st.columns(4)
+        cc1.metric("Eligible PAYG Cost/hr", fmt(baseline_hr) + "/hr")
+        cc2.metric("Already Committed", fmt(existing_commitment_hr) + "/hr")
+        cc3.metric(
+            "Not Yet Committed", fmt(remaining_hr) + "/hr",
+            delta=f"Over-committed by {fmt(leakage_hr)}/hr" if leakage_hr > 0 else None,
+            delta_color="inverse",
+        )
+        cc4.metric(
+            f"Recommended Purchase ({int(safety_buffer_frac*100)}% buffer)", fmt(recommended_hr) + "/hr",
+            help="The rest stays on pay-as-you-go as headroom, in case usage drops.",
+        )
+
+    if len(available_terms) > 1:
         default_term = st.session_state.get(f"{key_prefix}_term_widget", "1yr")
         term_choice = st.segmented_control(
             f"Model {pool_label} commitment at term",
             options=["1-Year", "3-Year"],
             default=TERM_LABELS[default_term],
             key=f"{key_prefix}_term_display",
-            help="Drives the recommendation card below and the Recommendations tab's combined savings projection.",
+            help="Drives the detailed pricing below and the Recommendations tab's combined savings projection.",
         )
         term_key = "1yr" if term_choice == "1-Year" else "3yr"
-        st.session_state[f"{key_prefix}_term_widget"] = term_key
-
-        chosen = cmp_df[cmp_df["term_key"] == term_key].iloc[0]
-        # Use the SAME PAYG basis the comparison table used (the price
-        # cache's own snapshot), not the inventory row's PAYG figure - demo/
-        # seed inventory carries illustrative PAYG numbers that can drift
-        # from live pricing, and mixing the two bases here previously
-        # produced a nonsensical "recommended commitment > baseline" result.
-        baseline_hr = float(chosen["PAYG $/hr"])
-        committed_full_hr = float(chosen["Committed $/hr"])
-        recommended_hr = committed_full_hr * safety_buffer_frac
-        remaining_payg_hr = baseline_hr * (1 - safety_buffer_frac)
-        total_after_hr = recommended_hr + remaining_payg_hr
-        monthly_savings = (baseline_hr - total_after_hr) * 730
-        leakage = max(0.0, existing_commitment_hr - recommended_hr)
-        gap = max(0.0, recommended_hr - existing_commitment_hr)
-
-        with st.container(border=True):
-            cc1, cc2, cc3, cc4 = st.columns(4)
-            cc1.metric(f"{pool_label} Steady-State Run Rate", fmt(baseline_hr) + "/hr")
-            cc2.metric("Existing Commitment", fmt(existing_commitment_hr) + "/hr")
-            cc3.metric(
-                f"Recommended ({term_choice}, {int(safety_buffer_frac*100)}% buffer)", fmt(recommended_hr) + "/hr",
-                delta=f"Over by {fmt(leakage)}/hr" if leakage > 0 else (f"Under by {fmt(gap)}/hr" if gap > 0 else "Matched"),
-                delta_color="inverse" if (leakage > 0 or gap > 0) else "off",
-            )
-            cc4.metric("Projected Monthly Savings", fmt(max(0.0, monthly_savings), 2))
     else:
-        if not is_azure:
-            st.info(
-                "ℹ️ Real-time AWS Savings Plans pricing isn't wired up yet (see the Tenants page note on live "
-                "AWS ingestion) - showing an illustrative estimate from the safety-buffer heuristic instead of "
-                "real committed rates.", icon="ℹ️",
+        term_key = available_terms[0]
+        st.caption(f"{pool_label} Savings Plans only support a {TERM_LABELS[term_key]} term (Azure policy).")
+    st.session_state[f"{key_prefix}_term_widget"] = term_key
+
+    cmp_df = savings_plan_term_comparison(pool_df, prices_df) if (is_azure and prices_df is not None and not prices_df.empty) else None
+    if cmp_df is not None:
+        cmp_df = cmp_df[cmp_df["term_key"].isin(available_terms)].reset_index(drop=True)
+    has_real_pricing = cmp_df is not None and int(cmp_df["Priced Resources"].sum()) > 0
+
+    if has_real_pricing:
+        with st.expander("📊 Detailed pricing by term", expanded=False):
+            show_df = cmp_df[["Term", "PAYG $/hr", "Committed $/hr", "Discount %", "Monthly Savings"]].copy()
+            show_df["PAYG $/hr"] = cmp_df["PAYG $/hr"].apply(lambda x: fmt(x, 4))
+            show_df["Committed $/hr"] = cmp_df["Committed $/hr"].apply(lambda x: fmt(x, 4))
+            show_df["Discount %"] = cmp_df["Discount %"].apply(lambda x: f"{x:.1f}%")
+            show_df["Monthly Savings"] = cmp_df["Monthly Savings"].apply(lambda x: fmt(x, 2))
+            st.dataframe(show_df, hide_index=True, width="stretch")
+
+            chosen = cmp_df[cmp_df["term_key"] == term_key].iloc[0]
+            discount_pct = float(chosen["Discount %"])
+            est_monthly_savings = recommended_hr * (discount_pct / 100.0) * 730
+            st.caption(
+                f"At the {TERM_LABELS[term_key]} rate ({discount_pct:.1f}% off PAYG), committing "
+                f"{fmt(recommended_hr)}/hr is estimated to save about {fmt(est_monthly_savings, 2)}/month."
             )
-        else:
-            st.info(
-                "ℹ️ No cached commitment pricing yet for this pool's SKUs - re-run a sync on the Tenants page. "
-                "Showing an illustrative estimate from the safety-buffer heuristic instead of real committed rates.",
-                icon="ℹ️",
-            )
-        recommended_hr = inventory_baseline_hr * safety_buffer_frac
-        leakage = max(0.0, existing_commitment_hr - recommended_hr)
-        gap = max(0.0, recommended_hr - existing_commitment_hr)
-        with st.container(border=True):
-            cc1, cc2, cc3, cc4 = st.columns(4)
-            cc1.metric(f"{pool_label} Steady-State Run Rate", fmt(inventory_baseline_hr) + "/hr")
-            cc2.metric("Existing Commitment", fmt(existing_commitment_hr) + "/hr")
-            cc3.metric(
-                f"Recommended ({int(safety_buffer_frac*100)}% buffer, illustrative)", fmt(recommended_hr) + "/hr",
-                delta=f"Over by {fmt(leakage)}/hr" if leakage > 0 else (f"Under by {fmt(gap)}/hr" if gap > 0 else "Matched"),
-                delta_color="inverse" if (leakage > 0 or gap > 0) else "off",
-            )
-            cc4.metric("Est. Monthly Saving (illustrative)", fmt(max(0.0, (inventory_baseline_hr - recommended_hr) * 730), 2))
+    elif not is_azure:
+        st.caption("ℹ️ Illustrative only — real-time AWS Savings Plans pricing isn't wired up yet.")
+    else:
+        st.caption("ℹ️ Illustrative only — no cached commitment pricing yet for this pool's SKUs; re-run a sync on the Tenants page.")
 
 
 def _render_savings_plan_tab():
     st.subheader(f"{selected_provider} Savings Plan Analysis")
-    st.caption(f"Evaluates {selected_provider} steady-state (24×7) workloads against real Savings Plan committed rates.")
+    st.caption("Shows which resources run continuously, compares them to what you've already committed, and recommends how much more to commit.")
     _finops_tag("Optimize Usage & Cost", "Rate Optimization")
 
     with st.expander(f"📋 {selected_provider} Savings Plan Coverage Policy", expanded=False):
@@ -901,7 +898,7 @@ def _render_savings_plan_tab():
     st.divider()
 
     st.markdown("### A — Compute Savings Plan Pool")
-    st.caption("FinOps term: **24×7 steady-state run rate** — resources running continuously, the safe baseline to commit against.")
+    st.caption("Resources below run 24 hours a day, so committing against them is safe — the usage won't drop. Resources that don't run continuously are excluded and stay on pay-as-you-go.")
 
     _render_sp_pool_economics("Compute", compute_24x7, compute_sp_commit, "sp_compute", safety_buffer)
 
@@ -941,8 +938,13 @@ def _render_savings_plan_tab():
     st.divider()
 
     st.markdown(f"### B — {db_sp_title} Pool")
+    st.caption("Resources below run continuously, so committing against them is safe. Resources that aren't currently running are excluded and stay on pay-as-you-go.")
 
-    _render_sp_pool_economics(db_label, db_running, db_sp_commit, "sp_db", safety_buffer)
+    # Azure's Savings Plan for Databases is a real, 1-year-only product (see
+    # the Coverage Policy expander above) - AWS's EC2 Instance Savings Plans
+    # genuinely do offer both terms, so the restriction is Azure-specific.
+    db_available_terms = ("1yr",) if is_azure else ("1yr", "3yr")
+    _render_sp_pool_economics(db_label, db_running, db_sp_commit, "sp_db", safety_buffer, available_terms=db_available_terms)
 
     if is_live_mode and is_live_configured:
         if db_inventory.empty:

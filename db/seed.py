@@ -2,9 +2,12 @@
 db/seed.py — Mock Azure infrastructure seed data.
 
 COMPUTE (Savings Plan for Compute  OR  Reserved Instance):
-  - Prod VMs 24x7 (Standard_D4ds_v5, D4ds_v4)  → RI candidates
-  - Dev  VMs 10 hrs/day (B2ms, B2s)             → Compute SP candidates
-  - Stopped legacy VM with active RI             → Orphaned
+  - 2 Prod VMs, always Running, distinct SKU families (Standard_D4ds_v5,
+    Standard_E4s_v5) - no partial-hours modeling, just Running or Stopped
+  - 1 Dev VM (Standard_B2ms), also always Running - deliberately left
+    uncommitted to demonstrate a real "not yet committed" gap
+  - 1 Stopped legacy VM (Standard_D4ds_v4) with an active RI it no longer
+    uses  → Orphaned
 
 DATABASES (Savings Plan for Databases — 1-year ONLY  AND/OR  Reserved Capacity):
   Azure SQL Database, SQL Managed Instance, PostgreSQL, MySQL, Cosmos DB
@@ -39,51 +42,44 @@ from db.schema import (
 # ── Compute Inventory ──────────────────────────────────────────────────────────
 
 COMPUTE_INVENTORY = [
-    # Prod VMs — 24x7 → Reserved Instance OR Compute SP candidates
+    # Prod VMs — always Running, no partial-hours modeling (24 hrs/day is the
+    # only value a Running VM ever carries here) → Reserved Instance and/or
+    # Compute SP candidates. Each on a genuinely different VM family/size, not
+    # near-duplicates of each other.
     {"resource_id": "VM-Prod-01", "resource_name": "app-server-01",
      "resource_type": "Compute", "resource_state": "Running",
      "region": "australiaeast", "os": "Windows", "sku": "Standard_D4ds_v5",
      "payg_hourly_usd": 0.284, "avg_daily_running_hours": 24,
      "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
 
-    {"resource_id": "VM-Prod-02", "resource_name": "app-server-02",
+    # Memory-optimized batch/reporting workload — real live-fetched australiaeast
+    # Windows rate (Retail Prices API, "Virtual Machines Esv5 Series Windows"
+    # base meter, verified 2026-08), a genuinely different VM family from the
+    # general-purpose Ddsv5 above, not just a bigger/smaller size of the same one.
+    {"resource_id": "VM-Prod-02", "resource_name": "batch-worker-01",
      "resource_type": "Compute", "resource_state": "Running",
-     "region": "australiaeast", "os": "Windows", "sku": "Standard_D4ds_v5",
-     "payg_hourly_usd": 0.284, "avg_daily_running_hours": 24,
+     "region": "australiaeast", "os": "Windows", "sku": "Standard_E4s_v5",
+     "payg_hourly_usd": 0.486, "avg_daily_running_hours": 24,
      "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
 
-    {"resource_id": "VM-Prod-03", "resource_name": "batch-worker-01",
-     "resource_type": "Compute", "resource_state": "Running",
-     "region": "australiaeast", "os": "Windows", "sku": "Standard_D4ds_v4",
-     "payg_hourly_usd": 0.284, "avg_daily_running_hours": 24,
-     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
-
-    {"resource_id": "VM-Prod-04", "resource_name": "batch-worker-02",
-     "resource_type": "Compute", "resource_state": "Running",
-     "region": "australiaeast", "os": "Windows", "sku": "Standard_D4ds_v4",
-     "payg_hourly_usd": 0.284, "avg_daily_running_hours": 24,
-     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
-
-    {"resource_id": "VM-Prod-05", "resource_name": "reporting-svc",
-     "resource_type": "Compute", "resource_state": "Running",
-     "region": "australiaeast", "os": "Windows", "sku": "Standard_D4ds_v4",
-     "payg_hourly_usd": 0.284, "avg_daily_running_hours": 24,
-     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
-
-    # Dev VMs — 10 hrs/day → Savings Plan for Compute candidates
+    # Dev/test box — runs full-time like the prod VMs (no reduced-hours
+    # modeling), so it counts in the same steady-state Compute SP pool. It
+    # stays uncommitted deliberately (no RI/SP purchased against it yet) to
+    # give the RI Coverage and Savings Plan tabs a real "not yet committed"
+    # example to recommend against.
     {"resource_id": "VM-Dev-01", "resource_name": "dev-sandbox-01",
      "resource_type": "Compute", "resource_state": "Running",
      "region": "australiaeast", "os": "Windows", "sku": "Standard_B2ms",
-     "payg_hourly_usd": 0.106, "avg_daily_running_hours": 10,
+     "payg_hourly_usd": 0.106, "avg_daily_running_hours": 24,
      "subscription": "sub-dev-002", "provider": "Azure", "is_orphaned": False},
 
-    {"resource_id": "VM-Dev-02", "resource_name": "dev-sandbox-02",
-     "resource_type": "Compute", "resource_state": "Running",
-     "region": "australiasoutheast", "os": "Windows", "sku": "Standard_B2s",
-     "payg_hourly_usd": 0.053, "avg_daily_running_hours": 10,
-     "subscription": "sub-dev-002", "provider": "Azure", "is_orphaned": False},
-
-    # Stopped — Orphaned (RI active but VM is deallocated)
+    # Stopped — Orphaned (RI still active but VM is deallocated). Kept on
+    # D4ds_v4 (one generation behind the Prod-01's D4ds_v5) rather than moving
+    # to a different "legacy" SKU: checked live against the Retail Prices API
+    # and older Dsv3-generation sizes (e.g. D2s_v3) have ZERO
+    # priceType=Reservation entries in any region - Azure doesn't sell new RIs
+    # against them at all, which would make an "orphaned RI" scenario on that
+    # SKU fictional. D4ds_v4 is confirmed reservable (see COMMITMENTS below).
     {"resource_id": "VM-Legacy-01", "resource_name": "legacy-server-01",
      "resource_type": "Compute", "resource_state": "Stopped (deallocated)",
      "region": "australiaeast", "os": "Windows", "sku": "Standard_D4ds_v4",
@@ -387,18 +383,24 @@ INVENTORY = COMPUTE_INVENTORY + DATABASE_INVENTORY + RI_ONLY_INVENTORY + COMPUTE
 
 COMMITMENTS = [
     # ── Reserved Instances — Compute (VM SKU-level) ────────────────────────────
+    # reserved_qty=1 matches the single remaining D4ds_v5 VM (Prod-01) exactly
+    # - fully covered, no gap, a clean "matched" example.
     {"commitment_id": "RI-VM-D4DS-V5-AE-WIN",
      "commitment_type": "Reserved Instance",
      "scope_sku": "Standard_D4ds_v5", "scope_resource_type": "Compute",
      "scope_region": "australiaeast", "scope_os": "Windows", "scope_redundancy": "N/A",
-     "hourly_usd_commitment": 0.20, "reserved_qty": 2,
+     "hourly_usd_commitment": 0.20, "reserved_qty": 1,
      "term": "1-year", "expiry_date": "2026-11-01", "provider": "Azure"},
 
+    # reserved_qty=1 - the only D4ds_v4 resource left is VM-Legacy-01, which is
+    # Stopped, so this entire reservation is now wasted spend (orphaned-RI-drain
+    # demo). See COMPUTE_INVENTORY's comment on why this SKU was kept rather
+    # than moved to a different "legacy" one.
     {"commitment_id": "RI-VM-D4DS-V4-AE-WIN",
      "commitment_type": "Reserved Instance",
      "scope_sku": "Standard_D4ds_v4", "scope_resource_type": "Compute",
      "scope_region": "australiaeast", "scope_os": "Windows", "scope_redundancy": "N/A",
-     "hourly_usd_commitment": 0.19, "reserved_qty": 3,
+     "hourly_usd_commitment": 0.19, "reserved_qty": 1,
      "term": "1-year", "expiry_date": "2026-09-01", "provider": "Azure"},
 
     # ── Reserved Capacity — Azure SQL Database (covers compute costs ONLY) ─────
@@ -529,7 +531,7 @@ COMMITMENTS = [
 #   https://learn.microsoft.com/en-us/rest/api/billingbenefits/savings-plan/get
 
 RESERVATION_PURCHASES = [
-    # Corresponds to Commitment "RI-VM-D4DS-V5-AE-WIN" - covers VM-Prod-01/02
+    # Corresponds to Commitment "RI-VM-D4DS-V5-AE-WIN" - covers VM-Prod-01
     {
         "reservation_order_id": "a1b2c3d4-0001-4a1a-9c1a-000000000001",
         "reservation_id": "a1b2c3d4-0001-4a1a-9c1a-100000000001",
@@ -545,7 +547,7 @@ RESERVATION_PURCHASES = [
         "applied_scope_subscription_id": "/subscriptions/sub-prod-001",
         "billing_plan": "Upfront",
         "term": "P1Y",
-        "quantity": 2,
+        "quantity": 1,
         "provisioning_state": "Succeeded",
         "renew": False,
         "purchase_date": "2025-11-01",
@@ -560,13 +562,13 @@ RESERVATION_PURCHASES = [
         "utilization_30day_pct": 94.2,
         "provider": "Azure",
     },
-    # Corresponds to Commitment "RI-VM-D4DS-V4-AE-WIN" - reserved_qty=3 exactly
-    # matches the 3 Running D4ds_v4 VMs (Prod-03/04/05), so this reservation
-    # itself is fully utilized. VM-Legacy-01 (stopped, same SKU/region/OS) is
-    # a SEPARATE, additional D4ds_v4 resource beyond what's reserved here -
-    # analysis/engine.py's orphaned-RI-drain check flags it independently
-    # (a stopped resource matching an RI's scope), not as reduced utilization
-    # of this reservation's own 3 units.
+    # Corresponds to Commitment "RI-VM-D4DS-V4-AE-WIN" - reserved_qty=1, and
+    # the only D4ds_v4 resource left in inventory is VM-Legacy-01, which is
+    # Stopped (deallocated). So this reservation's single unit is genuinely
+    # unused right now - analysis/engine.py's orphaned-RI-drain check flags
+    # exactly this (a stopped resource matching an active RI's scope).
+    # Utilization trending down reflects the VM having recently been
+    # decommissioned rather than always having been idle.
     {
         "reservation_order_id": "a1b2c3d4-0002-4a1a-9c1a-000000000002",
         "reservation_id": "a1b2c3d4-0002-4a1a-9c1a-100000000002",
@@ -582,7 +584,7 @@ RESERVATION_PURCHASES = [
         "applied_scope_subscription_id": "/subscriptions/sub-prod-001",
         "billing_plan": "Monthly",
         "term": "P1Y",
-        "quantity": 3,
+        "quantity": 1,
         "provisioning_state": "Succeeded",
         "renew": False,
         "purchase_date": "2025-09-01",
@@ -591,10 +593,10 @@ RESERVATION_PURCHASES = [
         "benefit_start_time": "2025-09-01T14:02:11.0000000Z",
         "expiry_date": "2026-09-01",
         "expiry_date_time": "2026-09-01T14:02:11.0000000Z",
-        "utilization_trend": "Flat",
-        "utilization_1day_pct": 100.0,
-        "utilization_7day_pct": 100.0,
-        "utilization_30day_pct": 100.0,
+        "utilization_trend": "Down",
+        "utilization_1day_pct": 0.0,
+        "utilization_7day_pct": 12.5,
+        "utilization_30day_pct": 48.0,
         "provider": "Azure",
     },
 
