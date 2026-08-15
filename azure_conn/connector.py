@@ -295,7 +295,22 @@ Resources
     topSku     = tostring(sku.name),
     redisSkuName  = tostring(properties.sku.name),
     redisFamily   = tostring(properties.sku.family),
-    redisCapacity = tostring(properties.sku.capacity)
+    redisCapacity = tostring(properties.sku.capacity),
+    // Cosmos DB reports capacity mode/service tier as real top-level ARM
+    // properties (verified against Microsoft.DocumentDB/databaseAccounts
+    // template docs, 2026-08) - properties.capabilities (an array of
+    // {name} objects; "EnableServerless" signals Serverless mode) and
+    // properties.enableMultipleWriteLocations (a bool; Azure's own current
+    // pricing page confirms "Business Critical" is just the current
+    // branding for what used to be called multi-write-region accounts).
+    // Deliberately NOT capturing actual RU/s throughput here - that's set
+    // on a separate throughputSettings child resource (per-database or
+    // per-container), not this account resource, and isn't traversed by
+    // this query - see pricing/sku_mapping.py's _plan_cosmos_db for how
+    // that gap is handled (capacity mode/tier alone still lets eligibility
+    // correctly distinguish Serverless from Provisioned, just not price it).
+    cosmosCapabilities = tostring(properties.capabilities),
+    cosmosMultiWrite = tobool(properties.enableMultipleWriteLocations)
 | extend
     // SQL DB/MI reservations & savings plans are priced per vCore (see
     // pricing/sku_mapping.py) - properties.currentSku.name alone (e.g.
@@ -366,6 +381,22 @@ Resources
             and isnotempty(pgMysqlSkuTier) and isnotempty(pgMysqlSkuName),
             strcat(pgMysqlSkuTier, "_", pgMysqlSkuName),
         ""
+    ),
+    // "{CapacityMode}_{ServiceTier}" (e.g. "Provisioned_GeneralPurpose") -
+    // the convention pricing/sku_mapping.py's _plan_cosmos_db parses.
+    // "Provisioned" (not "Standard"/"Autoscale") is deliberate - see that
+    // function's comment for why this app can't tell those two apart from
+    // this resource alone. Gated to documentdb/databaseaccounts only.
+    cosmosSku = case(
+        type == 'microsoft.documentdb/databaseaccounts' and cosmosCapabilities has 'EnableServerless' and cosmosMultiWrite == true,
+            'Serverless_BusinessCritical',
+        type == 'microsoft.documentdb/databaseaccounts' and cosmosCapabilities has 'EnableServerless',
+            'Serverless_GeneralPurpose',
+        type == 'microsoft.documentdb/databaseaccounts' and cosmosMultiWrite == true,
+            'Provisioned_BusinessCritical',
+        type == 'microsoft.documentdb/databaseaccounts',
+            'Provisioned_GeneralPurpose',
+        ""
     )
 | extend
     resolvedSku = case(
@@ -375,6 +406,7 @@ Resources
         isnotempty(instancePoolSku), instancePoolSku,
         isnotempty(redisSku), redisSku,
         isnotempty(pgMysqlSku), pgMysqlSku,
+        isnotempty(cosmosSku), cosmosSku,
         isnotempty(topSku), topSku,
         'N/A'
     ),

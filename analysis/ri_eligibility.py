@@ -160,6 +160,22 @@ def _flexible_server_ri(sku: str) -> Tuple[bool, str]:
     return True, "General Purpose/Memory Optimized (or MySQL's equivalent 'Business Critical') tier - eligible for Reserved Capacity. (Legacy Single Server no longer accepts new reservations, but isn't distinguishable from our current inventory data.)"
 
 
+def _cosmos_db_ri(sku: str) -> Tuple[bool, str]:
+    # SKU convention: "{CapacityMode}_{ServiceTier}_{RUs}" or bare
+    # "Serverless" - see pricing/sku_mapping.py. Serverless accounts have
+    # nothing provisioned to reserve capacity against - verified live, zero
+    # Reservation entries apply and the real pricing page confirms
+    # reservations only cover provisioned throughput. Standard/Autoscale
+    # provisioned throughput IS eligible (real Reservation catalog entries
+    # exist, sold in fixed RU/s bucket sizes as a subscription-wide pool -
+    # see pricing/sku_mapping.py's reservation_unsupported_reason for why
+    # this app doesn't compute a per-resource $ rate for it even though the
+    # resource itself is genuinely eligible).
+    if (sku or "").split("_")[0] == "Serverless":
+        return False, "Serverless Cosmos DB accounts have no provisioned throughput to reserve capacity against."
+    return True, "Provisioned throughput (Standard or Autoscale) - eligible for Reserved Capacity, purchased as a subscription-wide RU/s pool rather than per-resource."
+
+
 def _disk_eligibility(sku: str) -> Tuple[bool, str]:
     # https://learn.microsoft.com/en-us/azure/virtual-machines/disks-reserved-capacity
     # Only Premium SSD disks at size P30 and larger (P30-P80) are eligible.
@@ -189,7 +205,7 @@ _RULES = {
                                                                 # deliberately left unpriced despite being eligible.
     "Azure Database for MySQL":      _flexible_server_ri,
     "Azure Database for PostgreSQL": _flexible_server_ri,
-    "Azure Cosmos DB":               lambda sku: (True, "Assumed provisioned throughput (capacity mode not captured for this resource) - Serverless Cosmos DB accounts are not eligible."),
+    "Azure Cosmos DB":               _cosmos_db_ri,
     "Azure Blob Storage":            _storage_eligibility,
     "Azure Cache for Redis":         _redis_eligibility,
     "Azure Synapse Analytics":       lambda sku: (True, "Assumed Dedicated SQL Pool (cDWU) - a Serverless SQL Pool alone is not eligible for classic reserved capacity."),

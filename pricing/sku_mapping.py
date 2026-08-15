@@ -6,10 +6,12 @@ Prices API query strategy for Reserved Instance / Savings Plan lookups.
 Only Compute (VMs) has armSkuName == the resource's SKU directly. Every other
 service was individually researched live against the API while building this
 (2026-08) - see the per-service notes below. Where Azure genuinely has no
-RI/SP offering the API can answer (Cosmos DB's pooled RU/s reservations,
-Databricks' marketplace-billed DBCU commits, classic Standard/Basic Redis),
-this module says so explicitly with a reason, rather than returning an
-empty/zero result that could be mistaken for "just hasn't synced yet."
+RI/SP offering the API can answer (Cosmos DB Reserved Capacity specifically -
+real entries exist but are sold as a subscription-wide pool in fixed bucket
+sizes, not linearly per-resource; Databricks' marketplace-billed DBCU
+commits; classic Standard/Basic Redis), this module says so explicitly with
+a reason, rather than returning an empty/zero result that could be mistaken
+for "just hasn't synced yet."
 
 Where a mapping below is marked "inferred" rather than "verified", it follows
 a naming pattern confirmed for a sibling tier of the same service, but wasn't
@@ -872,13 +874,119 @@ def _plan_mysql(sku: str) -> SkuQueryPlan:
     return SkuQueryPlan(supported=False, reason=f"Unrecognized MySQL Flexible Server tier '{tier}' - expected Burstable, GeneralPurpose, or MemoryOptimized (the real ARM sku.tier enum).")
 
 
-# ── Explicitly unsupported - Azure genuinely can't price these this way ─────
+# ── Azure Cosmos DB (RU/s-based APIs: NoSQL, MongoDB RU, Cassandra, Gremlin,
+# Table - NOT the separate vCore-based "Azure DocumentDB"/Cosmos DB for
+# PostgreSQL products, which are different ARM resource types this app
+# doesn't ingest) ────────────────────────────────────────────────────────────
+# This app stores these SKUs as "{CapacityMode}_{ServiceTier}_{RUs}" (e.g.
+# "Standard_GeneralPurpose_400") or the bare string "Serverless".
+# CapacityMode/ServiceTier are real, top-level ARM properties on
+# Microsoft.DocumentDB/databaseAccounts - `properties.capabilities` (an
+# array of {name} objects; "EnableServerless" signals Serverless) and
+# `properties.enableMultipleWriteLocations` (a bool; Azure's real, current
+# pricing page explicitly confirms "Business Critical" is just the current
+# branding for what used to be called multi-write-region accounts) -
+# verified via Microsoft's own ARM template reference, 2026-08. RU/s
+# quantity itself is NOT one of these top-level properties - real Azure
+# throughput is set per-database or per-container via a separate
+# `throughputSettings` child resource, which azure_conn/connector.py
+# doesn't traverse yet (a real, disclosed gap, same class as this app's
+# existing "Disk Storage ingestion not reached yet" gap) - so a live
+# tenant's Cosmos DB resources can be correctly tagged with capacity
+# mode/tier but not yet priced end-to-end without that count.
+#
+# Verified live (2026-08, via the real pricing page + this app's pinned
+# Retail API version) against the calculator's own stated $/100 RU/s
+# figures exactly:
+# - Standard Provisioned, General Purpose: skuName "RUs" on the base
+#   "Azure Cosmos DB" product, $0.008/hr per 100 RU/s (= $5.84/month).
+# - Autoscale Provisioned, General Purpose: skuName "AP1"-"AP4" (four
+#   near-identical meters, confirmed byte-identical $0.012/hr per 100 RU/s
+#   regardless of which one - the difference is a legacy "Entry Price"
+#   variant at each AP-number that's always MORE expensive, so the
+#   existing min()-picks-cheapest logic in commitment_pricing.py already
+#   selects the correct meter without needing to know which AP-number is
+#   "right") on the "Azure Cosmos DB autoscale" product ($0.012 x 100 x 730
+#   = $8.76/month, matches the calculator's stated 1.5x-of-Standard rate).
+# - Business Critical (either capacity mode): skuName "mRUs" ("multi-master
+#   RU/s") on the SAME base "Azure Cosmos DB" product, $0.016/hr per 100
+#   RU/s (= $11.68/month) - verified this is IDENTICAL for both Standard
+#   and Autoscale (matches the pricing page explicitly NOT applying the
+#   1.5x autoscale multiplier to Business Critical), so both capacity modes
+#   route to the same meter for this tier.
+# - Serverless: bills per-request ($0.25 per million RU, real, confirmed),
+#   not $/hr - architecturally incompatible with this app's PAYG-hourly-rate
+#   model (every other resource type has a meaningful $/hr; Serverless
+#   genuinely doesn't), so marked unsupported here rather than forced into
+#   a rate that doesn't represent real usage. Already correctly marked RI
+#   AND SP ineligible in ri_eligibility.py/sp_eligibility.py.
+#
+# Reserved Capacity is deliberately NOT fetched (reservation_unsupported_
+# reason set) even though real Reservation catalog entries exist - verified
+# live these are sold in FIXED bucket sizes (100 RU/s, 1/2/3/5/10/20/30
+# Million RU/s - not a linear per-100-RU/s rate) as a subscription-wide pool
+# shared "across all regions, APIs, database accounts, and subscriptions
+# under a given enrollment" (Microsoft's own words), not tied to any one
+# resource's provisioned RU/s - already correctly reflected in this app's
+# "capacity" coverage model (get_coverage_model() in ri_eligibility.py),
+# which gates off per-resource $ RI-savings display for this exact reason.
+# Savings Plan for Databases has genuinely inconsistent regional rollout on
+# the "RUs" meter (confirmed live, correct api-version): absent in eastus,
+# but present and exact in australiaeast (0.008096/0.0092 = 12% off,
+# matching the real pricing page's advertised "12% 1yr" figure exactly) -
+# a real per-region gap, not a universal one, so no code path needed beyond
+# what already exists: this resolves to None automatically wherever a
+# region's meter genuinely lacks the array, via the existing "no
+# savingsPlan array found" fallback -
+# eligibility (sp_eligibility.py) still correctly says "eligible" for
+# provisioned throughput, matching the calculator.
 def _plan_cosmos_db(sku: str) -> SkuQueryPlan:
-    # Cosmos DB Reserved Capacity is a subscription-wide RU/s pool, not tied
-    # to any one resource's SKU - there's no per-resource armSkuName to look
-    # up at all. Already correctly excluded from per-resource $ savings via
-    # get_coverage_model() == "capacity" in analysis/ri_eligibility.py.
-    return SkuQueryPlan(supported=False, reason="Cosmos DB Reserved Capacity is a subscription-wide RU/s pool, not priced against any single resource's SKU.")
+    parts = (sku or "").split("_")
+    capacity_mode = parts[0] if parts else ""
+
+    if capacity_mode == "Serverless":
+        return SkuQueryPlan(supported=False, reason="Serverless Cosmos DB bills per-request ($0.25 per million RU), not $/hr like every other resource type this app tracks - no meaningful hourly PAYG rate to compute. Also genuinely has no Reservation offering (can't reserve capacity for an account with nothing provisioned).")
+
+    # "Provisioned" is a deliberately neutral third state, distinct from
+    # "Standard"/"Autoscale": live Resource Graph capture can reliably tell
+    # Serverless apart from everything else (properties.capabilities
+    # containing "EnableServerless"), but can NOT tell Standard apart from
+    # Autoscale - that distinction lives on a separate child
+    # throughputSettings resource this app doesn't traverse (see below).
+    # Guessing either one would silently bake in a real ~50% price error
+    # for General Purpose (Standard $5.84 vs Autoscale $8.76 per 100 RU/s) -
+    # "Provisioned" is honest about not knowing, not a guess.
+    if capacity_mode not in ("Standard", "Autoscale", "Provisioned"):
+        return SkuQueryPlan(supported=False, reason=f"SKU '{sku}' doesn't match the expected 'Standard_GeneralPurpose_400' / 'Autoscale_BusinessCritical_1000' / 'Provisioned_GeneralPurpose' / 'Serverless' convention.")
+
+    if len(parts) == 2 or capacity_mode == "Provisioned":
+        # Live Resource Graph capture reaches capacity mode + service tier
+        # (both real top-level ARM properties) but not the actual RU/s
+        # count (a separate child throughputSettings resource this app
+        # doesn't traverse yet - see the module-level comment above) - a
+        # real, disclosed gap rather than a malformed SKU.
+        return SkuQueryPlan(supported=False, reason="Provisioned throughput RU/s count (and, for General Purpose, whether it's Standard or Autoscale) isn't captured for this resource yet - it's set on a separate throughputSettings child resource, not the Cosmos DB account itself. Capacity mode and service tier are known, but a $ rate needs more than that.")
+    if len(parts) != 3:
+        return SkuQueryPlan(supported=False, reason=f"SKU '{sku}' doesn't match the expected '{capacity_mode}_GeneralPurpose_400' convention.")
+    tier, ru_str = parts[1], parts[2]
+    if not ru_str.isdigit():
+        return SkuQueryPlan(supported=False, reason=f"Could not parse a numeric RU/s count from SKU '{sku}'.")
+    ru_count = int(ru_str)
+
+    if tier == "BusinessCritical":
+        sku_label, product_contains = "mRUs", ""
+    elif tier == "GeneralPurpose":
+        sku_label, product_contains = ("AP1", "autoscale") if capacity_mode == "Autoscale" else ("RUs", "")
+    else:
+        return SkuQueryPlan(supported=False, reason=f"Unrecognized Cosmos DB service tier '{tier}' - expected GeneralPurpose or BusinessCritical.")
+
+    return SkuQueryPlan(
+        supported=True, service_name="Azure Cosmos DB", match_field="skuName",
+        consumption_match_value=sku_label, reservation_match_value="",
+        product_contains=product_contains,
+        consumption_multiplier=max(1, ru_count // 100),
+        reservation_unsupported_reason="Cosmos DB Reserved Capacity is a subscription-wide RU/s pool sold in fixed bucket sizes (100 RU/s up to 30 Million RU/s), not priced linearly against any single resource's provisioned throughput - see get_coverage_model()=='capacity' in analysis/ri_eligibility.py.",
+    )
 
 
 def _plan_databricks(sku: str) -> SkuQueryPlan:

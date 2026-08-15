@@ -125,7 +125,18 @@ def _flexible_server_sp(sku: str) -> Tuple[bool, str]:
 
 
 def _cosmos_db_sp(sku: str) -> Tuple[bool, str]:
-    return True, "Assumed provisioned throughput (capacity mode not captured for this resource) - Serverless Cosmos DB usage is not eligible for Savings Plan for Databases."
+    # SKU convention: "{CapacityMode}_{ServiceTier}_{RUs}" or bare
+    # "Serverless" - see pricing/sku_mapping.py. Serverless has no hourly
+    # rate for a $/hr Savings Plan commitment to discount against (it bills
+    # per-request, $/million RU) - not eligible. Provisioned throughput
+    # (Standard/Autoscale) genuinely is eligible per Azure's own pricing
+    # page (a real, current 12% 1yr discount advertised), even though the
+    # Retail Prices API's savingsPlan field doesn't publish it on the
+    # RU/s meter itself - see pricing/sku_mapping.py's comment on
+    # _plan_cosmos_db for that priceability-vs-eligibility distinction.
+    if (sku or "").split("_")[0] == "Serverless":
+        return False, "Serverless Cosmos DB bills per-request, not $/hr - no hourly commitment for a Savings Plan to discount."
+    return True, "Provisioned throughput (Standard or Autoscale) - eligible for Savings Plan for Databases."
 
 
 _VM_FAMILY_RE = re.compile(r"^(?:Basic|Standard)_([A-Za-z]+)")

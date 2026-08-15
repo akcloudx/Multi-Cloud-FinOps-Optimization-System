@@ -185,13 +185,13 @@ DATABASE_INVENTORY = [
      "payg_hourly_usd": 0.47, "avg_daily_running_hours": 24,
      "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
 
-    # Azure Cosmos DB — 400 RU/s provisioned throughput
+    # Azure Cosmos DB — Standard Provisioned, General Purpose, 400 RU/s
     # RI covers: throughput only. Not: storage, networking.
     {"resource_id": "COSMOS-Prod-01", "resource_name": "prod-catalog-cosmosdb",
      "resource_type": "Azure Cosmos DB",
      "resource_state": "Running",
-     "region": "australiaeast", "os": "N/A", "sku": "Cosmos_400RU",
-     "payg_hourly_usd": 0.032, "avg_daily_running_hours": 24,
+     "region": "australiaeast", "os": "N/A", "sku": "Standard_GeneralPurpose_400",
+     "payg_hourly_usd": 0.0368, "avg_daily_running_hours": 24,
      "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
 
     # Azure SQL Database Serverless — Dev/Test
@@ -329,9 +329,10 @@ COMMITMENTS = [
     # ── Reserved Capacity — Azure Cosmos DB (covers throughput ONLY) ───────────
     {"commitment_id": "RI-COSMOS-400RU-AE",
      "commitment_type": "Reserved Capacity",
-     "scope_sku": "Cosmos_400RU", "scope_resource_type": "Azure Cosmos DB",
+     "scope_sku": "Standard_GeneralPurpose_400", "scope_resource_type": "Azure Cosmos DB",
      "scope_region": "australiaeast", "scope_os": "N/A", "scope_redundancy": "N/A",
-     "hourly_usd_commitment": 0.020,   # ~37% saving vs 0.032 PAYG
+     "hourly_usd_commitment": 0.023,   # ~37% saving vs 0.0368 PAYG (matches the real ~1yr-reservation
+                                        # discount for the smallest 100 RU/s tier - see pricing/sku_mapping.py)
      "reserved_qty": 1,
      "term": "1-year", "expiry_date": "2027-02-01", "provider": "Azure"},
 
