@@ -979,7 +979,7 @@ def seed_demo_tenant_if_empty():
     Production-only version of this check. Independently guarded (checks its
     own emptiness) so it's safe to call every startup, not just on first-ever
     inventory seed."""
-    from db.tenants import list_tenants, upsert_tenant, upsert_subscription
+    from db.tenants import list_tenants, upsert_tenant, upsert_subscription, update_tenant_permission_status
     if list_tenants("Azure", "demo"):
         return
     tenant_db_id = upsert_tenant(
@@ -990,6 +990,9 @@ def seed_demo_tenant_if_empty():
         client_secret="demo-tenant-has-no-real-credentials",
         domain="demo.onmicrosoft.com",
     )
+    # Tenant-wide (Reservations Reader / Savings Plan Reader) status,
+    # simulated the same way as the per-subscription ones below.
+    update_tenant_permission_status("Azure", "demo", tenant_db_id, "ready", None)
     upsert_subscription(
         provider="Azure", mode="demo", tenant_db_id=tenant_db_id,
         subscription_id="66666666-7777-8888-9999-000000000000",

@@ -123,11 +123,14 @@ from db.tenants import (
     list_tenants, get_active_tenant, get_tenant_credentials, upsert_tenant,
     update_tenant_name, touch_last_synced, set_active_tenant, delete_tenant,
     resource_count, list_subscriptions, upsert_subscription,
+    update_tenant_permission_status,
 )
 from azure_conn.connector import (
     AzureCredentials, load_credentials_from_env, save_credentials_to_env_file,
-    test_connection, check_role_assignments, list_accessible_subscriptions,
-    REQUIRED_ROLES, HAS_AZURE_IDENTITY,
+    test_connection, check_role_assignments, check_tenant_role_assignments,
+    list_accessible_subscriptions,
+    REQUIRED_ROLES, REQUIRED_SUBSCRIPTION_ROLES, REQUIRED_TENANT_ROLES,
+    HAS_AZURE_IDENTITY,
 )
 from aws.connector import (
     AWSCredentials, load_aws_credentials_from_env, save_aws_credentials_to_env_file,
@@ -479,6 +482,55 @@ def _manage_tenant_dialog(t, mode: str):
                 st.success("Credentials updated.")
                 st.rerun()
 
+        with st.expander("📖 How to set up this Service Principal", expanded=False):
+            st.markdown("""
+**1. Create the Service Principal:**
+```bash
+az ad sp create-for-rbac --name "finops-optimizer-sp" --role "Reader" --scopes /subscriptions/<SUBSCRIPTION_ID> --output json
+```
+
+**2. Assign subscription-level roles** (Reader + Cost Management Reader) for each subscription this tenant should cover:
+```bash
+az role assignment create --assignee <CLIENT_ID> --role "Reader" --scope /subscriptions/<SUB_ID>
+az role assignment create --assignee <CLIENT_ID> --role "Cost Management Reader" --scope /subscriptions/<SUB_ID>
+```
+To cover every subscription in the tenant at once instead of one at a time:
+```bash
+for sub in $(az account list --query "[].id" -o tsv); do
+  az role assignment create --assignee <CLIENT_ID> --role "Reader" --scope "/subscriptions/$sub"
+  az role assignment create --assignee <CLIENT_ID> --role "Cost Management Reader" --scope "/subscriptions/$sub"
+done
+```
+
+**3. Assign tenant-level roles** for Reservations and Savings Plans - a separate permission system, not subscription-scoped, since neither is a subscription resource. This step needs **User Access Administrator** rights at the tenant level - a materially higher bar than step 2:
+```bash
+az role assignment create --assignee <CLIENT_ID> --role "Reservations Reader" --scope "/providers/Microsoft.Capacity"
+az role assignment create --assignee <CLIENT_ID> --role "Savings Plan Reader" --scope "/providers/Microsoft.BillingBenefits"
+```
+""")
+
+        st.divider()
+        st.markdown("##### Tenant-level permissions")
+        st.caption("Reservations and Savings Plans are tenant-wide resources with their own separate permission system - not covered by the subscription-level roles below.")
+        tp1, tp2 = st.columns([3, 2])
+        if t.tenant_permission_status == "ready":
+            tp1.success("Ready", icon="✅")
+        elif t.tenant_permission_status == "missing_role":
+            tp1.warning(f"Missing {t.tenant_missing_roles}", icon="⚠️")
+        else:
+            tp1.caption("Not checked yet")
+        if tp2.button("🔁 Check tenant permissions", disabled=is_demo,
+                      help="Only available for Production tenants." if is_demo else None):
+            with st.spinner("Checking tenant-level permissions..."):
+                creds = AzureCredentials(t.tenant_id, t.subscription_id, t.client_id, get_tenant_credentials(t))
+                role_check = check_tenant_role_assignments(creds)
+                update_tenant_permission_status(
+                    selected_provider, mode, t.id,
+                    "ready" if role_check["ready"] else "missing_role",
+                    ", ".join(role_check["missing_roles"]) if role_check["missing_roles"] else None,
+                )
+            st.rerun()
+
         st.divider()
         st.markdown("##### Subscriptions")
         subs = list_subscriptions(selected_provider, mode, t.id)
@@ -501,7 +553,7 @@ def _manage_tenant_dialog(t, mode: str):
 
         if subs:
             for s in subs:
-                sc = st.columns([3, 3, 2])
+                sc = st.columns([3, 3, 2, 2])
                 sc[0].markdown(f"**{s.subscription_name or s.subscription_id}**")
                 sc[1].caption(s.subscription_id)
                 if s.permission_status == "ready":
@@ -510,12 +562,34 @@ def _manage_tenant_dialog(t, mode: str):
                     sc[2].warning(f"Missing {s.missing_role}", icon="⚠️")
                 else:
                     sc[2].caption("Not checked yet")
+                if sc[3].button("Verify permission", key=f"mgmt_verify_sub_{s.id}", disabled=is_demo,
+                                use_container_width=True,
+                                help="Only available for Production tenants." if is_demo else None):
+                    with st.spinner("Checking permissions..."):
+                        creds = AzureCredentials(t.tenant_id, t.subscription_id, t.client_id, get_tenant_credentials(t))
+                        role_check = check_role_assignments(creds, s.subscription_id)
+                        upsert_subscription(
+                            provider=selected_provider, mode=mode, tenant_db_id=t.id,
+                            subscription_id=s.subscription_id, subscription_name=s.subscription_name,
+                            permission_status="ready" if role_check["ready"] else "missing_role",
+                            missing_role=", ".join(role_check["missing_roles"]) if role_check["missing_roles"] else None,
+                        )
+                    st.rerun()
         else:
             st.caption("No subscriptions recorded yet.")
 
+        with st.expander("📋 Required Azure RBAC roles", expanded=False):
+            st.markdown("**Subscription-scoped**")
+            st.dataframe(pd.DataFrame(REQUIRED_SUBSCRIPTION_ROLES)[["Role Name", "Scope", "Purpose"]], hide_index=True, width="stretch")
+            st.markdown("**Tenant-scoped**")
+            st.dataframe(pd.DataFrame(REQUIRED_TENANT_ROLES)[["Role Name", "Scope", "Purpose"]], hide_index=True, width="stretch")
+
     st.divider()
     sync_col, last_col = st.columns([2, 3])
-    last_col.caption(f"Last synced: {t.last_synced_at[:16] if t.last_synced_at else 'Never'}")
+    last_col.caption(
+        f"Last synced: {t.last_synced_at[:16] if t.last_synced_at else 'Never'}  ·  "
+        "Next scheduled sync: daily at 00:00 UTC (automated 24-hour cron)"
+    )
     if sync_col.button("⚡ Run sync now", disabled=is_demo,
                         help="Only available for Production tenants." if is_demo else None):
         with st.spinner(f"Running ingestion for '{t.tenant_name}'..."):
@@ -601,13 +675,9 @@ def page_home():
                 st.switch_page(analyze_page)
             if b2.button("Manage", key=f"home_manage_{t.id}", use_container_width=True):
                 _manage_tenant_dialog(t, tenant_mode)
-
-    if is_azure:
-        with st.expander("Required Azure RBAC roles", expanded=False):
-            st.dataframe(pd.DataFrame(REQUIRED_ROLES)[["Role Name", "Scope", "Purpose"]], hide_index=True, width="stretch")
-    else:
-        with st.expander("Required AWS IAM permissions", expanded=False):
-            st.dataframe(pd.DataFrame(REQUIRED_AWS_POLICIES), hide_index=True, width="stretch")
+    # Required-roles reference and setup guidance live inside each tenant's
+    # Manage dialog now, not here - Home stays a lean summary + list, per
+    # user feedback that this page had drifted from the approved sketch.
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

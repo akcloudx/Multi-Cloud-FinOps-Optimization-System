@@ -91,8 +91,20 @@ import pandas as pd
 
 
 # ── Required Roles Reference ───────────────────────────────────────────────────
+# Split by real assignment scope, verified live against Microsoft's own docs
+# (2026-08): Reservations and Savings Plans are each their own tenant-level
+# resource with their OWN separate RBAC system - "Reservations Reader" lives
+# under /providers/Microsoft.Capacity, "Savings Plan Reader" under
+# /providers/Microsoft.BillingBenefits - neither is a subscription role, and
+# neither can be found by querying a subscription's role assignments (that
+# was the actual bug in an earlier version of this file: it listed
+# "Reservations Reader" with --scope /subscriptions/<SUB_ID>, which is simply
+# the wrong scope - that assignment command would succeed at the CLI but the
+# resulting grant would never actually apply to Reservations at all).
+# Sources: https://learn.microsoft.com/en-us/azure/cost-management-billing/reservations/view-reservations
+#          https://learn.microsoft.com/en-us/azure/cost-management-billing/savings-plan/permission-view-manage
 
-REQUIRED_ROLES = [
+REQUIRED_SUBSCRIPTION_ROLES = [
     {
         "Role Name":        "Reader",
         "Scope":            "Subscription",
@@ -104,20 +116,30 @@ REQUIRED_ROLES = [
         "Role Name":        "Cost Management Reader",
         "Scope":            "Subscription",
         "Required":         "Yes — Mandatory",
-        "Purpose":          "Read cost data, reservation utilization, savings plans, and pricing metrics",
+        "Purpose":          "Read cost and usage data, budgets, and pricing metrics",
         "How to Assign":    "az role assignment create --assignee <CLIENT_ID> --role 'Cost Management Reader' --scope /subscriptions/<SUB_ID>",
     },
-    # Was documented in this module's own docstring (above) but missing from
-    # this actually-enforced/displayed list - a real discrepancy, fixed 2026-08
-    # while wiring up the real per-role check_role_assignments() below.
+]
+
+REQUIRED_TENANT_ROLES = [
     {
         "Role Name":        "Reservations Reader",
-        "Scope":            "Subscription or Tenant",
-        "Required":         "Yes — Mandatory",
-        "Purpose":          "Read Reserved Instance & Reserved Capacity purchase records and utilization",
-        "How to Assign":    "az role assignment create --assignee <CLIENT_ID> --role 'Reservations Reader' --scope /subscriptions/<SUB_ID>",
+        "Scope":            "Tenant (Microsoft Entra directory)",
+        "Required":         "Yes — for Reserved Instance / Reserved Capacity purchase records and utilization",
+        "Purpose":          "Read-only access to every reservation in the tenant - reservations aren't subscription resources, they don't inherit subscription-level permissions",
+        "How to Assign":    'az role assignment create --assignee <CLIENT_ID> --role "Reservations Reader" --scope "/providers/Microsoft.Capacity"',
+    },
+    {
+        "Role Name":        "Savings Plan Reader",
+        "Scope":            "Tenant (Microsoft Entra directory)",
+        "Required":         "Yes — for Savings Plan purchase records and utilization",
+        "Purpose":          "Read-only access to every savings plan in the tenant - a separate RBAC system from Reservations, not the same role",
+        "How to Assign":    'az role assignment create --assignee <CLIENT_ID> --role "Savings Plan Reader" --scope "/providers/Microsoft.BillingBenefits"',
     },
 ]
+
+# Kept for anything that just wants the full reference table.
+REQUIRED_ROLES = REQUIRED_SUBSCRIPTION_ROLES + REQUIRED_TENANT_ROLES
 
 
 # ── Credential Store ───────────────────────────────────────────────────────────
@@ -190,6 +212,21 @@ def _get_principal_object_id(credential) -> Optional[str]:
     return claims.get("oid")
 
 
+def _resolve_role_names(auth_client, scope: str, object_id: str) -> set:
+    """Shared helper for both the subscription-scope and tenant-scope checks:
+    lists role assignments at `scope` for this principal and resolves each
+    role_definition_id to its real role name."""
+    assignments = list(auth_client.role_assignments.list_for_scope(
+        scope, filter=f"principalId eq '{object_id}'"
+    ))
+    names = set()
+    for a in assignments:
+        role_def = auth_client.role_definitions.get_by_id(a.role_definition_id)
+        if role_def and role_def.role_name:
+            names.add(role_def.role_name)
+    return names
+
+
 def check_role_assignments(creds: AzureCredentials, subscription_id: str) -> dict:
     """Real per-subscription RBAC check: lists the Service Principal's actual
     role assignments on `subscription_id` (Microsoft.Authorization/
@@ -197,11 +234,15 @@ def check_role_assignments(creds: AzureCredentials, subscription_id: str) -> dic
     role name via role_definitions.get_by_id - never a hardcoded built-in
     role GUID (those exist and are stable, but weren't independently
     verified for this project, so this resolves them live instead of
-    guessing). Diffs the resolved names against REQUIRED_ROLES and reports
-    exactly which required role(s) are missing, if any - replaces
-    test_connection()'s old "roles_verified" stamp, which was never a real
-    check, just an assumption made whenever a generic resource-listing call
-    happened to succeed.
+    guessing). Diffs against REQUIRED_SUBSCRIPTION_ROLES only (Reader, Cost
+    Management Reader) - NOT the tenant-scoped Reservations/Savings Plan
+    roles, which live under a completely different scope
+    (/providers/Microsoft.Capacity, /providers/Microsoft.BillingBenefits) and
+    can never show up in a subscription's role assignment list even when
+    correctly granted - see check_tenant_role_assignments() for those.
+    Replaces test_connection()'s old "roles_verified" stamp, which was never
+    a real check, just an assumption made whenever a generic resource-listing
+    call happened to succeed.
 
     Not live-tested against a real Azure tenant in this session (none
     available) - built strictly from documented SDK operations already used
@@ -220,18 +261,64 @@ def check_role_assignments(creds: AzureCredentials, subscription_id: str) -> dic
         )
         object_id = _get_principal_object_id(credential)
         auth_client = AuthorizationManagementClient(credential, subscription_id)
-        scope = f"/subscriptions/{subscription_id}"
-        assignments = list(auth_client.role_assignments.list_for_scope(
-            scope, filter=f"principalId eq '{object_id}'"
-        ))
+        assigned_role_names = _resolve_role_names(auth_client, f"/subscriptions/{subscription_id}", object_id)
+
+        required = {r["Role Name"] for r in REQUIRED_SUBSCRIPTION_ROLES}
+        missing = sorted(required - assigned_role_names)
+        return {
+            "checked": True,
+            "ready": len(missing) == 0,
+            "assigned_roles": sorted(assigned_role_names),
+            "missing_roles": missing,
+            "error": None,
+        }
+    except Exception as e:
+        return {
+            "checked": False, "ready": False, "assigned_roles": [], "missing_roles": [],
+            "error": str(e)[:300],
+        }
+
+
+_TENANT_ROLE_SCOPES = ["/providers/Microsoft.Capacity", "/providers/Microsoft.BillingBenefits"]
+
+
+def check_tenant_role_assignments(creds: AzureCredentials) -> dict:
+    """Real tenant-scope RBAC check for Reservations Reader and Savings Plan
+    Reader - genuinely different scopes from anything else this app checks
+    (/providers/Microsoft.Capacity and /providers/Microsoft.BillingBenefits
+    respectively, per Microsoft's own docs - see REQUIRED_TENANT_ROLES above),
+    since Reservations and Savings Plans are each their own tenant-level
+    resource, not subscription resources, and don't inherit subscription
+    permissions. Loops both scopes and merges the resolved role names before
+    diffing against REQUIRED_TENANT_ROLES, same pattern as
+    check_role_assignments() (shares _resolve_role_names/_get_principal_object_id).
+
+    AuthorizationManagementClient still needs *some* subscription_id to
+    construct (an SDK requirement for API versioning), even though the actual
+    scope queried here is tenant-wide, not that subscription - creds.subscription_id
+    is used for exactly that, and has no bearing on which scope is checked.
+
+    Not live-tested against a real Azure tenant in this session (none
+    available) - built strictly from Microsoft's own documented scope strings
+    and the same list_for_scope/role_definitions.get_by_id pattern already
+    used (and disclosed as not-yet-live-tested) in check_role_assignments()."""
+    if not HAS_AUTHORIZATION:
+        return {
+            "checked": False, "ready": False, "assigned_roles": [], "missing_roles": [],
+            "error": "azure-mgmt-authorization not installed",
+        }
+    try:
+        credential = ClientSecretCredential(
+            tenant_id=creds.tenant_id, client_id=creds.client_id, client_secret=creds.client_secret,
+        )
+        object_id = _get_principal_object_id(credential)
+        auth_client = AuthorizationManagementClient(credential, creds.subscription_id)
 
         assigned_role_names = set()
-        for a in assignments:
-            role_def = auth_client.role_definitions.get_by_id(a.role_definition_id)
-            if role_def and role_def.role_name:
-                assigned_role_names.add(role_def.role_name)
+        for scope in _TENANT_ROLE_SCOPES:
+            assigned_role_names |= _resolve_role_names(auth_client, scope, object_id)
 
-        required = {r["Role Name"] for r in REQUIRED_ROLES}
+        required = {r["Role Name"] for r in REQUIRED_TENANT_ROLES}
         missing = sorted(required - assigned_role_names)
         return {
             "checked": True,

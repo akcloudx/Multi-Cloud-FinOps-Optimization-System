@@ -10,7 +10,7 @@ import logging
 import datetime
 import azure.functions as func
 from data.sync_pipeline import run_ingestion_pipeline
-from db.tenants import list_tenants
+from db.tenants import list_tenants, get_tenant_credentials
 from azure_conn.connector import AzureCredentials
 
 app = func.FunctionApp()
@@ -24,19 +24,23 @@ def finops_24h_cron_sync(myTimer: func.TimerRequest) -> None:
 
     logging.info(f'Starting FinOps 24-Hour Automated Extraction Pipeline at {utc_timestamp}...')
 
-    # Sync EVERY connected Azure tenant (registry lives in SQL DB, db/tenants.py),
-    # each tagged with its own tenant_id so tenants' inventories never mix.
-    azure_tenants = list_tenants("Azure")
+    # Sync EVERY connected Azure tenant in the "live" scope (registry lives in
+    # SQL DB, db/tenants.py - tenants exist in "demo" too now, but the cron
+    # job only ever syncs real ones), each tagged with its own tenant_id so
+    # tenants' inventories never mix.
+    azure_tenants = list_tenants("Azure", "live")
     if not azure_tenants:
         logging.info("No Azure tenants connected - skipping Azure sync.")
     for t in azure_tenants:
-        creds = AzureCredentials(t.tenant_id, t.subscription_id, t.client_id, t.client_secret)
+        # client_secret is encrypted at rest (db/crypto.py) - decrypt right
+        # here at the point of use, never store the decrypted value.
+        creds = AzureCredentials(t.tenant_id, t.subscription_id, t.client_id, get_tenant_credentials(t))
         res = run_ingestion_pipeline("Azure", creds=creds, tenant_db_id=t.id)
         logging.info(f"Azure Sync Result [{t.tenant_name}]: {res['message']}")
 
     # AWS live fetch isn't implemented yet (aws/connector.py) - this currently
     # no-ops per tenant, kept here so it starts working automatically once it is.
-    for t in list_tenants("AWS"):
+    for t in list_tenants("AWS", "live"):
         res = run_ingestion_pipeline("AWS", tenant_db_id=t.id)
         logging.info(f"AWS Sync Result [{t.tenant_name}]: {res['message']}")
 

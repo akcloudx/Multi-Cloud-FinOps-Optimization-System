@@ -116,6 +116,23 @@ def update_tenant_name(provider: str, mode: str, tenant_db_id: int, tenant_name:
         session.commit()
 
 
+def update_tenant_permission_status(provider: str, mode: str, tenant_db_id: int,
+                                     status: str, missing_roles: Optional[str] = None) -> None:
+    """Stamps the tenant-WIDE permission status (Reservations Reader /
+    Savings Plan Reader - see azure_conn/connector.py's
+    check_tenant_role_assignments). `missing_roles` is a plain comma-joined
+    string, not a relational list - there are only ever 0-2 of these roles,
+    a dedicated table would be overkill."""
+    init_db(provider, mode)
+    engine = get_engine(provider, mode)
+    with Session(engine) as session:
+        session.query(CloudTenant).filter(CloudTenant.id == tenant_db_id).update({
+            "tenant_permission_status": status,
+            "tenant_missing_roles": missing_roles,
+        })
+        session.commit()
+
+
 def touch_last_synced(provider: str, mode: str, tenant_db_id: int) -> None:
     """Stamps CloudTenant.last_synced_at with now - called after a real sync
     completes (never in Demo, where the Run sync now action stays disabled)."""

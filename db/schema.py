@@ -150,6 +150,8 @@ def init_db(provider: str = "Azure", mode: str = "demo"):
     _ensure_column(engine, schema_name, "cloud_inventory", "ha_replica_count", "INTEGER")
     _ensure_column(engine, schema_name, "cloud_tenants", "domain", "VARCHAR(255)")
     _ensure_column(engine, schema_name, "cloud_tenants", "last_synced_at", "VARCHAR(255)")
+    _ensure_column(engine, schema_name, "cloud_tenants", "tenant_permission_status", "VARCHAR(50)")
+    _ensure_column(engine, schema_name, "cloud_tenants", "tenant_missing_roles", "VARCHAR(255)")
     return engine
 
 
@@ -442,6 +444,14 @@ class CloudTenant(Base):
     is_active        = Column(Boolean, default=True)
     created_at       = Column(String(255), nullable=False)
     last_synced_at   = Column(String(255), nullable=True)
+    # Tenant-WIDE permission status (Reservations Reader / Savings Plan
+    # Reader - see azure_conn/connector.py's check_tenant_role_assignments) -
+    # deliberately separate from TenantSubscription's per-subscription
+    # permission_status, since these two roles are tenant-scoped, not
+    # subscription-scoped, so there's exactly one status per tenant, not one
+    # per subscription.
+    tenant_permission_status = Column(String(50), default="unchecked")   # "unchecked" | "ready" | "missing_role"
+    tenant_missing_roles     = Column(String(255), nullable=True)
 
 
 class TenantSubscription(Base):
