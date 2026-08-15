@@ -137,6 +137,29 @@ def _storage_eligibility(sku: str) -> Tuple[bool, str]:
     return True, "Standard GPv2/Blob storage account - eligible for Storage reserved capacity, but only sold in 100 TB / 1 PB blocks (Block Blob / ADLS Gen2 data)."
 
 
+def _flexible_server_ri(sku: str) -> Tuple[bool, str]:
+    # SKU convention: "{tier}_{arm sku.name}" (see pricing/sku_mapping.py).
+    # Verified live against the Retail Prices API AND the real Azure
+    # pricing calculator (2026-08, both PostgreSQL and MySQL Flexible
+    # Server): Burstable tier has ZERO Reservation entries in every region
+    # checked, and the calculator shows no Reservation option at all when
+    # Burstable is selected - a real, confirmed policy exclusion, not a
+    # lookup gap. General Purpose and Memory Optimized (MySQL's "Business
+    # Critical" tier maps to this same ARM sku.tier value - see
+    # pricing/sku_mapping.py's _plan_mysql) ARE reservable per the
+    # calculator; some individual newer VM series haven't rolled out real
+    # Reservation catalog entries yet (verified: e.g. PostgreSQL/MySQL's
+    # newest Ddsv5/Ddsv6 General Purpose series currently return none) -
+    # that's a priceability gap this app's pricing layer already handles
+    # safely (returns no rate rather than a wrong one), not a reason to
+    # mark the whole tier ineligible, matching the same eligibility-vs-
+    # priceability split already used for Fsv2-series SQL Database.
+    tier = (sku or "").split("_", 1)[0]
+    if tier == "Burstable":
+        return False, "Burstable tier has no Reserved Capacity offering - verified live (zero Reservation entries in the Retail Prices API for any B-series SKU) and confirmed in the pricing calculator (no Reservation option shown for Burstable)."
+    return True, "General Purpose/Memory Optimized (or MySQL's equivalent 'Business Critical') tier - eligible for Reserved Capacity. (Legacy Single Server no longer accepts new reservations, but isn't distinguishable from our current inventory data.)"
+
+
 def _disk_eligibility(sku: str) -> Tuple[bool, str]:
     # https://learn.microsoft.com/en-us/azure/virtual-machines/disks-reserved-capacity
     # Only Premium SSD disks at size P30 and larger (P30-P80) are eligible.
@@ -164,8 +187,8 @@ _RULES = {
                                                                 # app compute a rate) are different questions -
                                                                 # see pricing/sku_mapping.py, where this type is
                                                                 # deliberately left unpriced despite being eligible.
-    "Azure Database for MySQL":      lambda sku: (True, "Flexible Server is eligible for reserved capacity. (Legacy Single Server no longer accepts new reservations.)"),
-    "Azure Database for PostgreSQL": lambda sku: (True, "Flexible Server is eligible for reserved capacity. (Legacy Single Server no longer accepts new reservations.)"),
+    "Azure Database for MySQL":      _flexible_server_ri,
+    "Azure Database for PostgreSQL": _flexible_server_ri,
     "Azure Cosmos DB":               lambda sku: (True, "Assumed provisioned throughput (capacity mode not captured for this resource) - Serverless Cosmos DB accounts are not eligible."),
     "Azure Blob Storage":            _storage_eligibility,
     "Azure Cache for Redis":         _redis_eligibility,

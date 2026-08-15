@@ -604,6 +604,274 @@ def _plan_redis(sku: str) -> SkuQueryPlan:
     )
 
 
+# ── Azure Database for PostgreSQL / MySQL Flexible Server ──────────────────
+# This app stores these SKUs as "{tier}_{arm sku.name}" (e.g.
+# "GeneralPurpose_Standard_D2ds_v5") - tier and sku.name are the two real,
+# top-level ARM fields (Microsoft.DBfor{Postgre,My}SQL/flexibleServers'
+# sku.tier/sku.name - confirmed identical schema shape for both services via
+# Microsoft's own ARM template reference, 2026-08) needed to build the right
+# Retail Prices API query. sku.name alone isn't enough: it's genuinely a
+# real, direct VM SKU name (e.g. "Standard_D2ds_v5"), but the Retail API's
+# PRICING data for General Purpose/Memory Optimized is published almost
+# entirely through one FLAT per-vCore meter per tier+series (armSkuName
+# ending "..._Series_Compute_vCore"/skuName literally "vCore") rather than a
+# per-size sized meter - verified live this flat meter always exists (even
+# for series that ALSO happen to have a sized direct-VM-name Consumption
+# meter) and gives byte-identical pricing to the sized meter where both
+# exist, so it's used uniformly here rather than needing two lookup
+# strategies. Needs consumption_multiplier AND reservation_multiplier = the
+# resource's actual vCore count (parsed from sku.name) on BOTH sides -
+# unlike SQL DB Gen5 where only the Reservation side needed multiplying,
+# neither side is pre-scaled here.
+#
+# Burstable tier has NO Reservation offering at all (verified live: zero
+# Reservation entries for any B-series SKU, either service, in every region
+# checked - matches the calculator, which shows no Reservation option for
+# Burstable) - Consumption pricing for Burstable uses a direct sized
+# armSkuName/skuName match instead, since no flat per-vCore meter exists
+# for it.
+#
+# Savings Plan is a genuinely different story, and caught a real research
+# mistake worth recording: an initial pass concluded NO savingsPlan data
+# exists anywhere for either service (checked via `curl` with no
+# `api-version` pinned) - but this app's own commitment_pricing.py pins
+# `api-version=2023-01-01-preview`, and re-checking through that exact
+# version (matching what the app actually queries) shows real savingsPlan
+# data on the vast majority of Consumption items for BOTH services,
+# including Burstable - confirmed with current effectiveStartDate values
+# (2023-03-01, same as the confirmed-current General Purpose meters, not an
+# old/stale listing). This directly contradicts the pricing calculator,
+# which shows no "Savings Options" section at all for Burstable - the same
+# kind of calculator-vs-live-API disagreement already seen with SQL MI
+# Hyperscale, where the user's explicit call was to trust the live,
+# current-dated Retail API data over what the calculator's UI currently
+# exposes. Applying that same precedent here: Savings Plan pricing IS
+# fetched for Burstable too, not blocked. (Lesson: any manual research
+# against this API MUST pin the same api-version this app's
+# commitment_pricing.py uses, or "no data" can be a false negative - see
+# feedback-calculator-scraping-methodology.)
+_FLEX_SERIES_RE = re.compile(r"^(?:Standard_)?([A-Za-z]+?)(\d+)([A-Za-z]*?)(?:_v(\d+))?$")
+
+
+def _parse_flex_sku(sku: str):
+    """Splits this app's "{tier}_{arm sku.name}" convention into
+    (tier, arm_sku_name, series_code, vcores), or None if malformed."""
+    if not sku or "_" not in sku:
+        return None
+    tier, arm_sku_name = sku.split("_", 1)
+    m = _FLEX_SERIES_RE.match(arm_sku_name.strip())
+    if not m:
+        return None
+    prefix, vcores, suffix, ver = m.groups()
+    series_code = f"{prefix}{suffix}v{ver}" if ver else f"{prefix}{suffix}"
+    return tier, arm_sku_name, series_code, int(vcores)
+
+
+def _is_confidential_series(series_code: str) -> bool:
+    # Confidential Compute (SGX/AMD SEV-SNP-backed) VM series are prefixed
+    # "EC" (Intel) or "DC" (AMD/Intel, older naming) - verified live this is
+    # a REAL, SEPARATE Retail Prices API product category
+    # ("...Confidential Compute {series} Series Compute") for both
+    # PostgreSQL and MySQL, distinct from "Memory Optimized"/"Business
+    # Critical", even though there's no separate ARM sku.tier value for it
+    # (confirmed via Microsoft's own template reference - the enum is only
+    # Burstable/GeneralPurpose/MemoryOptimized) and even though the
+    # PostgreSQL pricing calculator's own Tier dropdown lists these EC/DC
+    # series under "Memory Optimized" as a UI convenience. A resource
+    # running a Confidential Compute series always reports
+    # sku.tier="MemoryOptimized" - confidentiality is a property of the VM
+    # series choice alone, not a distinct tier value - so this can only be
+    # detected from the series code, never from tier.
+    return series_code[:2] in ("EC", "DC")
+
+
+def _plan_postgresql(sku: str) -> SkuQueryPlan:
+    parsed = _parse_flex_sku(sku)
+    if not parsed:
+        return SkuQueryPlan(supported=False, reason=f"SKU '{sku}' doesn't match the expected 'GeneralPurpose_Standard_D2ds_v5'-style convention.")
+    tier, arm_sku_name, series_code, vcores = parsed
+
+    if tier == "Burstable":
+        # Verified live: PostgreSQL's Burstable skuName is the raw,
+        # un-prefixed VM size (e.g. "B2ms", "B20ms") even though armSkuName
+        # keeps "Standard_" - stripping the prefix here matches skuName
+        # directly (case handled by the existing normalize-and-compare in
+        # commitment_pricing.py's _query_retail_items).
+        vm_size = arm_sku_name.split("_", 1)[-1] if arm_sku_name.lower().startswith("standard_") else arm_sku_name
+        return SkuQueryPlan(
+            supported=True, service_name="Azure Database for PostgreSQL", match_field="skuName",
+            consumption_match_value=vm_size, reservation_match_value=vm_size,
+            product_contains="Flexible Server Burstable BS Series Compute",
+        )
+
+    if tier not in ("GeneralPurpose", "MemoryOptimized"):
+        return SkuQueryPlan(supported=False, reason=f"Unrecognized PostgreSQL Flexible Server tier '{tier}' - expected Burstable, GeneralPurpose, or MemoryOptimized (the real ARM sku.tier enum).")
+
+    if tier == "MemoryOptimized" and series_code == "Mdsv2":
+        # Real, confirmed exception found via a systematic full-catalog scan
+        # (2026-08-15): the M-series memory-optimized hardware line publishes
+        # under its own bare "Azure Database for PostgreSQL Flexible Server
+        # Mdsv2 Series Compute" product - no "Memory Optimized" (or any
+        # tier) prefix at all, unlike every other series. It's also priced
+        # DIFFERENTLY from every other series this app handles: the sized
+        # Consumption item itself (skuName e.g. "M64ds_v2") already carries
+        # a correctly-scaled `retailPrice` AND its own nested `savingsPlan`
+        # array (confirmed live, current effectiveStartDate) - there's no
+        # separate flat per-vCore meter, and none is needed. Genuinely
+        # Reservation-less (zero entries confirmed live). Not reachable via
+        # this app's PostgreSQL calculator scrape (Memory Optimized's
+        # Instance Series dropdown didn't list it) - a real, current,
+        # substantially-priced ($13-$76/hr range) tier the Retail API sells
+        # that the calculator's UI doesn't currently surface, same class of
+        # finding as the DC-series Confidential Compute additions above.
+        vm_size = arm_sku_name.split("_", 1)[-1] if arm_sku_name.lower().startswith("standard_") else arm_sku_name
+        return SkuQueryPlan(
+            supported=True, service_name="Azure Database for PostgreSQL", match_field="skuName",
+            consumption_match_value=vm_size, reservation_match_value=vm_size,
+            product_contains="Flexible Server Mdsv2 Series Compute",
+        )
+
+    if tier == "GeneralPurpose":
+        tier_display = "General Purpose"
+        flat_sku_label = "vCore"
+    elif _is_confidential_series(series_code):
+        # Confirmed live: unlike General Purpose/Memory Optimized, PostgreSQL's
+        # Confidential Compute product publishes only a "1 vCore"-labeled flat
+        # meter (no bare "vCore" row) - and has ZERO Reservation entries at
+        # all (confirmed live, every Confidential Compute series checked).
+        tier_display = "Confidential Compute"
+        flat_sku_label = "1 vCore"
+    else:
+        tier_display = "Memory Optimized"
+        flat_sku_label = "vCore"
+
+    return SkuQueryPlan(
+        supported=True, service_name="Azure Database for PostgreSQL", match_field="skuName",
+        consumption_match_value=flat_sku_label, reservation_match_value=flat_sku_label,
+        product_contains=f"Flexible Server {tier_display} {series_code} Series Compute",
+        consumption_multiplier=vcores, reservation_multiplier=vcores,
+    )
+
+
+def _plan_mysql(sku: str) -> SkuQueryPlan:
+    parsed = _parse_flex_sku(sku)
+    if not parsed:
+        return SkuQueryPlan(supported=False, reason=f"SKU '{sku}' doesn't match the expected 'GeneralPurpose_Standard_D2ds_v5'-style convention.")
+    tier, arm_sku_name, series_code, vcores = parsed
+
+    if tier == "Burstable":
+        # Verified live: MySQL's Burstable skuName convention is the
+        # OPPOSITE of PostgreSQL's - it KEEPS the "Standard_" prefix (e.g.
+        # "Standard_B12ms"), so match the full arm_sku_name as-is. One
+        # confirmed, disclosed, narrow gap: the smallest size (B1ms)
+        # publishes as bare "B1MS" (no prefix on either field) for MySQL
+        # specifically, so that one size alone won't match here and will
+        # safely resolve to no pricing data rather than a wrong number -
+        # not chased further given how narrow it is (smallest possible
+        # Burstable size, and Burstable has no RI/SP to lose anyway).
+        return SkuQueryPlan(
+            supported=True, service_name="Azure Database for MySQL", match_field="skuName",
+            consumption_match_value=arm_sku_name, reservation_match_value=arm_sku_name,
+            product_contains="Flexible Server Burstable BS Series Compute",
+        )
+
+    if tier == "GeneralPurpose":
+        if series_code == "Ddsv4":
+            # Same class of exception as Memory Optimized's Edsv4 below:
+            # confirmed live this older generation has no series-tagged
+            # productName of its own - it's folded into the generic
+            # "General Purpose Series Compute" product (found via a
+            # systematic full-catalog scan, 2026-08-15). Confirmed this
+            # generic product also happens to house a "Dasv4"-style AMD
+            # series at the IDENTICAL flat per-vCore rate within any given
+            # region (spot-checked denmarkeast: $0.11115/vCore for both),
+            # so matching by tier alone here is safe - no ambiguity from
+            # broadening past the specific series code.
+            product_contains = "Flexible Server General Purpose Series Compute"
+        else:
+            product_contains = f"Flexible Server General Purpose {series_code} Series Compute"
+        return SkuQueryPlan(
+            supported=True, service_name="Azure Database for MySQL", match_field="skuName",
+            consumption_match_value="vCore", reservation_match_value="vCore",
+            product_contains=product_contains,
+            consumption_multiplier=vcores, reservation_multiplier=vcores,
+        )
+
+    if tier == "MemoryOptimized":
+        # CORRECTION (2026-08-15): an earlier pass concluded MySQL's
+        # ARM MemoryOptimized tier maps ONLY to a "Business Critical Ev3"
+        # Retail API product, with no series-specific naming at all - built
+        # from a single-region (eastus) manual `curl` scan that (as later
+        # discovered) used the WRONG, unversioned api-version, which
+        # returns a genuinely SMALLER product catalog than this app's own
+        # pinned version. Re-scanning with the correct
+        # api-version=2023-01-01-preview across multiple regions shows
+        # MySQL's modern series DO use "Memory Optimized {series} Series
+        # Compute" naming, identical to PostgreSQL (Eadsv5/Eadsv6/Easv6/
+        # Edsv5/Edsv6/Esv6 all confirmed live) - "Business Critical Ev3" is
+        # a real but LEGACY/older naming that only applies to that one
+        # specific generation, not the tier's general convention. Caught by
+        # the user hand-testing a real calculator configuration (MySQL
+        # Memory Optimized, Edsv4-series) that returned nothing under the
+        # old logic.
+        if _is_confidential_series(series_code):
+            # Same Confidential Compute split as PostgreSQL - see
+            # _is_confidential_series.
+            return SkuQueryPlan(
+                supported=True, service_name="Azure Database for MySQL", match_field="skuName",
+                consumption_match_value="vCore", reservation_match_value="vCore",
+                product_contains=f"Flexible Server Confidential Compute {series_code} Series",
+                consumption_multiplier=vcores, reservation_multiplier=vcores,
+            )
+        if series_code == "Esv3":
+            # The legacy Ev3 generation genuinely publishes under
+            # "Business Critical Ev3 Series Compute" (not "Memory
+            # Optimized Esv3", which doesn't exist) - a real, confirmed
+            # naming exception for this one generation, spelled "Ev3" (no
+            # "s") unlike every other series this app parses. Verified
+            # live: every catalog row under this product - regardless of
+            # its own nominal size label ("1 vCore", "32 vCore", or a
+            # specific "Standard_E16as" AMD variant name) - carries the
+            # SAME flat per-vCore rate within a region, so matching the
+            # smallest confirmed-present label ("1 vCore") and multiplying
+            # by the real vCore count is safe and correct. Genuinely
+            # Reservation-less (zero entries across 42 regions checked,
+            # still true after the api-version correction) - a real,
+            # current product limitation for this one legacy generation,
+            # not a lookup gap.
+            return SkuQueryPlan(
+                supported=True, service_name="Azure Database for MySQL", match_field="skuName",
+                consumption_match_value="1 vCore", reservation_match_value="1 vCore",
+                product_contains="Flexible Server Business Critical",
+                consumption_multiplier=vcores, reservation_multiplier=vcores,
+            )
+        if series_code == "Edsv4":
+            # Real, confirmed exception: unlike every other Memory
+            # Optimized series, Edsv4 does NOT get its own
+            # "Memory Optimized Edsv4 Series Compute" productName line -
+            # it's folded into the generic, series-code-less "Memory
+            # Optimized Series Compute" product instead (armSkuName is
+            # still Edsv4-specific internally, productName just doesn't
+            # say so). Confirmed this generic product is NOT a shared
+            # catch-all for other series too (its sized Consumption items'
+            # armSkuName explicitly says "..._Edsv4Series_Compute") - safe
+            # to match narrowly by tier alone.
+            return SkuQueryPlan(
+                supported=True, service_name="Azure Database for MySQL", match_field="skuName",
+                consumption_match_value="vCore", reservation_match_value="vCore",
+                product_contains="Flexible Server Memory Optimized Series Compute",
+                consumption_multiplier=vcores, reservation_multiplier=vcores,
+            )
+        return SkuQueryPlan(
+            supported=True, service_name="Azure Database for MySQL", match_field="skuName",
+            consumption_match_value="vCore", reservation_match_value="vCore",
+            product_contains=f"Flexible Server Memory Optimized {series_code} Series Compute",
+            consumption_multiplier=vcores, reservation_multiplier=vcores,
+        )
+
+    return SkuQueryPlan(supported=False, reason=f"Unrecognized MySQL Flexible Server tier '{tier}' - expected Burstable, GeneralPurpose, or MemoryOptimized (the real ARM sku.tier enum).")
+
+
 # ── Explicitly unsupported - Azure genuinely can't price these this way ─────
 def _plan_cosmos_db(sku: str) -> SkuQueryPlan:
     # Cosmos DB Reserved Capacity is a subscription-wide RU/s pool, not tied
@@ -650,14 +918,8 @@ _PLAN_RESOLVERS = {
     "Azure Databricks":              _plan_databricks,
     "Azure Blob Storage":            _plan_unmeasurable_storage,
     "Azure Files":                   _plan_unmeasurable_storage,
-    "Azure Database for PostgreSQL": _plan_deferred(
-        "PostgreSQL Flexible Server compute is priced per VM-series-family (e.g. 'Ddsv4 Series'), not the "
-        "GP_Gen5-style tier naming SQL Database/MI use - needs live-tenant verification of the real ARM SKU "
-        "format before mapping, not yet built."
-    ),
-    "Azure Database for MySQL": _plan_deferred(
-        "Same VM-series-family pricing model as PostgreSQL Flexible Server - not yet built, see that note."
-    ),
+    "Azure Database for PostgreSQL": _plan_postgresql,
+    "Azure Database for MySQL":      _plan_mysql,
     "Azure Disk Storage": _plan_deferred(
         "Live Resource Graph ingestion doesn't capture standalone Disk resources yet (a separate, pre-existing "
         "gap, not a pricing issue) - mapping logic is ready (armSkuName 'Premium_SSD_Managed_Disks_{tier}', "

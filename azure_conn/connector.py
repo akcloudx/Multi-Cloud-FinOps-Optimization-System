@@ -278,6 +278,20 @@ Resources
     poolSkuName = tostring(sku.name),
     poolSkuCapacity = tostring(sku.capacity),
     instancePoolVCores = tostring(properties.vCores),
+    // PostgreSQL/MySQL Flexible Server report SKU at the SAME top-level
+    // sku.name path as Elastic Pool/Instance Pool, plus a real sku.tier
+    // field ("Burstable"/"GeneralPurpose"/"MemoryOptimized" - confirmed
+    // identical enum for both services via Microsoft's own ARM template
+    // reference, 2026-08) that pricing/sku_mapping.py's _plan_postgresql/
+    // _plan_mysql need alongside sku.name to build the right Retail Prices
+    // API query - sku.name alone is ambiguous (e.g. the "EC..." series
+    // sits under a different tier per service). Legacy (non-Flexible)
+    // Single Server uses a different, older SKU convention entirely and is
+    // deliberately NOT captured here - matches this app's existing
+    // "Legacy Single Server no longer accepts new reservations, not
+    // distinguishable from current inventory data" disclaimer.
+    pgMysqlSkuName = tostring(sku.name),
+    pgMysqlSkuTier = tostring(sku.tier),
     topSku     = tostring(sku.name),
     redisSkuName  = tostring(properties.sku.name),
     redisFamily   = tostring(properties.sku.family),
@@ -341,6 +355,17 @@ Resources
         isnotempty(redisFamily) and isnotempty(redisCapacity) and isnotempty(redisSkuName),
             strcat(redisFamily, redisCapacity, "_", redisSkuName),
         ""
+    ),
+    // "{tier}_{sku.name}" (e.g. "GeneralPurpose_Standard_D2ds_v5") - the
+    // convention pricing/sku_mapping.py's _plan_postgresql/_plan_mysql
+    // parse. Explicitly gated to the two Flexible Server types since
+    // sku.name/sku.tier are generic top-level ARM fields (same reasoning
+    // as poolSku/instancePoolSku above).
+    pgMysqlSku = case(
+        (type == 'microsoft.dbforpostgresql/flexibleservers' or type == 'microsoft.dbformysql/flexibleservers')
+            and isnotempty(pgMysqlSkuTier) and isnotempty(pgMysqlSkuName),
+            strcat(pgMysqlSkuTier, "_", pgMysqlSkuName),
+        ""
     )
 | extend
     resolvedSku = case(
@@ -349,6 +374,7 @@ Resources
         isnotempty(poolSku), poolSku,
         isnotempty(instancePoolSku), instancePoolSku,
         isnotempty(redisSku), redisSku,
+        isnotempty(pgMysqlSku), pgMysqlSku,
         isnotempty(topSku), topSku,
         'N/A'
     ),

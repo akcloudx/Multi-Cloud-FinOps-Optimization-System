@@ -111,7 +111,17 @@ def _flexible_server_sp(sku: str) -> Tuple[bool, str]:
     # from Flexible Server (azure_conn/connector.py maps both ARM types to the
     # same string) - Single Server is legacy/being retired and excluded from
     # Savings Plan for Databases, but we can't detect it from SKU alone here.
-    return True, "Assumed Flexible Server - eligible for Savings Plan for Databases. (Legacy Single Server is excluded, but isn't distinguishable from our current inventory data.)"
+    # Blanket True is correct for every Flexible Server tier including
+    # Burstable - verified live (2026-08, via this app's actual pinned
+    # Retail Prices API version) that Burstable genuinely carries real
+    # savingsPlan pricing data, for both PostgreSQL and MySQL, even though
+    # the pricing calculator's UI doesn't currently show a Savings Options
+    # panel for Burstable at all (see pricing/sku_mapping.py's
+    # _plan_postgresql/_plan_mysql for the same finding on the pricing
+    # side - this is a real calculator-vs-live-API disagreement, resolved
+    # in favor of the live API per the same precedent already set for SQL
+    # Managed Instance Hyperscale).
+    return True, "Eligible for Savings Plan for Databases (compute cost). (Legacy Single Server is excluded, but isn't distinguishable from our current inventory data.)"
 
 
 def _cosmos_db_sp(sku: str) -> Tuple[bool, str]:

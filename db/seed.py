@@ -172,8 +172,8 @@ DATABASE_INVENTORY = [
     {"resource_id": "PG-Prod-01", "resource_name": "prod-analytics-postgres",
      "resource_type": "Azure Database for PostgreSQL",
      "resource_state": "Running",
-     "region": "australiaeast", "os": "N/A", "sku": "GP_Gen5_4",
-     "payg_hourly_usd": 0.396, "avg_daily_running_hours": 24,
+     "region": "australiaeast", "os": "N/A", "sku": "GeneralPurpose_Standard_D4ds_v5",
+     "payg_hourly_usd": 0.488, "avg_daily_running_hours": 24,
      "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
 
     # Azure Database for MySQL — General Purpose, 4 vCores
@@ -181,8 +181,8 @@ DATABASE_INVENTORY = [
     {"resource_id": "MYSQL-Prod-01", "resource_name": "prod-cms-mysql",
      "resource_type": "Azure Database for MySQL",
      "resource_state": "Running",
-     "region": "australiasoutheast", "os": "N/A", "sku": "GP_Gen5_4",
-     "payg_hourly_usd": 0.396, "avg_daily_running_hours": 24,
+     "region": "australiasoutheast", "os": "N/A", "sku": "GeneralPurpose_Standard_D4ds_v5",
+     "payg_hourly_usd": 0.47, "avg_daily_running_hours": 24,
      "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
 
     # Azure Cosmos DB — 400 RU/s provisioned throughput
