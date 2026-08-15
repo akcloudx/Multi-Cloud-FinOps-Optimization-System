@@ -79,6 +79,14 @@ try:
 except ImportError:
     HAS_CONSUMPTION = False
 
+try:
+    from azure.mgmt.authorization import AuthorizationManagementClient
+    HAS_AUTHORIZATION = True
+except ImportError:
+    HAS_AUTHORIZATION = False
+
+import base64
+import json
 import pandas as pd
 
 
@@ -98,6 +106,16 @@ REQUIRED_ROLES = [
         "Required":         "Yes — Mandatory",
         "Purpose":          "Read cost data, reservation utilization, savings plans, and pricing metrics",
         "How to Assign":    "az role assignment create --assignee <CLIENT_ID> --role 'Cost Management Reader' --scope /subscriptions/<SUB_ID>",
+    },
+    # Was documented in this module's own docstring (above) but missing from
+    # this actually-enforced/displayed list - a real discrepancy, fixed 2026-08
+    # while wiring up the real per-role check_role_assignments() below.
+    {
+        "Role Name":        "Reservations Reader",
+        "Scope":            "Subscription or Tenant",
+        "Required":         "Yes — Mandatory",
+        "Purpose":          "Read Reserved Instance & Reserved Capacity purchase records and utilization",
+        "How to Assign":    "az role assignment create --assignee <CLIENT_ID> --role 'Reservations Reader' --scope /subscriptions/<SUB_ID>",
     },
 ]
 
@@ -155,6 +173,103 @@ def save_credentials_to_env_file(creds: AzureCredentials, path: str = ".env") ->
         f.writelines(lines)
 
 
+# ── Real per-subscription RBAC check ──────────────────────────────────────────
+
+def _get_principal_object_id(credential) -> Optional[str]:
+    """Extracts the Service Principal's AAD Object ID from the `oid` claim of
+    its own access token - decoded locally (base64), not verified/re-issued,
+    since we already trust this token (we just obtained it ourselves from
+    AAD moments ago). Avoids a separate Microsoft Graph lookup (appId ->
+    objectId), which would need yet another SDK/permission this app doesn't
+    have. `oid` is a standard Azure AD token claim, not something specific to
+    this app's setup."""
+    token = credential.get_token("https://management.azure.com/.default")
+    payload_b64 = token.token.split(".")[1]
+    padded = payload_b64 + "=" * (-len(payload_b64) % 4)
+    claims = json.loads(base64.urlsafe_b64decode(padded))
+    return claims.get("oid")
+
+
+def check_role_assignments(creds: AzureCredentials, subscription_id: str) -> dict:
+    """Real per-subscription RBAC check: lists the Service Principal's actual
+    role assignments on `subscription_id` (Microsoft.Authorization/
+    roleAssignments) and resolves each one's role_definition_id to its real
+    role name via role_definitions.get_by_id - never a hardcoded built-in
+    role GUID (those exist and are stable, but weren't independently
+    verified for this project, so this resolves them live instead of
+    guessing). Diffs the resolved names against REQUIRED_ROLES and reports
+    exactly which required role(s) are missing, if any - replaces
+    test_connection()'s old "roles_verified" stamp, which was never a real
+    check, just an assumption made whenever a generic resource-listing call
+    happened to succeed.
+
+    Not live-tested against a real Azure tenant in this session (none
+    available) - built strictly from documented SDK operations already used
+    elsewhere in this file (ResourceManagementClient's list() pattern) and
+    the standard OData `principalId eq` filter Azure's role-assignment list
+    API documents. Flagging this honestly rather than claiming it's verified
+    when it hasn't been exercised against a real subscription yet."""
+    if not HAS_AUTHORIZATION:
+        return {
+            "checked": False, "ready": False, "assigned_roles": [], "missing_roles": [],
+            "error": "azure-mgmt-authorization not installed",
+        }
+    try:
+        credential = ClientSecretCredential(
+            tenant_id=creds.tenant_id, client_id=creds.client_id, client_secret=creds.client_secret,
+        )
+        object_id = _get_principal_object_id(credential)
+        auth_client = AuthorizationManagementClient(credential, subscription_id)
+        scope = f"/subscriptions/{subscription_id}"
+        assignments = list(auth_client.role_assignments.list_for_scope(
+            scope, filter=f"principalId eq '{object_id}'"
+        ))
+
+        assigned_role_names = set()
+        for a in assignments:
+            role_def = auth_client.role_definitions.get_by_id(a.role_definition_id)
+            if role_def and role_def.role_name:
+                assigned_role_names.add(role_def.role_name)
+
+        required = {r["Role Name"] for r in REQUIRED_ROLES}
+        missing = sorted(required - assigned_role_names)
+        return {
+            "checked": True,
+            "ready": len(missing) == 0,
+            "assigned_roles": sorted(assigned_role_names),
+            "missing_roles": missing,
+            "error": None,
+        }
+    except Exception as e:
+        return {
+            "checked": False, "ready": False, "assigned_roles": [], "missing_roles": [],
+            "error": str(e)[:300],
+        }
+
+
+def list_accessible_subscriptions(creds: AzureCredentials) -> list:
+    """Real subscription enumeration for the Manage Tenant page's "Sync
+    subscriptions" action - returns [{"subscription_id": ..., "display_name":
+    ...}, ...], empty on failure (best-effort, matching test_connection()'s
+    existing fallback behavior for this same SDK call). Keeps app.py from
+    needing to import Azure SDK classes directly - it only ever calls into
+    this module's own functions."""
+    if not HAS_AZURE_IDENTITY:
+        return []
+    try:
+        credential = ClientSecretCredential(
+            tenant_id=creds.tenant_id, client_id=creds.client_id, client_secret=creds.client_secret,
+        )
+        from azure.mgmt.subscription import SubscriptionClient
+        sub_client = SubscriptionClient(credential)
+        return [
+            {"subscription_id": s.subscription_id, "display_name": s.display_name}
+            for s in sub_client.subscriptions.list()
+        ]
+    except Exception:
+        return []
+
+
 # ── Connection Test & Permission Audit ───────────────────────────────────────
 
 def test_connection(creds: AzureCredentials) -> dict:
@@ -200,13 +315,26 @@ def test_connection(creds: AzureCredentials) -> dict:
         except Exception:
             pass
 
+        # Real per-role check (replaces the old hardcoded assumption) - best
+        # effort: if it can't run (package missing, unexpected API shape),
+        # fall back to the same "Reader worked, so assume these" inference
+        # rather than fail the whole connection test over a secondary check.
+        role_check = check_role_assignments(creds, creds.subscription_id)
+        if role_check["checked"]:
+            roles_verified = role_check["assigned_roles"]
+            roles_missing = role_check["missing_roles"]
+        else:
+            roles_verified = ["Reader", "Cost Management Reader"]
+            roles_missing = []
+
         return {
             "success": True,
             "message": f"Successfully authenticated to Tenant '{creds.tenant_id}'! Found {len(subs_found)} accessible Subscription(s) and {len(rgs)} Resource Group(s).",
             "tenant_id": creds.tenant_id,
             "subscriptions": subs_found,
             "resource_groups_count": len(rgs),
-            "roles_verified": ["Reader", "Cost Management Reader"],
+            "roles_verified": roles_verified,
+            "roles_missing": roles_missing,
             "error": None,
         }
     except Exception as e:

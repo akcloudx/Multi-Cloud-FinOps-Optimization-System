@@ -1,4 +1,4 @@
-streamlit>=1.35
+streamlit>=1.37
 pandas>=2.0
 numpy>=1.26
 sqlalchemy>=2.0
@@ -15,4 +15,5 @@ azure-mgmt-resourcegraph>=8.0.0
 azure-mgmt-resource>=23.0.0
 azure-mgmt-consumption>=10.0.0
 azure-mgmt-subscription>=3.1.1
+azure-mgmt-authorization>=4.0.0
 cryptography<44,>=42

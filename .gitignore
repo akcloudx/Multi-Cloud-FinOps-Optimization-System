@@ -11,6 +11,7 @@ __pycache__/
 # Secrets - never commit credentials
 .env
 .streamlit/secrets.toml
+.tenant_secret_key
 
 # Local logs and scratch artifacts
 app_logs/

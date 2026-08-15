@@ -966,6 +966,43 @@ def seed_if_empty(engine=None):
         else:
             print("[INFO] Already seeded -- skipping.")
 
+    seed_demo_tenant_if_empty()
+
+
+def seed_demo_tenant_if_empty():
+    """Seeds one demo tenant ("Demo Tenant 1") with 2 subscriptions in the
+    demo scope, so the Home page has a real CloudTenant/TenantSubscription
+    row to list even in Demo Mode - not a UI mockup. Permission statuses are
+    pre-set to realistic simulated values (one ready, one missing a role)
+    since no real Azure tenant exists behind a Demo entry to actually check -
+    see azure_conn/connector.py's check_role_assignments for the real,
+    Production-only version of this check. Independently guarded (checks its
+    own emptiness) so it's safe to call every startup, not just on first-ever
+    inventory seed."""
+    from db.tenants import list_tenants, upsert_tenant, upsert_subscription
+    if list_tenants("Azure", "demo"):
+        return
+    tenant_db_id = upsert_tenant(
+        provider="Azure", mode="demo", tenant_name="Demo Tenant 1",
+        tenant_id="11111111-2222-3333-4444-555555555555",
+        subscription_id="66666666-7777-8888-9999-000000000000",
+        client_id="77777777-8888-9999-0000-111111111111",
+        client_secret="demo-tenant-has-no-real-credentials",
+        domain="demo.onmicrosoft.com",
+    )
+    upsert_subscription(
+        provider="Azure", mode="demo", tenant_db_id=tenant_db_id,
+        subscription_id="66666666-7777-8888-9999-000000000000",
+        subscription_name="Production", permission_status="ready",
+    )
+    upsert_subscription(
+        provider="Azure", mode="demo", tenant_db_id=tenant_db_id,
+        subscription_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        subscription_name="Sandbox", permission_status="missing_role",
+        missing_role="Cost Management Reader",
+    )
+    print("[OK] Seeded demo tenant 'Demo Tenant 1' with 2 subscriptions.")
+
 
 if __name__ == "__main__":
     seed_if_empty()

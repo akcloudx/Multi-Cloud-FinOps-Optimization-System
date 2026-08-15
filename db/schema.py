@@ -148,6 +148,8 @@ def init_db(provider: str = "Azure", mode: str = "demo"):
     _ensure_column(engine, schema_name, "commitments", "scope_redundancy", "VARCHAR(255)")
     _ensure_column(engine, schema_name, "commitments", "scope_resource_type", "VARCHAR(255)")
     _ensure_column(engine, schema_name, "cloud_inventory", "ha_replica_count", "INTEGER")
+    _ensure_column(engine, schema_name, "cloud_tenants", "domain", "VARCHAR(255)")
+    _ensure_column(engine, schema_name, "cloud_tenants", "last_synced_at", "VARCHAR(255)")
     return engine
 
 
@@ -418,7 +420,14 @@ class SavingsPlanPurchase(Base):
 class CloudTenant(Base):
     """
     Registry of connected Azure Tenants & AWS Accounts stored in Azure SQL DB.
-    Allows managing and switching between multiple cloud tenants.
+    Allows managing and switching between multiple cloud tenants. Exists in
+    BOTH demo and live scopes (2026-08) - Demo Mode's Home page gets a real
+    (simulated) tenant entry too, not just Production's real connections.
+
+    client_secret is stored ENCRYPTED (see db/crypto.py's Fernet helper),
+    unlike AppUser.password_hash which is one-way bcrypt - this value must be
+    recoverable since the app needs the real secret to authenticate against
+    Azure, not just verify a match.
     """
     __tablename__ = "cloud_tenants"
 
@@ -429,8 +438,32 @@ class CloudTenant(Base):
     subscription_id  = Column(String(255), nullable=False)
     client_id        = Column(String(255), nullable=False)
     client_secret    = Column(String(500), nullable=False)
+    domain           = Column(String(255), nullable=True)
     is_active        = Column(Boolean, default=True)
     created_at       = Column(String(255), nullable=False)
+    last_synced_at   = Column(String(255), nullable=True)
+
+
+class TenantSubscription(Base):
+    """
+    One row per Azure subscription registered under a CloudTenant - a tenant
+    can span multiple subscriptions, each independently permission-checked
+    (see azure_conn/connector.py's check_role_assignments). Distinct from
+    CloudTenant.subscription_id (kept as-is for backward compatibility with
+    already-ingested CloudInventory rows keyed to it) - this table is the
+    source of truth for "which subscriptions does this tenant cover" going
+    forward, used by the Home/Manage Tenant pages.
+    """
+    __tablename__ = "tenant_subscriptions"
+
+    id                 = Column(Integer, primary_key=True, autoincrement=True)
+    tenant_db_id       = Column(Integer, nullable=False)
+    subscription_id    = Column(String(255), nullable=False)
+    subscription_name  = Column(String(255), nullable=True)
+    # "unchecked" | "ready" | "missing_role"
+    permission_status  = Column(String(50), default="unchecked")
+    missing_role       = Column(String(255), nullable=True)
+    last_checked_at    = Column(String(255), nullable=True)
 
 
 class AppUser(Base):

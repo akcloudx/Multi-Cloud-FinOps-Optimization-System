@@ -13,13 +13,13 @@ cloud-provider-scoped.
 
 2026-08: demo and production accounts are genuinely separate tables now (one
 per mode scope, see db/schema.py), not just distinguished by username within
-one shared table - matches the login screen's own mode choice, which is
-already made before any of these functions are ever called (see
-ui/auth_page.py: the Demo/Production button click happens first, THEN the
-demo-login or bootstrap/sign-in form renders). Every function here takes an
-explicit `mode` ("demo" | "live") for exactly that reason - it should always
-be `st.session_state["_login_mode_choice"]` translated to "demo"/"live",
-never guessed.
+one shared table - matches the login screen's own Mode toggle, which is
+read before any of these functions are ever called (see ui/auth_page.py:
+the toggle picks Demo or Production, THEN the matching form renders directly
+beneath it). Every function here takes an explicit `mode` ("demo" | "live")
+for exactly that reason - it should always be
+`st.session_state["_login_mode_widget"]` translated to "demo"/"live", never
+guessed.
 """
 
 from datetime import datetime

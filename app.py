@@ -94,7 +94,7 @@ inject_global_css()
 
 # Imports
 from data.inventory_loader import get_compute_inventory
-from data.sync_pipeline import run_ingestion_pipeline, get_latest_sync_log
+from data.sync_pipeline import run_ingestion_pipeline
 from pricing.retail_pricing import price_inventory, usd, fmt_currency, get_inr_rate
 from pricing.commitment_pricing import get_commitment_prices
 from ui.charts import get_cost_distribution_chart, get_waterfall_savings_chart, get_recommendation_opportunity_chart
@@ -120,12 +120,14 @@ from analysis.commitment_economics import (
     savings_plan_term_comparison, ri_gap_pricing, combined_monthly_savings, TERM_LABELS,
 )
 from db.tenants import (
-    list_tenants, get_active_tenant, upsert_tenant, set_active_tenant,
-    delete_tenant, resource_count,
+    list_tenants, get_active_tenant, get_tenant_credentials, upsert_tenant,
+    update_tenant_name, touch_last_synced, set_active_tenant, delete_tenant,
+    resource_count, list_subscriptions, upsert_subscription,
 )
 from azure_conn.connector import (
     AzureCredentials, load_credentials_from_env, save_credentials_to_env_file,
-    test_connection, REQUIRED_ROLES, HAS_AZURE_IDENTITY,
+    test_connection, check_role_assignments, list_accessible_subscriptions,
+    REQUIRED_ROLES, HAS_AZURE_IDENTITY,
 )
 from aws.connector import (
     AWSCredentials, load_aws_credentials_from_env, save_aws_credentials_to_env_file,
@@ -142,11 +144,11 @@ except ImportError:
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SHARED AZURE TENANT CONNECT/LIST WIDGETS
-# Used by both the post-login Setup gate and the Tenants page - extracted once
+# Used by both the post-login Setup gate and the Home page - extracted once
 # here instead of duplicated, since both need the exact same "enter Service
 # Principal creds -> test/connect -> ingest" flow.
 # ─────────────────────────────────────────────────────────────────────────────
-def _render_azure_connect_form(key_prefix: str):
+def _render_azure_connect_form(key_prefix: str, mode: str = "live"):
     """Renders the credential form + Test/Connect buttons and handles both
     actions. Returns True if a connect just succeeded (caller may want to
     st.rerun() immediately rather than wait for the natural rerun)."""
@@ -158,6 +160,7 @@ def _render_azure_connect_form(key_prefix: str):
             az_name   = st.text_input("Tenant / Subscription Name", value="Prod Azure Tenant", placeholder="e.g. Main Production Azure", key=f"{key_prefix}_az_name")
             az_tenant = st.text_input("Tenant ID", value=env_azure.tenant_id if env_azure else "", placeholder="f946c54c-e759-4985-bbe0-3e166cef8fa0", key=f"{key_prefix}_az_tenant")
             az_client = st.text_input("Client ID (Application ID)", value=env_azure.client_id if env_azure else "", placeholder="84644394-8136-4625-9d36-564fc9c0b5e7", key=f"{key_prefix}_az_client")
+            az_domain = st.text_input("Domain (optional)", value="", placeholder="contoso.onmicrosoft.com", key=f"{key_prefix}_az_domain")
         with col2:
             az_sub = st.text_input("Subscription ID", value=env_azure.subscription_id if env_azure else "", placeholder="e0b96fd6-b891-4a5f-80db-6cfed14e62ab", key=f"{key_prefix}_az_sub")
             az_sec = st.text_input("Client Secret", value=env_azure.client_secret if env_azure else "", type="password", key=f"{key_prefix}_az_sec")
@@ -188,12 +191,13 @@ def _render_azure_connect_form(key_prefix: str):
             save_credentials_to_env_file(new_az)
             with st.spinner("Testing connection & ingesting live inventory from Azure Tenant into Azure SQL DB..."):
                 tenant_db_id = upsert_tenant(
-                    provider="Azure",
+                    provider="Azure", mode=mode,
                     tenant_name=az_name or "Azure Tenant",
                     tenant_id=az_tenant,
                     subscription_id=az_sub,
                     client_id=az_client,
                     client_secret=az_sec,
+                    domain=az_domain or None,
                 )
                 res = run_ingestion_pipeline("Azure", creds=new_az, tenant_db_id=tenant_db_id)
                 if res["status"] == "SUCCESS":
@@ -206,17 +210,20 @@ def _render_azure_connect_form(key_prefix: str):
     return False
 
 
-def _render_azure_tenant_list(key_prefix: str):
-    """Renders the connected-tenants list with Activate/Delete buttons.
+def _render_azure_tenant_list(key_prefix: str, mode: str = "live"):
+    """Renders the connected-tenants list with Activate/Delete buttons - used
+    by the Production setup gate only (always mode="live", since that gate
+    never runs for Demo sessions). The Home page has its own richer table
+    with Dashboard/Manage actions instead of this simpler Activate/Delete one.
     Returns True if the active tenant just changed (Activate clicked)."""
-    azure_tenants = list_tenants("Azure")
+    azure_tenants = list_tenants("Azure", mode)
     if not azure_tenants:
         st.caption("No tenants connected yet. Fill in the form above and click **Connect, Save & Ingest**.")
         return False
 
     changed = False
     for t in azure_tenants:
-        t_count = resource_count("Azure", t.id)
+        t_count = resource_count("Azure", mode, t.id)
         cols = st.columns([3, 3, 2, 2, 2])
         cols[0].markdown(f"{'🟢' if t.is_active else '⚪'} **{t.tenant_name}**")
         cols[1].caption(f"Tenant: `{t.tenant_id[:8]}…` · Sub: `{t.subscription_id[:8]}…`")
@@ -226,10 +233,10 @@ def _render_azure_tenant_list(key_prefix: str):
             b1, b2 = st.columns(2)
             if not t.is_active:
                 if b1.button("Activate", key=f"{key_prefix}_activate_az_{t.id}", use_container_width=True):
-                    set_active_tenant("Azure", t.id)
+                    set_active_tenant("Azure", mode, t.id)
                     changed = True
             if b2.button("🗑️", key=f"{key_prefix}_delete_az_{t.id}", use_container_width=True, help="Remove this tenant and its synced data"):
-                delete_tenant("Azure", t.id)
+                delete_tenant("Azure", mode, t.id)
                 changed = True
     st.caption("🟢 = active tenant shown in Live Cloud API mode. Only one tenant is active at a time.")
     return changed
@@ -253,15 +260,15 @@ def _render_setup_gate():
         "Connect an Azure tenant to analyze real cloud spend, or skip for now to explore with Demo data."
     )
 
-    active = get_active_tenant("Azure")
-    if list_tenants("Azure"):
+    active = get_active_tenant("Azure", "live")
+    if list_tenants("Azure", "live"):
         st.caption("Select which connected tenant to use for this session, or add another below.")
-        if _render_azure_tenant_list("setup"):
+        if _render_azure_tenant_list("setup", "live"):
             st.rerun()
         st.divider()
 
     with st.expander("➕ Add a new tenant", expanded=(active is None)):
-        if _render_azure_connect_form("setup"):
+        if _render_azure_connect_form("setup", "live"):
             st.rerun()
 
     b1, b2 = st.columns([1, 3])
@@ -269,7 +276,7 @@ def _render_setup_gate():
         st.session_state["env_mode_widget"] = "Demo / Benchmark Mode"
         st.session_state["setup_complete"] = True
         st.rerun()
-    active_now = get_active_tenant("Azure")
+    active_now = get_active_tenant("Azure", "live")
     if b2.button(
         "Continue to Dashboard →", key="setup_go_live", type="primary", use_container_width=True,
         disabled=active_now is None,
@@ -308,7 +315,7 @@ def _render_top_header():
     if is_live_mode and not is_live_configured:
         st.warning(
             f"⚠️ **Live Mode Active — No Connection Configured for {selected_provider}:** "
-            f"Please go to the **🏢 Tenants** page to configure your {selected_provider} credentials, "
+            f"Please go to the **🏠 Home** page to configure your {selected_provider} credentials, "
             "or switch to **Demo / Benchmark Mode** in the sidebar to view sample data.",
             icon="⚠️"
         )
@@ -338,77 +345,16 @@ def _render_top_header():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# MANAGE — TENANTS
+# HOME — portfolio summary + tenant list (replaces the old standalone Tenants
+# page; per-tenant editing/credentials/sync/permissions now live in the
+# Manage Tenant dialog below instead of a flat connect-and-list page).
 # ═══════════════════════════════════════════════════════════════════════════════
-def page_tenants():
-    st.subheader(f"🏢 {selected_provider} Tenant Management")
-    st.caption(f"Connect, switch, or remove {selected_provider} accounts feeding this dashboard's live data.")
-    _finops_tag("Manage the FinOps Practice", "FinOps Practice Operations & Automation, Tools & Services")
-
-    if is_azure:
-        # ── AZURE CONNECTION SETTINGS ──────────────────────────────────────────
-        hdr_l, hdr_r = st.columns([4, 1])
-        with hdr_l:
-            st.markdown("#### 🗂️ Connected Tenants")
-        with hdr_r:
-            if st.button("➕ Add New Tenant", use_container_width=True, type="primary"):
-                st.session_state["_show_add_tenant_form"] = not st.session_state.get("_show_add_tenant_form", False)
-
-        if st.session_state.get("_show_add_tenant_form"):
-            with st.container(border=True):
-                st.markdown("### ☁️ Azure Service Principal Integration")
-                with st.expander("📖 Instructions: How to obtain & assign required Azure RBAC roles", expanded=False):
-                    st.markdown("""
-1. Open **Azure Cloud Shell** or your local Azure CLI.
-2. Create the Service Principal with **Reader** role on your primary subscription:
-   ```bash
-   az ad sp create-for-rbac --name "finops-optimizer-sp" --role "Reader" --scopes /subscriptions/<YOUR_SUBSCRIPTION_ID> --output json
-   ```
-3. Assign **Cost Management Reader** role to allow reading cost, reservation utilization, and savings plan data:
-   ```bash
-   az role assignment create --assignee <CLIENT_ID> --role "Cost Management Reader" --scope /subscriptions/<YOUR_SUBSCRIPTION_ID>
-   ```
-4. Copy the credentials into the form below:
-   - `appId` $\\rightarrow$ **Client ID**
-   - `password` $\\rightarrow$ **Client Secret**
-   - `tenant` $\\rightarrow$ **Tenant ID**
-   - `<YOUR_SUBSCRIPTION_ID>` $\\rightarrow$ **Subscription ID**
-""")
-                if _render_azure_connect_form("tenants_page"):
-                    st.session_state["_show_add_tenant_form"] = False
-                    st.rerun()
-
-        azure_tenants = list_tenants("Azure")
-        if not azure_tenants:
-            st.info("No tenants connected yet. Click **➕ Add New Tenant** above to connect your first Azure tenant.")
-        else:
-            with st.container(border=True):
-                if _render_azure_tenant_list("tenants_page"):
-                    st.rerun()
-
-            active_now = get_active_tenant("Azure")
-            if active_now is not None:
-                st.write("")
-                if st.button(f"→ View Dashboard for '{active_now.tenant_name}'", type="primary"):
-                    st.switch_page(analyze_page)
-
-        st.markdown("#### Required Azure RBAC Roles")
-        st.dataframe(pd.DataFrame(REQUIRED_ROLES)[["Role Name", "Scope", "Purpose"]], hide_index=True, width="stretch")
-
-    else:
-        # ── AWS CONNECTION SETTINGS ───────────────────────────────────────────
-        hdr_l, hdr_r = st.columns([4, 1])
-        with hdr_l:
-            st.markdown("#### 🗂️ Connected AWS Accounts")
-        with hdr_r:
-            if st.button("➕ Add New Account", use_container_width=True, type="primary"):
-                st.session_state["_show_add_tenant_form"] = not st.session_state.get("_show_add_tenant_form", False)
-
-        if st.session_state.get("_show_add_tenant_form"):
-            with st.container(border=True):
-                st.markdown("### 🟧 AWS IAM Credentials Integration")
-                with st.expander("📖 Instructions: How to obtain AWS IAM Access Keys", expanded=False):
-                    st.markdown("""
+def _render_aws_connect_form(key_prefix: str, mode: str = "live"):
+    """AWS's equivalent of _render_azure_connect_form - simpler, since AWS
+    live ingestion (EC2/RDS via boto3) isn't built yet; this only registers
+    the account in the tenant registry."""
+    with st.expander("📖 Instructions: How to obtain AWS IAM Access Keys", expanded=False):
+        st.markdown("""
 1. Sign in to the **AWS Management Console** and open the **IAM Console**.
 2. In the navigation pane, choose **Users**, then select your user or create a dedicated `FinOpsOptimizerUser`.
 3. Choose the **Security credentials** tab.
@@ -418,97 +364,250 @@ def page_tenants():
    - **Secret Access Key**
 6. Ensure the IAM user has `ec2:DescribeInstances`, `rds:DescribeDBInstances`, and `ce:GetCostAndUsage` policies attached.
 """)
-                env_aws = load_aws_credentials_from_env()
+    env_aws = load_aws_credentials_from_env()
+    with st.form(f"{key_prefix}_aws_form"):
+        col1, col2 = st.columns(2)
+        with col1:
+            aws_key = st.text_input("AWS Access Key ID", value=env_aws.access_key_id if env_aws else "", placeholder="AKIAXXXXXXXXXXXXXXXX")
+            aws_reg = st.text_input("Default AWS Region", value=env_aws.region if env_aws else "us-east-1", placeholder="us-east-1")
+        with col2:
+            aws_sec = st.text_input("AWS Secret Access Key", value=env_aws.secret_access_key if env_aws else "", type="password")
+        aws_sub_btn = st.form_submit_button("💾 Connect & Save AWS Credentials", type="primary")
 
-                with st.form("aws_form"):
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        aws_key = st.text_input("AWS Access Key ID", value=env_aws.access_key_id if env_aws else "", placeholder="AKIAXXXXXXXXXXXXXXXX")
-                        aws_reg = st.text_input("Default AWS Region", value=env_aws.region if env_aws else "us-east-1", placeholder="us-east-1")
-                    with col2:
-                        aws_sec = st.text_input("AWS Secret Access Key", value=env_aws.secret_access_key if env_aws else "", type="password")
-
-                    aws_sub_btn = st.form_submit_button("💾 Connect & Save AWS Credentials", type="primary")
-
-                if aws_sub_btn:
-                    new_aws = AWSCredentials(aws_key, aws_sec, aws_reg)
-                    if new_aws.is_complete:
-                        save_aws_credentials_to_env_file(new_aws)
-                        upsert_tenant(
-                            provider="AWS",
-                            tenant_name=f"AWS ({aws_reg})",
-                            tenant_id=aws_reg,
-                            subscription_id=aws_reg,
-                            client_id=aws_key,
-                            client_secret=aws_sec,
-                        )
-                        st.success("✅ AWS credentials saved to the tenant registry.")
-                        st.info("ℹ️ Live AWS inventory fetch (EC2/RDS via boto3) isn't implemented yet — this account is registered, but Live mode will show no resources until that's built.")
-                        st.session_state["_show_add_tenant_form"] = False
-                        st.rerun()
-                    else:
-                        st.error("Please fill in Access Key ID and Secret Access Key.")
-
-        aws_tenants = list_tenants("AWS")
-        if not aws_tenants:
-            st.info("No AWS accounts connected yet. Click **➕ Add New Account** above to connect one.")
+    if aws_sub_btn:
+        new_aws = AWSCredentials(aws_key, aws_sec, aws_reg)
+        if new_aws.is_complete:
+            save_aws_credentials_to_env_file(new_aws)
+            upsert_tenant(
+                provider="AWS", mode=mode, tenant_name=f"AWS ({aws_reg})",
+                tenant_id=aws_reg, subscription_id=aws_reg,
+                client_id=aws_key, client_secret=aws_sec,
+            )
+            st.success("✅ AWS credentials saved to the tenant registry.")
+            st.info("ℹ️ Live AWS inventory fetch (EC2/RDS via boto3) isn't implemented yet — this account is registered, but Live mode will show no resources until that's built.")
+            return True
         else:
-            with st.container(border=True):
-                for t in aws_tenants:
-                    cols = st.columns([4, 3, 2])
-                    cols[0].markdown(f"{'🟢' if t.is_active else '⚪'} **{t.tenant_name}**")
-                    cols[1].caption(f"Key: `{t.client_id[:6]}…` · Added {t.created_at[:10]}")
-                    with cols[2]:
-                        if not t.is_active and st.button("Activate", key=f"activate_aws_{t.id}", use_container_width=True):
-                            set_active_tenant("AWS", t.id)
-                            st.rerun()
+            st.error("Please fill in Access Key ID and Secret Access Key.")
+    return False
 
-            active_now = get_active_tenant("AWS")
-            if active_now is not None:
-                st.write("")
-                if st.button(f"→ View Dashboard for '{active_now.tenant_name}'", type="primary"):
-                    st.switch_page(analyze_page)
 
-        st.markdown("#### Required AWS IAM Permissions")
-        st.dataframe(pd.DataFrame(REQUIRED_AWS_POLICIES), hide_index=True, width="stretch")
+def _portfolio_summary_metrics(provider: str, mode: str) -> dict:
+    """Aggregates PAYG spend, savings identified (heuristic), and blended
+    SP+RI coverage % across every tenant in this (provider, mode) scope - the
+    Home page's portfolio cards. For "demo" there's just the one shared
+    dataset (tenant_id=None convention, same as everywhere else in this
+    app); for "live" it loops every registered tenant. Reuses the exact same
+    per-tenant analysis functions load_benchmark_data/load_live_data already
+    call, just summed across all of them instead of one."""
+    tenants = list_tenants(provider, mode)
+    tenant_ids = [t.id for t in tenants] if mode == "live" else [None]
+    if mode == "live" and not tenant_ids:
+        return {"total_payg_monthly": 0.0, "total_savings_monthly": 0.0, "coverage_pct": 0.0}
 
-    # ── 24-HOUR EXTRACTION & INGESTION PIPELINE ────────────────────────────
-    st.divider()
-    st.markdown("### 🔄 24-Hour Automated Extraction & Ingestion Pipeline")
-    st.caption("Architecture Data Flow: Cloud APIs ──► Azure Function Cron Sync ──► Star Schema DB ──► Streamlit UI")
+    sp_eligible_types = (
+        (COMPUTE_SP_ELIGIBLE_TYPES | DATABASE_SP_ELIGIBLE_TYPES) if provider == "Azure"
+        else (AWS_COMPUTE_SP_TYPES | AWS_DATABASE_SP_TYPES)
+    )
+    total_payg_hr = 0.0
+    total_committed_hr = 0.0
+    total_savings_mo = 0.0
+    for tid in tenant_ids:
+        inv = get_compute_inventory(provider=provider, mode=mode, tenant_id=tid)
+        if inv.empty:
+            continue
+        running = inv[inv["Resource State"] == "Running"]
+        total_payg_hr += float(running["PAYG Hourly Cost USD"].sum())
 
-    sync_info = get_latest_sync_log(selected_provider)
+        sp_df = get_existing_savings_plans(provider=provider, mode=mode, tenant_id=tid)
+        ri_df = get_existing_reservations(provider=provider, mode=mode, tenant_id=tid)
+        total_committed_hr += float(sp_df["hourly_usd_commitment"].sum()) if not sp_df.empty else 0.0
+        total_committed_hr += float((ri_df["hourly_usd_commitment"] * ri_df["reserved_qty"]).sum()) if not ri_df.empty else 0.0
 
-    with st.container(border=True):
-        sc1, sc2, sc3 = st.columns(3)
-        sc1.metric("Latest Cron Sync Time", sync_info["synced_at"])
-        sc2.metric("Execution Source", sync_info["source"])
-        sc3.metric("Pipeline Status", sync_info["status"])
+        wf = run_waterfall(inv, ri_df, sp_df, simulate_days=simulate_days)
+        sp_res = savings_plan_analysis(inv, sp_df, safety_buffer=safety_buffer, eligible_types=list(sp_eligible_types))
+        ri_res = reservation_analysis(inv, ri_df)
+        recs = generate_recommendations(sp_res, ri_res, wf, safety_buffer=safety_buffer)
+        total_savings_mo += sum(r.get("financial_impact_hr", 0.0) for r in recs) * 730
 
-        st.caption(
-            f"Per Capstone Architecture, an **Azure Function (Timer Trigger)** executes automatically every 24 hours (00:00 UTC) "
-            f"to extract resource metadata from cloud APIs, normalize it into FOCUS format, and ingest it into the Star Schema database."
-        )
+    coverage_pct = (total_committed_hr / total_payg_hr * 100) if total_payg_hr > 0 else 0.0
+    return {
+        "total_payg_monthly": total_payg_hr * 730,
+        "total_savings_monthly": total_savings_mo,
+        "coverage_pct": coverage_pct,
+    }
 
-        manual_sync_disabled = active_tenant is None
-        if st.button(
-            f"⚡ Run Manual Data Ingestion Sync Now ({selected_provider})",
-            type="secondary", disabled=manual_sync_disabled,
-            help=None if active_tenant else "Connect a tenant above first.",
-        ):
-            with st.spinner(f"Executing ingestion pipeline for tenant '{active_tenant.tenant_name}'..."):
-                sync_creds = (
-                    AzureCredentials(active_tenant.tenant_id, active_tenant.subscription_id,
-                                      active_tenant.client_id, active_tenant.client_secret)
-                    if is_azure else None
+
+@st.dialog("Manage tenant", width="large")
+def _manage_tenant_dialog(t, mode: str):
+    """Per-tenant editing: name (both modes), Service Principal credentials
+    and subscriptions/permission-checks (Production only - Demo tenants have
+    no real Azure behind them), sync, and delete. Demo shows every control
+    but disables everything except the name edit, matching the confirmed
+    "same UI, different live-ness" design."""
+    is_demo = (mode == "demo")
+    st.caption(f"{selected_provider} · {'Demo' if is_demo else 'Production'}")
+
+    name_col, save_col = st.columns([4, 1])
+    new_name = name_col.text_input("Tenant name", value=t.tenant_name, key=f"mgmt_name_{t.id}")
+    if save_col.button("Save", key=f"mgmt_save_name_{t.id}", use_container_width=True):
+        update_tenant_name(selected_provider, mode, t.id, new_name)
+        st.success("Tenant name updated.")
+        st.rerun()
+
+    if is_azure:
+        st.markdown("##### Service principal credentials")
+        if is_demo:
+            st.caption("Not applicable - a demo tenant has no real Service Principal behind it.")
+        else:
+            with st.form(f"mgmt_creds_{t.id}"):
+                c1, c2 = st.columns(2)
+                with c1:
+                    new_tenant_id = st.text_input("Tenant ID", value=t.tenant_id)
+                    new_domain = st.text_input("Domain (optional)", value=t.domain or "")
+                with c2:
+                    new_client_id = st.text_input("Application ID", value=t.client_id)
+                    new_secret = st.text_input("Client secret", value="", type="password",
+                                                placeholder="Leave blank to keep the current secret")
+                creds_submitted = st.form_submit_button("Save credentials", type="primary")
+            if creds_submitted:
+                secret_to_save = new_secret if new_secret else get_tenant_credentials(t)
+                upsert_tenant(
+                    provider=selected_provider, mode=mode, tenant_name=new_name or t.tenant_name,
+                    tenant_id=new_tenant_id, subscription_id=t.subscription_id,
+                    client_id=new_client_id, client_secret=secret_to_save, domain=new_domain or None,
                 )
-                res = run_ingestion_pipeline(selected_provider, creds=sync_creds, tenant_db_id=active_tenant.id)
-            if res["status"] == "SUCCESS":
-                st.cache_data.clear()
-                st.success(f"✅ {res['message']}")
+                st.success("Credentials updated.")
                 st.rerun()
+
+        st.divider()
+        st.markdown("##### Subscriptions")
+        subs = list_subscriptions(selected_provider, mode, t.id)
+        if st.button("🔁 Sync subscriptions", disabled=is_demo,
+                      help="Only available for Production tenants." if is_demo else None):
+            with st.spinner("Enumerating subscriptions and checking permissions..."):
+                creds = AzureCredentials(t.tenant_id, t.subscription_id, t.client_id, get_tenant_credentials(t))
+                live_subs = list_accessible_subscriptions(creds)
+                if not live_subs:
+                    st.error("Could not enumerate subscriptions - check the credentials above.")
+                for s in live_subs:
+                    role_check = check_role_assignments(creds, s["subscription_id"])
+                    upsert_subscription(
+                        provider=selected_provider, mode=mode, tenant_db_id=t.id,
+                        subscription_id=s["subscription_id"], subscription_name=s["display_name"],
+                        permission_status="ready" if role_check["ready"] else "missing_role",
+                        missing_role=", ".join(role_check["missing_roles"]) if role_check["missing_roles"] else None,
+                    )
+            st.rerun()
+
+        if subs:
+            for s in subs:
+                sc = st.columns([3, 3, 2])
+                sc[0].markdown(f"**{s.subscription_name or s.subscription_id}**")
+                sc[1].caption(s.subscription_id)
+                if s.permission_status == "ready":
+                    sc[2].success("Ready", icon="✅")
+                elif s.permission_status == "missing_role":
+                    sc[2].warning(f"Missing {s.missing_role}", icon="⚠️")
+                else:
+                    sc[2].caption("Not checked yet")
+        else:
+            st.caption("No subscriptions recorded yet.")
+
+    st.divider()
+    sync_col, last_col = st.columns([2, 3])
+    last_col.caption(f"Last synced: {t.last_synced_at[:16] if t.last_synced_at else 'Never'}")
+    if sync_col.button("⚡ Run sync now", disabled=is_demo,
+                        help="Only available for Production tenants." if is_demo else None):
+        with st.spinner(f"Running ingestion for '{t.tenant_name}'..."):
+            sync_creds = (
+                AzureCredentials(t.tenant_id, t.subscription_id, t.client_id, get_tenant_credentials(t))
+                if is_azure else None
+            )
+            res = run_ingestion_pipeline(selected_provider, creds=sync_creds, tenant_db_id=t.id)
+        if res["status"] == "SUCCESS":
+            touch_last_synced(selected_provider, mode, t.id)
+            st.cache_data.clear()
+            st.success(res["message"])
+            st.rerun()
+        else:
+            st.error(res["message"])
+
+    st.divider()
+    if st.button("🗑️ Delete tenant", disabled=is_demo,
+                 help="Only available for Production tenants." if is_demo else None):
+        delete_tenant(selected_provider, mode, t.id)
+        st.rerun()
+
+
+def page_home():
+    st.markdown("## 🏠 Home")
+    st.caption(f"Welcome to Multi-Cloud FinOps Optimization System, hello {current_user['display_name'] or current_user['username']}!")
+    _finops_tag("Manage the FinOps Practice", "FinOps Practice Operations & Automation, Tools & Services")
+
+    metrics = _portfolio_summary_metrics(selected_provider, tenant_mode)
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Total monthly spend", fmt(metrics["total_payg_monthly"], 2))
+    m2.metric("Savings identified", fmt(metrics["total_savings_monthly"], 2) + "/mo")
+    m3.metric("SP + RI coverage", f"{metrics['coverage_pct']:.0f}%")
+
+    st.divider()
+
+    hdr_l, hdr_r = st.columns([4, 1])
+    with hdr_l:
+        st.markdown(f"#### 🗂️ {selected_provider} Tenants")
+    with hdr_r:
+        add_disabled = (tenant_mode == "demo")
+        if st.button("➕ Add a new tenant", use_container_width=True, type="primary",
+                     disabled=add_disabled,
+                     help="Only available in Production Mode." if add_disabled else None):
+            st.session_state["_show_add_tenant_form"] = not st.session_state.get("_show_add_tenant_form", False)
+
+    if st.session_state.get("_show_add_tenant_form") and tenant_mode == "live":
+        with st.container(border=True):
+            if is_azure:
+                st.markdown("### ☁️ Azure Service Principal Integration")
+                if _render_azure_connect_form("home_page", tenant_mode):
+                    st.session_state["_show_add_tenant_form"] = False
+                    st.rerun()
             else:
-                st.error(f"❌ {res['message']}")
+                st.markdown("### 🟧 AWS IAM Credentials Integration")
+                if _render_aws_connect_form("home_page", tenant_mode):
+                    st.session_state["_show_add_tenant_form"] = False
+                    st.rerun()
+
+    tenants = list_tenants(selected_provider, tenant_mode)
+    if not tenants:
+        st.info(
+            f"No {selected_provider} tenants connected yet. Click **➕ Add a new tenant** above."
+            if tenant_mode == "live" else "No demo tenant seeded yet."
+        )
+        return
+
+    header_cols = st.columns([3, 1.3, 2, 1.3, 1.8, 2.2])
+    for c, label in zip(header_cols, ["Tenant name", "Status", "Authentication", "Subscriptions", "Last synced", "Actions"]):
+        c.caption(f"**{label}**")
+    for t in tenants:
+        sub_count = len(list_subscriptions(selected_provider, tenant_mode, t.id)) if is_azure else None
+        cols = st.columns([3, 1.3, 2, 1.3, 1.8, 2.2])
+        cols[0].markdown(f"{'🟢' if t.is_active else '⚪'} {t.tenant_name}")
+        cols[1].caption("Active" if t.is_active else "Inactive")
+        cols[2].caption("Service principal" if is_azure else "IAM access key")
+        cols[3].caption(str(sub_count) if sub_count is not None else "—")
+        cols[4].caption(t.last_synced_at[:16] if t.last_synced_at else "Never")
+        with cols[5]:
+            b1, b2 = st.columns(2)
+            if b1.button("Dashboard", key=f"home_dash_{t.id}", use_container_width=True):
+                set_active_tenant(selected_provider, tenant_mode, t.id)
+                st.switch_page(analyze_page)
+            if b2.button("Manage", key=f"home_manage_{t.id}", use_container_width=True):
+                _manage_tenant_dialog(t, tenant_mode)
+
+    if is_azure:
+        with st.expander("Required Azure RBAC roles", expanded=False):
+            st.dataframe(pd.DataFrame(REQUIRED_ROLES)[["Role Name", "Scope", "Purpose"]], hide_index=True, width="stretch")
+    else:
+        with st.expander("Required AWS IAM permissions", expanded=False):
+            st.dataframe(pd.DataFrame(REQUIRED_AWS_POLICIES), hide_index=True, width="stretch")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -843,7 +942,7 @@ def _render_sp_pool_economics(pool_label: str, pool_df: pd.DataFrame, existing_c
     elif not is_azure:
         st.caption("ℹ️ Illustrative only — real-time AWS Savings Plans pricing isn't wired up yet.")
     else:
-        st.caption("ℹ️ Illustrative only — no cached commitment pricing yet for this pool's SKUs; re-run a sync on the Tenants page.")
+        st.caption("ℹ️ Illustrative only — no cached commitment pricing yet for this pool's SKUs; re-run a sync from the tenant's Manage dialog on the Home page.")
 
 
 def _render_savings_plan_tab():
@@ -1074,7 +1173,7 @@ def _render_ri_coverage_tab():
         if not has_pricing_cols:
             st.caption(
                 "ℹ️ Purchase-cost columns aren't shown - "
-                + ("AWS Reserved Instance pricing isn't wired up yet." if not is_azure else "no cached pricing yet for these SKUs; re-run a sync on the Tenants page.")
+                + ("AWS Reserved Instance pricing isn't wired up yet." if not is_azure else "no cached pricing yet for these SKUs; re-run a sync from the tenant's Manage dialog on the Home page.")
             )
     else:
         st.caption("No per-instance-reservable resources in inventory yet.")
@@ -1359,12 +1458,12 @@ def page_analyze():
 # NAVIGATION — small left sidebar rail: Manage (Tenants, User Management) and
 # a single Workspace entry whose content is the top-tabbed Analyze view.
 # ─────────────────────────────────────────────────────────────────────────────
-tenants_page = st.Page(page_tenants, title="Tenants", icon="🏢")
+home_page    = st.Page(page_home,    title="Home",           icon="🏠", default=True)
 users_page   = st.Page(page_users,   title="User Management", icon="👥")
-analyze_page = st.Page(page_analyze, title="Analyze", icon="📊", default=True)
+analyze_page = st.Page(page_analyze, title="Analyze",         icon="📊")
 
 pg = st.navigation({
-    "🏢 Manage":    [tenants_page, users_page],
+    "🏢 Manage":    [home_page, users_page],
     "📊 Workspace": [analyze_page],
 }, position="sidebar")
 
@@ -1458,10 +1557,16 @@ safety_buffer_pct = st.session_state.get("sp_safety_buffer_widget", int(DEFAULT_
 safety_buffer = safety_buffer_pct / 100.0
 
 
+# Tenants now exist in both scopes (2026-08) - Demo's Home page gets a real
+# seeded tenant entry too, not just Production's real connections. Every
+# db.tenants call needs to know which one explicitly, same discipline as the
+# rest of the demo/live split.
+tenant_mode = "live" if env_mode == "Live Cloud API" else "demo"
+
 # Check Live Credentials — the connected-tenant registry in SQL DB is the single
 # source of truth for "is live configured", not the .env file (which only exists
 # to pre-fill the connection form / support the cron function outside Streamlit).
-active_tenant = get_active_tenant(selected_provider)
+active_tenant = get_active_tenant(selected_provider, tenant_mode)
 is_live_configured = active_tenant is not None
 is_live_mode = (env_mode == "Live Cloud API")
 
@@ -1509,8 +1614,8 @@ if is_live_mode and not is_live_configured:
     recs = [{
         "type": "ACTION_REQUIRED", "severity": "HIGH", "icon": "⚠️", "category": "Live Connection",
         "title": f"No Live {selected_provider} Connection Configured",
-        "detail": f"You are in **Live Cloud API** mode, but no tenant is connected for {selected_provider}. Please configure your API access on the **🏢 Tenants** page.",
-        "action": "Connect a tenant on the Tenants page.",
+        "detail": f"You are in **Live Cloud API** mode, but no tenant is connected for {selected_provider}. Please configure your API access on the **🏠 Home** page.",
+        "action": "Connect a tenant on the Home page.",
         "financial_impact_hr": 0.0, "items": [],
     }]
 elif is_live_mode and is_live_configured:
@@ -1522,8 +1627,8 @@ elif is_live_mode and is_live_configured:
         recs = [{
             "type": "ACTION_REQUIRED", "severity": "MEDIUM", "icon": "ℹ️", "category": "Live Connection",
             "title": f"No Resources Synced Yet for '{active_tenant.tenant_name}'",
-            "detail": "This tenant is connected, but no live inventory has been ingested yet. Go to the **🏢 Tenants** page and run a sync.",
-            "action": "Run a manual sync on the Tenants page.",
+            "detail": "This tenant is connected, but no live inventory has been ingested yet. Go to the **🏠 Home** page and run a sync from its Manage dialog.",
+            "action": "Run a manual sync from the tenant's Manage dialog on the Home page.",
             "financial_impact_hr": 0.0, "items": [],
         }]
 else:

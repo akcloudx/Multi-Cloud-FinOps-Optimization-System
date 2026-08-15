@@ -1,7 +1,9 @@
 """
-ui/auth_page.py — Login gate for the dashboard, with the Demo/Production
-mode choice made *before* login (not after, like the old post-login setup
-gate) - so the login screen itself branches into two flows:
+ui/auth_page.py — Login gate for the dashboard. A single screen: a Demo/
+Production mode toggle up top, with the matching form directly beneath it -
+switching the toggle swaps the form instantly (no separate "choose your
+path" screen/step, no Back button - replaced 2026-08 after user feedback
+that the old two-screen click-through read as clunky).
 
   Demo Mode:       pre-filled shared demo credentials, sign in immediately.
   Production Mode: first run prompts to create an account (bootstrap), then
@@ -23,11 +25,11 @@ from ui.styling import inject_global_css
 
 
 def require_login() -> dict:
-    """Renders the login screen (mode choice -> demo login or production
-    bootstrap/login) and halts the script with st.stop() until someone is
-    authenticated. Returns the session's user dict once authenticated. Call
-    once, right after st.set_page_config() and database init, before
-    anything else renders."""
+    """Renders the login screen (a Demo/Production mode toggle with the
+    matching form directly beneath it) and halts the script with st.stop()
+    until someone is authenticated. Returns the session's user dict once
+    authenticated. Call once, right after st.set_page_config() and database
+    init, before anything else renders."""
     if st.session_state.get("auth_user"):
         return st.session_state["auth_user"]
 
@@ -38,51 +40,36 @@ def require_login() -> dict:
         st.markdown(
             '<div style="text-align:center">'
             '<div class="finops-hero-badge">⚡</div>'
-            "<h2 style=\"margin-bottom:0\">FinOps Engine</h2>"
+            "<h2 style=\"margin-bottom:0\">Multi-Cloud FinOps Optimization System</h2>"
             "</div>",
             unsafe_allow_html=True,
         )
         st.caption(
-            '<div style="text-align:center">Cloud Cost &amp; Commitment Optimizer</div>',
+            '<div style="text-align:center">Track spend, savings plans, and reservations across Azure and AWS</div>',
             unsafe_allow_html=True,
         )
         st.write("")
 
-        mode_choice = st.session_state.get("_login_mode_choice")
-        if mode_choice is None:
-            _render_mode_choice()
-        elif mode_choice == "demo":
-            _render_demo_login()
-        else:
+        st.caption("Mode")
+        mode = st.segmented_control(
+            "Mode", options=["Demo", "Production"], default="Demo",
+            key="_login_mode_widget", label_visibility="collapsed",
+        )
+        if mode is None:
+            # segmented_control allows deselecting the active pill (clicking
+            # it again) - fall back to Demo rather than showing no form at all.
+            mode = "Demo"
+        st.write("")
+
+        if mode == "Production":
             _render_production_login()
+        else:
+            _render_demo_login()
     st.stop()
-
-
-def _render_mode_choice():
-    st.caption("Choose how you'd like to start.")
-    c1, c2 = st.columns(2)
-    with c1:
-        with st.container(border=True):
-            st.markdown("#### 📊 Demo Mode")
-            st.caption("Explore instantly with a shared demo account and pre-loaded sample data - no setup needed.")
-            if st.button("Continue with Demo", key="login_pick_demo", use_container_width=True, type="primary"):
-                st.session_state["_login_mode_choice"] = "demo"
-                st.rerun()
-    with c2:
-        with st.container(border=True):
-            st.markdown("#### 🏭 Production Mode")
-            st.caption("Create your own account (or sign in) and connect a real cloud tenant.")
-            if st.button("Continue with Production", key="login_pick_prod", use_container_width=True, type="primary"):
-                st.session_state["_login_mode_choice"] = "production"
-                st.rerun()
 
 
 def _render_demo_login():
     ensure_demo_user()
-
-    if st.button("← Back", key="login_back_demo"):
-        del st.session_state["_login_mode_choice"]
-        st.rerun()
 
     st.subheader("📊 Demo Mode")
     st.info(f"Pre-filled below - **username `{DEMO_USERNAME}`** / **password `{DEMO_PASSWORD}`**. Just click Sign In.")
@@ -105,10 +92,6 @@ def _render_demo_login():
 
 
 def _render_production_login():
-    if st.button("← Back", key="login_back_prod"):
-        del st.session_state["_login_mode_choice"]
-        st.rerun()
-
     try:
         existing_prod_users = production_user_count()
     except Exception as e:
@@ -172,12 +155,12 @@ def _render_production_login_form():
 
 def _clear_session():
     """Drops every piece of session state tied to being signed in, sending
-    the next rerun back to the mode-choice screen. Shared by both the
-    explicit Log out button and the Switch Mode button below - switching
-    between Demo and Live is a full sign-out, not an in-session toggle (see
-    render_switch_mode_control for why)."""
+    the next rerun back to the login screen (Mode toggle reset to its Demo
+    default). Shared by both the explicit Log out button and the Switch Mode
+    button below - switching between Demo and Live is a full sign-out, not
+    an in-session toggle (see render_switch_mode_control for why)."""
     st.session_state.pop("auth_user", None)
-    st.session_state.pop("_login_mode_choice", None)
+    st.session_state.pop("_login_mode_widget", None)
     st.session_state.pop("setup_complete", None)
     st.session_state.pop("env_mode_widget", None)
 
@@ -195,7 +178,7 @@ def render_logout_control():
 
 def render_switch_mode_control():
     """Read-only display of the current Demo/Live mode, plus a button that
-    signs out and returns to the mode-choice screen to switch.
+    signs out and returns to the login screen (its Mode toggle) to switch.
 
     Deliberately NOT a free in-session toggle (that's how this worked before
     2026-08, and how the sidebar "Data Source Environment" radio used to
