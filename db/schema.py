@@ -68,28 +68,74 @@ def get_engine(provider: str = "Azure", mode: str = "demo"):
         return _mode_engines[cache_key]
 
     db_url = os.getenv("DATABASE_URL")
+    is_azure_env = bool(os.getenv("WEBSITE_SITE_NAME") or os.getenv("FUNCTIONS_WORKER_RUNTIME"))
+
+    # Managed Identity path (preferred, tried 2026-08) - genuinely
+    # passwordless: no secret exists anywhere for this app to leak, unlike
+    # DATABASE_URL below. Used when AZURE_SQL_SERVER/AZURE_SQL_DATABASE are
+    # set - these are plain identifiers, not credentials, safe to sit in App
+    # Settings in the clear. Authenticates via this App Service/Function
+    # App's own System-Assigned Managed Identity against Microsoft Entra -
+    # requires that identity to be granted DB access first (CREATE USER ...
+    # FROM EXTERNAL PROVIDER + role membership, one-time setup - see
+    # azure_deploy/deploy_all_resources.ps1). ActiveDirectoryMsi (not
+    # ActiveDirectoryDefault) is used deliberately: mssql-python's own docs
+    # note ActiveDirectoryDefault walks its whole credential-provider chain
+    # before finding the managed identity, which is unnecessary latency here
+    # since Managed Identity is the ONLY credential source in this
+    # environment - specifying it directly skips the chain-walk.
+    #
+    # Uses the mssql-python driver (mssql+mssqlpython:// dialect) rather than
+    # pyodbc specifically because this app's real deployment target is
+    # Oryx-built native Linux App Service/Function App (NOT a custom
+    # container - confirmed via deploy_all_resources.ps1's `az webapp create
+    # --runtime "PYTHON:3.12"`), which does not ship the Microsoft ODBC
+    # Driver (msodbcsql18) pyodbc needs, and the Function App's Consumption
+    # (Y1) plan has no shell access to install it. mssql-python bundles its
+    # own driver as a pip dependency (mssql-python-odbc) - no OS-level
+    # install needed on either.
+    #
+    # KNOWN RISK, disclosed not hidden: SQLAlchemy's mssql-python dialect
+    # requires SQLAlchemy 2.1.0b2+, a PRE-RELEASE - Microsoft's own docs
+    # explicitly say not to use it "for production systems with strict
+    # stability requirements." Tried here anyway per an explicit choice to
+    # accept that risk (a `pre-managed-identity-backup` git branch holds the
+    # last known-good password-based state - see db/schema.py's DATABASE_URL
+    # path below - if this needs to be reverted).
+    if not db_url and is_azure_env:
+        sql_server = os.getenv("AZURE_SQL_SERVER")
+        sql_database = os.getenv("AZURE_SQL_DATABASE")
+        if sql_server and sql_database:
+            db_url = (
+                f"mssql+mssqlpython://@{sql_server}/{sql_database}"
+                "?authentication=ActiveDirectoryMsi&encrypt=yes"
+            )
+
     # In Azure production environment (App Service / Function App), a real
-    # connection string MUST come from the DATABASE_URL App Setting - this
-    # used to silently fall back to a hardcoded Azure SQL admin
-    # username/password (a real credential, committed to source control) if
-    # the setting was missing. Found live 2026-08 (also duplicated in
+    # connection MUST come from one of the two paths above - this used to
+    # silently fall back to a hardcoded Azure SQL admin username/password (a
+    # real credential, committed to source control) if DATABASE_URL was
+    # missing. Found live 2026-08 (also duplicated in
     # azure_deploy/seed_azure_sql.py and deploy_all_resources.ps1, since
     # fixed too) - failing loudly here instead is deliberate: silently
     # falling through to local SQLite in an Azure environment would look
     # like it worked while actually writing to a non-persistent local file,
     # which is worse than a clear startup error.
-    if not db_url and (os.getenv("WEBSITE_SITE_NAME") or os.getenv("FUNCTIONS_WORKER_RUNTIME")):
+    if not db_url and is_azure_env:
         raise RuntimeError(
-            "DATABASE_URL is not set. This app is running in an Azure App Service / Function App "
-            "(detected via WEBSITE_SITE_NAME/FUNCTIONS_WORKER_RUNTIME) but has no database connection "
-            "string configured. Set DATABASE_URL as an App Setting, e.g. "
-            "'mssql+pymssql://<user>:<password>@<server>.database.windows.net:1433/<database>' "
-            "(Azure Portal > App Service/Function App > Configuration > Application settings). "
+            "No database connection configured. This app is running in an Azure App Service / "
+            "Function App (detected via WEBSITE_SITE_NAME/FUNCTIONS_WORKER_RUNTIME) but has neither "
+            "DATABASE_URL (password-based) nor AZURE_SQL_SERVER + AZURE_SQL_DATABASE (Managed Identity, "
+            "passwordless, preferred) set. For Managed Identity: set AZURE_SQL_SERVER="
+            "'<server>.database.windows.net' and AZURE_SQL_DATABASE='<database>' as App Settings, after "
+            "enabling this app's System-Assigned Managed Identity and granting it database access - see "
+            "azure_deploy/deploy_all_resources.ps1. For password auth instead: set DATABASE_URL, e.g. "
+            "'mssql+pymssql://<user>:<password>@<server>.database.windows.net:1433/<database>'. "
             "Never hardcode credentials in source code."
         )
 
     if db_url and "mssql" in db_url:
-        if "pymssql" not in db_url and "pyodbc" not in db_url:
+        if "mssqlpython" not in db_url and "pymssql" not in db_url and "pyodbc" not in db_url:
             db_url = db_url.replace("mssql://", "mssql+pymssql://")
         try:
             if provider_key not in _base_mssql_engines:

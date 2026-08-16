@@ -11,12 +11,22 @@
 #    subscription budget. 60 CPU-min/day cap, no "Always On" (idles out after ~20 min, cold-starts on
 #    next request) - fine for intermittent demo/test use, not sustained traffic. See the inline note
 #    at the plan-creation step for the one open risk (Oryx remote build behavior not yet verified on F1).
+#    Passwordless DB auth: both apps connect to Azure SQL via System-Assigned Managed Identity
+#    (mssql-python driver) - no password/connection-string secret is ever stored anywhere. Step 7
+#    below prints a one-time manual T-SQL grant you run in the Portal Query editor to finish setup.
 
 # SqlAdminPassword has no default on purpose - it used to be a hardcoded
 # real password here (found and fixed 2026-08, alongside the same
 # credential duplicated in db/schema.py and azure_deploy/seed_azure_sql.py).
 # Pass it explicitly, e.g.:
 #   .\deploy_all_resources.ps1 -SqlAdminPassword (Read-Host -AsSecureString "SQL admin password" | ConvertFrom-SecureString -AsPlainText)
+#
+# NOTE 2026-08: SqlAdminUser/SqlAdminPassword are ONLY used to create the SQL
+# Server's own break-glass admin login (Azure SQL requires some admin
+# credential at server-creation time) - the app itself no longer uses them
+# at all. Both the Web App and Function App now connect via their own
+# System-Assigned Managed Identity (passwordless, no secret anywhere) - see
+# db/schema.py's get_engine() and the "Managed Identity setup" step below.
 param (
     [string]$ResourceGroupName = "rg-finops-optimizer",
     [string]$Location          = "westus3",
@@ -58,19 +68,19 @@ Write-Host "====================================================================
 Write-Host ""
 
 # 1. Resource Group
-Write-Host "  [1/6] Resource Group ..." -ForegroundColor Yellow
+Write-Host "  [1/7] Resource Group ..." -ForegroundColor Yellow
 az group create --name $ResourceGroupName --location $Location -o none
 if ($LASTEXITCODE -ne 0) { Fail "Creating resource group" }
 Write-Host "        [OK] Done." -ForegroundColor Green
 
 # 2. Resource Providers
-Write-Host "  [2/6] Registering resource providers ..." -ForegroundColor Yellow
+Write-Host "  [2/7] Registering resource providers ..." -ForegroundColor Yellow
 az provider register --namespace Microsoft.Sql --wait -o none
 az provider register --namespace Microsoft.Web --wait -o none
 Write-Host "        [OK] Done." -ForegroundColor Green
 
 # 3. Storage Account
-Write-Host "  [3/6] Storage Account: $StorageAccountName ..." -ForegroundColor Yellow
+Write-Host "  [3/7] Storage Account: $StorageAccountName ..." -ForegroundColor Yellow
 $stExists = az storage account show --name $StorageAccountName --resource-group $ResourceGroupName --query name -o tsv 2>$null
 if (-not $stExists) {
     az storage account create --name $StorageAccountName --location $Location --resource-group $ResourceGroupName --sku Standard_LRS -o none
@@ -81,7 +91,7 @@ if (-not $stExists) {
 }
 
 # 4. Azure SQL Server and Serverless Database
-Write-Host "  [4/6] Azure SQL Server and Serverless Database ..." -ForegroundColor Yellow
+Write-Host "  [4/7] Azure SQL Server and Serverless Database ..." -ForegroundColor Yellow
 $sqlExists = az sql server show --name $SqlServerName --resource-group $ResourceGroupName --query name -o tsv 2>$null
 if (-not $sqlExists) {
     Write-Host "        Creating SQL Server '$SqlServerName'..." -ForegroundColor Yellow
@@ -132,21 +142,29 @@ if (-not $dbExists) {
     Write-Host "        [OK] SQL Server and Database already exist - skipped." -ForegroundColor DarkGreen
 }
 
-$SqlConnectionString = "mssql+pyodbc://$($SqlAdminUser):$($SqlAdminPassword)@$($SqlServerName).database.windows.net/$($SqlDbName)?driver=ODBC+Driver+18+for+SQL+Server"
+$SqlServerFqdn = "$SqlServerName.database.windows.net"
 
 # 5. Azure Function App
-Write-Host "  [5/6] Azure Function App: $FunctionAppName ..." -ForegroundColor Yellow
+Write-Host "  [5/7] Azure Function App: $FunctionAppName ..." -ForegroundColor Yellow
 $funcExists = az functionapp show --name $FunctionAppName --resource-group $ResourceGroupName --query name -o tsv 2>$null
 if (-not $funcExists) {
     az functionapp create --resource-group $ResourceGroupName --consumption-plan-location $Location --runtime python --runtime-version 3.12 --functions-version 4 --name $FunctionAppName --storage-account $StorageAccountName --os-type Linux -o none
     if ($LASTEXITCODE -ne 0) { Fail "Creating Function App '$FunctionAppName'" }
     Start-Sleep -Seconds 5
-    
-    az functionapp config appsettings set --resource-group $ResourceGroupName --name $FunctionAppName --settings DATABASE_URL="$SqlConnectionString" -o none
     Write-Host "        [OK] Provisioned." -ForegroundColor Green
 } else {
     Write-Host "        [OK] Already exists - skipped." -ForegroundColor DarkGreen
 }
+
+# Managed Identity (passwordless) - no DATABASE_URL / secret app setting at
+# all. AZURE_SQL_SERVER/AZURE_SQL_DATABASE are plain identifiers, not
+# credentials - db/schema.py's get_engine() uses them + this identity to
+# authenticate to Azure SQL via Microsoft Entra, no password anywhere. The
+# identity still needs to be GRANTED database access - see step 7 below,
+# which runs after both apps' identities exist.
+Write-Host "        Enabling Managed Identity ..." -ForegroundColor Yellow
+az functionapp identity assign --resource-group $ResourceGroupName --name $FunctionAppName -o none
+az functionapp config appsettings set --resource-group $ResourceGroupName --name $FunctionAppName --settings AZURE_SQL_SERVER="$SqlServerFqdn" AZURE_SQL_DATABASE="$SqlDbName" -o none
 
 # Fix PowerShell 5.1 Join-Path syntax: use nested 2-argument Join-Path calls
 $parentPath   = Join-Path $PSScriptRoot ".."
@@ -167,7 +185,7 @@ if (Test-Path $funcCodePath) {
 }
 
 # 6. App Service Plan + Web App (Smart Regional Quota Fallback)
-Write-Host "  [6/6] App Service Plan + Web App: $WebAppName ..." -ForegroundColor Yellow
+Write-Host "  [6/7] App Service Plan + Web App: $WebAppName ..." -ForegroundColor Yellow
 $planExists = az appservice plan show --name $AppPlanName --resource-group $ResourceGroupName --query name -o tsv 2>$null
 
 if (-not $planExists) {
@@ -211,10 +229,14 @@ if (-not $appExists) {
     Start-Sleep -Seconds 5
 }
 
-# Configure startup command and connection string
+# Configure startup command and app settings (Managed Identity - see the
+# Function App section above for why there's no DATABASE_URL/password here)
 az webapp config set --resource-group $ResourceGroupName --name $WebAppName --startup-file "startup.sh" -o none
 
-az webapp config appsettings set --resource-group $ResourceGroupName --name $WebAppName --settings SCM_DO_BUILD_DURING_DEPLOYMENT="true" WEBSITES_PORT="8000" WEBSITES_CONTAINER_STARTTIME_LIMIT="1800" DATABASE_URL="$SqlConnectionString" STREAMLIT_SERVER_PORT="8000" STREAMLIT_SERVER_ADDRESS="0.0.0.0" STREAMLIT_SERVER_HEADLESS="true" -o none
+Write-Host "        Enabling Managed Identity ..." -ForegroundColor Yellow
+az webapp identity assign --resource-group $ResourceGroupName --name $WebAppName -o none
+
+az webapp config appsettings set --resource-group $ResourceGroupName --name $WebAppName --settings SCM_DO_BUILD_DURING_DEPLOYMENT="true" WEBSITES_PORT="8000" WEBSITES_CONTAINER_STARTTIME_LIMIT="1800" AZURE_SQL_SERVER="$SqlServerFqdn" AZURE_SQL_DATABASE="$SqlDbName" STREAMLIT_SERVER_PORT="8000" STREAMLIT_SERVER_ADDRESS="0.0.0.0" STREAMLIT_SERVER_HEADLESS="true" -o none
 
 Write-Host "        [OK] App Service settings configured. Pausing 10s for container stabilization..." -ForegroundColor Green
 Start-Sleep -Seconds 10
@@ -262,6 +284,44 @@ if (Test-Path $appPy) {
     Remove-Item $zipPath -ErrorAction SilentlyContinue
 }
 
+# 7. Grant both apps' Managed Identities access to the SQL Database
+# This is the one step that genuinely can't be fully automated from here:
+# it requires running T-SQL AS a Microsoft Entra admin against the database
+# itself, not just an ARM/az CLI resource operation. Sets the current
+# signed-in az CLI user as the SQL Server's Entra admin (idempotent - safe
+# to re-run), then prints the exact statements to run once in the Portal's
+# built-in Query Editor (Azure SQL Database > Query editor - authenticates
+# with your Entra login directly, no extra firewall rule or local sqlcmd
+# install needed).
+Write-Host "  [7/7] Granting Managed Identity database access ..." -ForegroundColor Yellow
+$signedInUser = az ad signed-in-user show --query "{upn:userPrincipalName, oid:id}" -o json 2>$null | ConvertFrom-Json
+if ($signedInUser) {
+    az sql server ad-admin create --resource-group $ResourceGroupName --server-name $SqlServerName --display-name $signedInUser.upn --object-id $signedInUser.oid -o none 2>$null
+    Write-Host "        [OK] Set '$($signedInUser.upn)' as this SQL Server's Microsoft Entra admin." -ForegroundColor Green
+} else {
+    Write-Host "        [WARNING] Could not resolve the signed-in user (are you signed in as a service principal, not a real user?)." -ForegroundColor DarkYellow
+    Write-Host "        Set a Microsoft Entra admin manually: az sql server ad-admin create --resource-group $ResourceGroupName --server-name $SqlServerName --display-name <ADMIN> --object-id <ADMIN_OBJECT_ID>" -ForegroundColor DarkYellow
+}
+
+Write-Host ""
+Write-Host "        ACTION NEEDED - run this once in the Azure Portal:" -ForegroundColor Yellow
+Write-Host "        Azure SQL Database ($SqlDbName) > Query editor (preview) > sign in with Microsoft Entra > run:" -ForegroundColor Yellow
+Write-Host ""
+Write-Host "          CREATE USER [$WebAppName] FROM EXTERNAL PROVIDER;" -ForegroundColor White
+Write-Host "          ALTER ROLE db_datareader ADD MEMBER [$WebAppName];" -ForegroundColor White
+Write-Host "          ALTER ROLE db_datawriter ADD MEMBER [$WebAppName];" -ForegroundColor White
+Write-Host "          ALTER ROLE db_ddladmin ADD MEMBER [$WebAppName];" -ForegroundColor White
+Write-Host "          CREATE USER [$FunctionAppName] FROM EXTERNAL PROVIDER;" -ForegroundColor White
+Write-Host "          ALTER ROLE db_datareader ADD MEMBER [$FunctionAppName];" -ForegroundColor White
+Write-Host "          ALTER ROLE db_datawriter ADD MEMBER [$FunctionAppName];" -ForegroundColor White
+Write-Host "          ALTER ROLE db_ddladmin ADD MEMBER [$FunctionAppName];" -ForegroundColor White
+Write-Host ""
+Write-Host "        (db_ddladmin is needed because this app runs its own schema migrations -" -ForegroundColor DarkGray
+Write-Host "         see db/schema.py's _ensure_column - not just plain row reads/writes.)" -ForegroundColor DarkGray
+Write-Host "        Until this runs, the app will show a clear connection error rather than silently" -ForegroundColor DarkGray
+Write-Host "         using stale/local data - check the Web App's Log stream if inventory looks empty." -ForegroundColor DarkGray
+Write-Host ""
+
 Write-Host ""
 Write-Host "========================================================================" -ForegroundColor Green
 Write-Host "  DEPLOYMENT COMPLETE!" -ForegroundColor Green
@@ -272,4 +332,6 @@ Write-Host "   Function App  : $FunctionAppName" -ForegroundColor Cyan
 Write-Host "   Resource Group: $ResourceGroupName" -ForegroundColor Cyan
 Write-Host "========================================================================" -ForegroundColor Green
 Write-Host "  First load takes ~2 min while the container warms up." -ForegroundColor DarkYellow
+Write-Host "  Don't forget step 7 above (Query editor grant) - the app can't reach the" -ForegroundColor DarkYellow
+Write-Host "  database until that runs once." -ForegroundColor DarkYellow
 Write-Host ""
