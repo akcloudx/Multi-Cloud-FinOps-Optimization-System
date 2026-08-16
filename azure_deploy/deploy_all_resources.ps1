@@ -198,8 +198,29 @@ $parentPath   = Join-Path $PSScriptRoot ".."
 $funcCodePath = [System.IO.Path]::GetFullPath((Join-Path $parentPath "azure_function"))
 
 if (Test-Path $funcCodePath) {
+    # function_app.py imports db/, data/, azure_conn/, pricing/, aws/ from the
+    # repo root (its sync_pipeline call chain) - publishing azure_function/
+    # alone (the old behavior here) never shipped them, so the Python worker
+    # failed to import the function at cold start and Azure indexed ZERO
+    # functions from it, silently, even on a "successful" publish (confirmed
+    # 2026-08-16: az functionapp function list returned empty against a
+    # deployment that reported no error). Stage a temp copy with those
+    # sibling packages alongside azure_function/'s own files before
+    # publishing - same fix applied to .github/workflows/deploy.yml's
+    # deploy-function job.
+    Write-Host "        Staging function app with its dependencies ..." -ForegroundColor Yellow
+    $funcStagePath = Join-Path ([System.IO.Path]::GetTempPath()) "finops_func_stage"
+    if (Test-Path $funcStagePath) { Remove-Item $funcStagePath -Recurse -Force }
+    New-Item -ItemType Directory -Path $funcStagePath -Force | Out-Null
+    Copy-Item (Join-Path $funcCodePath "host.json") $funcStagePath
+    Copy-Item (Join-Path $funcCodePath "function_app.py") $funcStagePath
+    Copy-Item (Join-Path $funcCodePath "requirements.txt") $funcStagePath
+    foreach ($dep in @("db", "data", "azure_conn", "pricing", "aws")) {
+        Copy-Item (Join-Path $parentPath $dep) (Join-Path $funcStagePath $dep) -Recurse
+    }
+
     Write-Host "        Publishing cron function code ..." -ForegroundColor Yellow
-    Push-Location $funcCodePath
+    Push-Location $funcStagePath
     func azure functionapp publish $FunctionAppName --python
     Pop-Location
     if ($LASTEXITCODE -ne 0) {

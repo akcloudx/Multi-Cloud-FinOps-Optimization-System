@@ -50,9 +50,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # function_app.py's own import chain (data.sync_pipeline -> db.schema/
+      # db.crypto, azure_conn.connector, aws.connector, pricing.*) reaches
+      # outside the azure_function/ folder into these repo-root packages.
+      # `package: azure_function` alone never shipped them, so the Python
+      # worker failed to import the function at cold start and Azure indexed
+      # ZERO functions from every past deploy - confirmed 2026-08-16 via
+      # `az functionapp function list` returning empty and the Portal's
+      # Functions blade showing the "create your first function" placeholder,
+      # despite this workflow step itself reporting success (Azure/functions-
+      # action only verifies the zip upload, not that the app later indexes
+      # correctly). Staged into its own dist-func/ so azure_function/'s own
+      # host.json/function_app.py/requirements.txt end up at the package
+      # root, matching what Azure Functions expects to find there.
+      - name: Package function app with its dependencies
+        run: |
+          mkdir -p dist-func
+          cp azure_function/host.json azure_function/function_app.py azure_function/requirements.txt dist-func/
+          cp -r db data azure_conn pricing aws dist-func/
+
       - name: Deploy 24h cron Function App
         uses: Azure/functions-action@v1
         with:
           app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
-          package: azure_function
+          package: dist-func
           publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}

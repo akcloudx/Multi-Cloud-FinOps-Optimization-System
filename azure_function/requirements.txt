@@ -1,8 +1,28 @@
+# Mirrors the root requirements.txt, minus UI-only packages this Function
+# never touches (streamlit, plotly, bcrypt) - function_app.py's import chain
+# (data.sync_pipeline -> db.schema/db.crypto, azure_conn.connector,
+# aws.connector, pricing.*) pulls in everything below. Was stale (plain
+# unpinned sqlalchemy, no mssql-python) from before the Managed Identity
+# migration - kept in sync manually since Azure Functions needs its own
+# requirements.txt inside the deployed package, separate from the Web App's.
+pandas>=2.0
+numpy>=1.26
+# Pinned exactly - see the root requirements.txt's comment on this same line
+# for why (mssql-python SQLAlchemy dialect only exists from this pre-release).
+sqlalchemy==2.1.0b2
+boto3>=1.34
+botocore>=1.34
+python-dotenv>=1.0
+requests>=2.31.0
+pyodbc>=5.0
+pymssql>=2.2.0
+mssql-python>=1.12.0
+azure-identity>=1.15.0
+azure-mgmt-resourcegraph>=8.0.0
+azure-mgmt-resource>=23.0.0
+azure-mgmt-subscription>=3.1.1
+azure-mgmt-authorization>=4.0.0
+azure-mgmt-reservations>=3.0.0
+azure-mgmt-billingbenefits>=1.0.0b2
+cryptography<44,>=42
 azure-functions
-azure-identity
-azure-mgmt-resourcegraph
-sqlalchemy
-pyodbc
-pandas
-boto3
-python-dotenv
