@@ -1,9 +1,14 @@
 # azure_deploy/seed_azure_sql.py
 # Direct Azure SQL Database Schema Initializer and Data Seeder using pymssql
+#
+# Reads the connection string from DATABASE_URL - this used to have the real
+# Azure SQL admin username/password hardcoded directly in this file (found
+# and fixed 2026-08, alongside the same credential duplicated in
+# db/schema.py and deploy_all_resources.ps1). Run it as:
+#   DATABASE_URL="mssql+pymssql://<user>:<password>@<server>.database.windows.net:1433/<database>" python azure_deploy/seed_azure_sql.py
 
 import sys
 import os
-import urllib.parse
 from datetime import datetime
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -16,14 +21,15 @@ from db.schema import Base, RetailPrice
 from db.seed import seed_if_empty, INVENTORY
 from db.aws_seed import seed_aws_if_empty, AWS_INVENTORY
 
-server   = "finops-sql-e0b96fd6.database.windows.net"
-database = "finops-db"
-username = "finopsadmin"
-password = urllib.parse.quote_plus("***REMOVED-SECRET***")
+db_url = os.getenv("DATABASE_URL")
+if not db_url:
+    raise SystemExit(
+        "DATABASE_URL is not set. Example:\n"
+        '  DATABASE_URL="mssql+pymssql://<user>:<password>@<server>.database.windows.net:1433/<database>" '
+        "python azure_deploy/seed_azure_sql.py"
+    )
 
-db_url = f"mssql+pymssql://{username}:{password}@{server}:1433/{database}"
-
-print(f"Connecting to Azure SQL Server '{server}'...")
+print(f"Connecting to Azure SQL Server via DATABASE_URL...")
 engine = create_engine(db_url, echo=False, future=True)
 
 with engine.connect() as conn:

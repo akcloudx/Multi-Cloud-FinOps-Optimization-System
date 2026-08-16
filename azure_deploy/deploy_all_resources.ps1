@@ -12,11 +12,17 @@
 #    next request) - fine for intermittent demo/test use, not sustained traffic. See the inline note
 #    at the plan-creation step for the one open risk (Oryx remote build behavior not yet verified on F1).
 
+# SqlAdminPassword has no default on purpose - it used to be a hardcoded
+# real password here (found and fixed 2026-08, alongside the same
+# credential duplicated in db/schema.py and azure_deploy/seed_azure_sql.py).
+# Pass it explicitly, e.g.:
+#   .\deploy_all_resources.ps1 -SqlAdminPassword (Read-Host -AsSecureString "SQL admin password" | ConvertFrom-SecureString -AsPlainText)
 param (
     [string]$ResourceGroupName = "rg-finops-optimizer",
     [string]$Location          = "westus3",
     [string]$SqlAdminUser      = "finopsadmin",
-    [string]$SqlAdminPassword  = "***REMOVED-SECRET***",
+    [Parameter(Mandatory = $true)]
+    [string]$SqlAdminPassword,
     [string]$AppNamePrefix     = "finops"
 )
 

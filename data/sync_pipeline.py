@@ -1,16 +1,21 @@
 """
 data/sync_pipeline.py — Azure Function / Cron Ingestion Pipeline
 
-Implements the 24-hour automated extraction & ingestion flow:
+Implements the automated extraction & ingestion flow:
   AWS & Azure APIs (OIDC / SP Auth)
-      ├──► Azure Function (Python Script / 24h Cron Sync)
+      ├──► Azure Function (hourly TimerTrigger, per-tenant due-check - see
+      │     azure_function/function_app.py) OR the Manage Tenant dialog's
+      │     "Run sync now" button (same function, called directly)
             ├──► Ingests normalized data into Star Schema Database
                   └──► Streamlit Dashboard queries Star Schema DB
 
 Can be run as:
-  1. Azure Function Timer Trigger (TimerTrigger(schedule="0 0 0 * * *"))
+  1. Azure Function Timer Trigger (fires hourly; each tenant only actually
+     syncs once its own CloudTenant.sync_interval_hours has elapsed)
   2. Standalone Cron Job / CLI (python data/sync_pipeline.py)
-  3. Interactive trigger from Streamlit UI (Settings Tab)
+  3. Interactive trigger from the Manage Tenant dialog's "Run sync now" -
+     this calls the exact same function directly and synchronously, no
+     Azure Functions involved; both paths hit the real tenant live.
 """
 
 import sys, os
@@ -80,13 +85,33 @@ def run_ingestion_pipeline(provider: str = "Azure", creds=None, force_mock: bool
             if is_azure:
                 df_live = fetch_live_inventory(live_creds)
                 records = df_live.to_dict(orient="records")
-                reservation_records = fetch_live_reservations(live_creds).to_dict(orient="records")
-                savings_plan_records = fetch_live_savings_plans(live_creds).to_dict(orient="records")
             else:
-                # AWS live fetch fallback - Reservations/Savings Plans are
-                # Azure-only for now, same as inventory (aws/connector.py has
-                # no live fetch yet either).
-                records, reservation_records, savings_plan_records = [], [], []
+                # AWS live fetch fallback - not implemented yet (aws/connector.py
+                # has no live fetch at all).
+                records = []
+
+            # Reservations/Savings Plans require SEPARATE, elevated tenant-level
+            # RBAC (Reservations Reader / Savings Plan Reader at
+            # /providers/Microsoft.Capacity and /providers/Microsoft.BillingBenefits
+            # respectively - see REQUIRED_TENANT_ROLES) that a real Service
+            # Principal very often won't have even when subscription-level
+            # Reader/Cost Management Reader (all inventory needs) is fully
+            # granted - assigning it requires User Access Administrator at the
+            # tenant root, a materially higher bar. Confirmed live 2026-08: a
+            # missing tenant-level role must NOT abort inventory sync, which
+            # has nothing to do with that permission - caught a real
+            # regression where this whole function's single try/except let
+            # exactly that happen (a real tenant with valid Reader/CMR showed
+            # zero inventory because the RI/SP fetch below threw first).
+            reservation_records, savings_plan_records = [], []
+            ri_sp_error = None
+            if is_azure:
+                try:
+                    reservation_records = fetch_live_reservations(live_creds).to_dict(orient="records")
+                    savings_plan_records = fetch_live_savings_plans(live_creds).to_dict(orient="records")
+                except Exception as e:
+                    ri_sp_error = str(e)[:300]
+                    reservation_records, savings_plan_records = [], []
 
             rates = refresh_retail_prices(engine, records, provider=provider) if records else {}
             for r in records:
@@ -137,15 +162,21 @@ def run_ingestion_pipeline(provider: str = "Azure", creds=None, force_mock: bool
                     session.query(CloudInventory).filter(
                         CloudInventory.tenant_id == tenant_db_id
                     ).delete(synchronize_session=False)
-                    session.query(ReservationPurchase).filter(
-                        ReservationPurchase.tenant_id == tenant_db_id
-                    ).delete(synchronize_session=False)
-                    session.query(SavingsPlanPurchase).filter(
-                        SavingsPlanPurchase.tenant_id == tenant_db_id
-                    ).delete(synchronize_session=False)
-                    session.query(Commitment).filter(
-                        Commitment.tenant_id == tenant_db_id
-                    ).delete(synchronize_session=False)
+                    # Only replace the RI/SP snapshot when THIS run's fetch
+                    # actually succeeded (ri_sp_error is None) - if it failed
+                    # (e.g. the tenant-level permission gap above), any
+                    # previously-synced RI/SP data for this tenant is left
+                    # alone rather than wiped out by an unrelated failure.
+                    if ri_sp_error is None:
+                        session.query(ReservationPurchase).filter(
+                            ReservationPurchase.tenant_id == tenant_db_id
+                        ).delete(synchronize_session=False)
+                        session.query(SavingsPlanPurchase).filter(
+                            SavingsPlanPurchase.tenant_id == tenant_db_id
+                        ).delete(synchronize_session=False)
+                        session.query(Commitment).filter(
+                            Commitment.tenant_id == tenant_db_id
+                        ).delete(synchronize_session=False)
 
                 for r in records:
                     session.merge(CloudInventory(
@@ -192,18 +223,28 @@ def run_ingestion_pipeline(provider: str = "Azure", creds=None, force_mock: bool
                 for fields in savings_plan_commitments:
                     session.add(Commitment(**fields, provider="Azure", tenant_id=tenant_db_id))
 
+                # PARTIAL (not FAILED) when inventory synced fine but RI/SP
+                # fetch hit its own error - the inventory portion is real,
+                # useful progress and shouldn't be reported as a failed sync.
+                status = "PARTIAL" if ri_sp_error else "SUCCESS"
                 session.add(SyncLog(
                     synced_at=now_iso,
                     provider=provider,
-                    status="SUCCESS",
+                    status=status,
                     records_synced=synced_count,
-                    source="Azure Function (24h Cron API)"
+                    source="Live API ingestion"   # caller-agnostic - triggered by either the hourly cron or the Manage Tenant "Run sync now" button, no way to distinguish here
                 ))
                 session.commit()
-            message = (
-                f"Live API ingestion completed cleanly. Synced {synced_count} resources, "
-                f"{ri_written} reservation(s), and {len(savings_plan_commitments)} savings plan(s) from {provider}."
-            )
+            if ri_sp_error:
+                message = (
+                    f"Inventory synced: {synced_count} resource(s). Reservation/Savings Plan fetch skipped - "
+                    f"{ri_sp_error}"
+                )
+            else:
+                message = (
+                    f"Live API ingestion completed cleanly. Synced {synced_count} resources, "
+                    f"{ri_written} reservation(s), and {len(savings_plan_commitments)} savings plan(s) from {provider}."
+                )
         except Exception as e:
             status = "FAILED"
             message = f"API Sync Failed: {str(e)}"
@@ -213,7 +254,7 @@ def run_ingestion_pipeline(provider: str = "Azure", creds=None, force_mock: bool
                     provider=provider,
                     status="FAILED",
                     records_synced=0,
-                    source="Azure Function (24h Cron API)"
+                    source="Live API ingestion"   # caller-agnostic - triggered by either the hourly cron or the Manage Tenant "Run sync now" button, no way to distinguish here
                 ))
                 session.commit()
     else:
@@ -241,7 +282,12 @@ def run_ingestion_pipeline(provider: str = "Azure", creds=None, force_mock: bool
 
 
 def get_latest_sync_log(provider: str = "Azure") -> dict:
-    """Returns the timestamp and status of the latest 24h cron ingestion run."""
+    """Returns the timestamp and status of the most recent cron ingestion run
+    across ALL tenants of this provider (SyncLog isn't tenant-scoped) - not
+    currently surfaced in the UI (the Manage Tenant dialog reads the
+    per-tenant CloudTenant.last_sync_status/last_sync_message instead, via
+    db/tenants.py's record_sync_result, which is what actually needs a
+    single tenant's own result). Kept for any future global/ops view."""
     engine = get_engine(provider, _MODE)
     init_db(provider, _MODE)
     with Session(engine) as session:
@@ -254,10 +300,10 @@ def get_latest_sync_log(provider: str = "Azure") -> dict:
                 "source": latest.source,
             }
     return {
-        "synced_at": "Scheduled (Daily 00:00 UTC)",
+        "synced_at": "Not yet run",
         "status": "IDLE",
         "records_synced": 0,
-        "source": "Azure Function (24h Cron)",
+        "source": "Azure Function (hourly cron, per-tenant interval)",
     }
 
 

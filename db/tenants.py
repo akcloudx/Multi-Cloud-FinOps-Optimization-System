@@ -144,6 +144,36 @@ def touch_last_synced(provider: str, mode: str, tenant_db_id: int) -> None:
         session.commit()
 
 
+def record_sync_result(provider: str, mode: str, tenant_db_id: int, status: str, message: str) -> None:
+    """Persists the outcome of a run_ingestion_pipeline() call onto the
+    tenant row itself (last_sync_status/last_sync_message) - the Manage
+    Tenant dialog's Sync card reads these directly, so a real failure or
+    partial-success detail (e.g. "RI/SP fetch skipped - AuthorizationFailed")
+    stays visible after the dialog reopens or the page reloads, instead of
+    only existing as a one-shot toast. Also stamps last_synced_at for
+    SUCCESS/PARTIAL (inventory really did just refresh in both cases) but
+    not FAILED (nothing was written)."""
+    init_db(provider, mode)
+    engine = get_engine(provider, mode)
+    updates = {"last_sync_status": status, "last_sync_message": message[:500]}
+    if status in ("SUCCESS", "PARTIAL"):
+        updates["last_synced_at"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    with Session(engine) as session:
+        session.query(CloudTenant).filter(CloudTenant.id == tenant_db_id).update(updates)
+        session.commit()
+
+
+def update_sync_interval(provider: str, mode: str, tenant_db_id: int, hours: int) -> None:
+    """Sets how often the shared hourly Azure Function cron should re-sync
+    THIS tenant - see CloudTenant.sync_interval_hours in db/schema.py for how
+    a single TimerTrigger serves every tenant on its own cadence."""
+    init_db(provider, mode)
+    engine = get_engine(provider, mode)
+    with Session(engine) as session:
+        session.query(CloudTenant).filter(CloudTenant.id == tenant_db_id).update({"sync_interval_hours": hours})
+        session.commit()
+
+
 def set_active_tenant(provider: str, mode: str, tenant_db_id: int) -> None:
     init_db(provider, mode)
     engine = get_engine(provider, mode)

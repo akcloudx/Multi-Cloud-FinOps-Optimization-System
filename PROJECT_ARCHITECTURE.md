@@ -105,7 +105,7 @@ az sql server create \
   --resource-group "rg-finops-optimizer" \
   --location "eastus" \
   --admin-user "finopsadmin" \
-  --admin-password "***REMOVED-SECRET***"
+  --admin-password "<YOUR_STRONG_PASSWORD>"   # never hardcode a real password here or commit one
 
 # Allow Azure Services firewall access
 az sql server firewall-rule create \
@@ -174,7 +174,7 @@ az webapp config set \
 az webapp config appsettings set \
   --resource-group "rg-finops-optimizer" \
   --name "finops-optimizer-app" \
-  --settings DATABASE_URL="mssql+pyodbc://finopsadmin:***REMOVED-SECRET***@finops-sql-server-2026.database.windows.net/finops-sqldb?driver=ODBC+Driver+18+for+SQL+Server"
+  --settings DATABASE_URL="mssql+pyodbc://finopsadmin:<YOUR_STRONG_PASSWORD>@finops-sql-server-2026.database.windows.net/finops-sqldb?driver=ODBC+Driver+18+for+SQL+Server"
 
 # Deploy Web App Code
 az webapp up \

@@ -68,9 +68,25 @@ def get_engine(provider: str = "Azure", mode: str = "demo"):
         return _mode_engines[cache_key]
 
     db_url = os.getenv("DATABASE_URL")
-    # In Azure production environment (App Service / Function App), use Azure SQL Database
+    # In Azure production environment (App Service / Function App), a real
+    # connection string MUST come from the DATABASE_URL App Setting - this
+    # used to silently fall back to a hardcoded Azure SQL admin
+    # username/password (a real credential, committed to source control) if
+    # the setting was missing. Found live 2026-08 (also duplicated in
+    # azure_deploy/seed_azure_sql.py and deploy_all_resources.ps1, since
+    # fixed too) - failing loudly here instead is deliberate: silently
+    # falling through to local SQLite in an Azure environment would look
+    # like it worked while actually writing to a non-persistent local file,
+    # which is worse than a clear startup error.
     if not db_url and (os.getenv("WEBSITE_SITE_NAME") or os.getenv("FUNCTIONS_WORKER_RUNTIME")):
-        db_url = "mssql+pymssql://finopsadmin:P%40ssw0rd2026%21FinOps@finops-sql-e0b96fd6.database.windows.net:1433/finops-db"
+        raise RuntimeError(
+            "DATABASE_URL is not set. This app is running in an Azure App Service / Function App "
+            "(detected via WEBSITE_SITE_NAME/FUNCTIONS_WORKER_RUNTIME) but has no database connection "
+            "string configured. Set DATABASE_URL as an App Setting, e.g. "
+            "'mssql+pymssql://<user>:<password>@<server>.database.windows.net:1433/<database>' "
+            "(Azure Portal > App Service/Function App > Configuration > Application settings). "
+            "Never hardcode credentials in source code."
+        )
 
     if db_url and "mssql" in db_url:
         if "pymssql" not in db_url and "pyodbc" not in db_url:
@@ -154,6 +170,9 @@ def init_db(provider: str = "Azure", mode: str = "demo"):
     _ensure_column(engine, schema_name, "cloud_tenants", "tenant_missing_roles", "VARCHAR(255)")
     _ensure_column(engine, schema_name, "commitments", "is_inferred_mapping", "BOOLEAN")
     _ensure_column(engine, schema_name, "commitments", "mapping_note", "VARCHAR(500)")
+    _ensure_column(engine, schema_name, "cloud_tenants", "sync_interval_hours", "INTEGER")
+    _ensure_column(engine, schema_name, "cloud_tenants", "last_sync_status", "VARCHAR(20)")
+    _ensure_column(engine, schema_name, "cloud_tenants", "last_sync_message", "VARCHAR(500)")
     return engine
 
 
@@ -463,6 +482,20 @@ class CloudTenant(Base):
     # per subscription.
     tenant_permission_status = Column(String(50), default="unchecked")   # "unchecked" | "ready" | "missing_role"
     tenant_missing_roles     = Column(String(255), nullable=True)
+    # How often the 24h-cron Azure Function should re-sync THIS tenant -
+    # every tenant shares the same TimerTrigger firing (hourly - see
+    # azure_function/function_app.py), which only actually calls
+    # run_ingestion_pipeline() for a tenant once now - last_synced_at >=
+    # this many hours, so different tenants can run on different cadences
+    # without needing a separate Function/Durable orchestration per tenant.
+    sync_interval_hours      = Column(Integer, default=24)
+    # Persisted result of the most recent sync attempt for this tenant - the
+    # Manage Tenant dialog's "Sync" card reads this directly so the result
+    # (including a real failure/partial message) survives a dialog reopen or
+    # page reload, instead of only a one-shot toast that's gone as soon as
+    # the next rerun happens.
+    last_sync_status         = Column(String(20), nullable=True)    # "SUCCESS" | "PARTIAL" | "FAILED"
+    last_sync_message        = Column(String(500), nullable=True)
 
 
 class TenantSubscription(Base):

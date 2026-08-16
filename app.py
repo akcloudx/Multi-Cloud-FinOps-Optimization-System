@@ -123,7 +123,7 @@ from db.tenants import (
     list_tenants, get_active_tenant, get_tenant_credentials, upsert_tenant,
     update_tenant_name, touch_last_synced, set_active_tenant, delete_tenant,
     resource_count, list_subscriptions, upsert_subscription,
-    update_tenant_permission_status,
+    update_tenant_permission_status, record_sync_result, update_sync_interval,
 )
 from azure_conn.connector import (
     AzureCredentials, load_credentials_from_env, save_credentials_to_env_file,
@@ -440,25 +440,134 @@ def _portfolio_summary_metrics(provider: str, mode: str) -> dict:
     }
 
 
-@st.dialog("Manage tenant", width="large")
+_SYNC_INTERVAL_LABELS = {1: "Every hour", 3: "Every 3 hours", 6: "Every 6 hours", 12: "Every 12 hours", 24: "Daily (24h)"}
+
+
+def _clear_manage_tenant_dialog_state():
+    """on_dismiss callback (user closed the dialog via the X, Escape, or
+    clicking outside) - clears the session_state flag that keeps the dialog
+    open across its own internal st.rerun() calls, so it doesn't immediately
+    reopen on the very next script run. See page_home()'s caller for why a
+    plain `if button: _manage_tenant_dialog(...)` doesn't work at all here -
+    a button's True state only lasts one rerun, so every action *inside* the
+    dialog (which all end in st.rerun()) used to close it immediately."""
+    st.session_state["_manage_tenant_id"] = None
+
+
+def _run_tenant_permission_check(t, mode: str) -> dict:
+    """Shared by the Connection health card's "Re-check everything" and the
+    Tenant-wide permissions card's own button - real tenant-scope RBAC check
+    (Reservations Reader / Savings Plan Reader)."""
+    creds = AzureCredentials(t.tenant_id, t.subscription_id, t.client_id, get_tenant_credentials(t))
+    role_check = check_tenant_role_assignments(creds)
+    update_tenant_permission_status(
+        selected_provider, mode, t.id,
+        "ready" if role_check["ready"] else "missing_role",
+        ", ".join(role_check["missing_roles"]) if role_check["missing_roles"] else None,
+    )
+    return role_check
+
+
+def _run_subscription_sync(t, mode: str) -> list:
+    """Shared by the Connection health card's "Re-check everything" and the
+    Subscriptions card's own "Sync subscriptions" button - (re)discovers
+    every subscription the Service Principal can see and checks its
+    subscription-level role assignment (Reader / Cost Management Reader)."""
+    creds = AzureCredentials(t.tenant_id, t.subscription_id, t.client_id, get_tenant_credentials(t))
+    live_subs = list_accessible_subscriptions(creds)
+    for s in live_subs:
+        role_check = check_role_assignments(creds, s["subscription_id"])
+        upsert_subscription(
+            provider=selected_provider, mode=mode, tenant_db_id=t.id,
+            subscription_id=s["subscription_id"], subscription_name=s["display_name"],
+            permission_status="ready" if role_check["ready"] else "missing_role",
+            missing_role=", ".join(role_check["missing_roles"]) if role_check["missing_roles"] else None,
+        )
+    return live_subs
+
+
+@st.dialog("Manage tenant", width="large", on_dismiss=_clear_manage_tenant_dialog_state)
 def _manage_tenant_dialog(t, mode: str):
-    """Per-tenant editing: name (both modes), Service Principal credentials
-    and subscriptions/permission-checks (Production only - Demo tenants have
-    no real Azure behind them), sync, and delete. Demo shows every control
-    but disables everything except the name edit, matching the confirmed
-    "same UI, different live-ness" design."""
+    """Per-tenant editing, organized as bordered cards (connection health,
+    credentials, subscriptions, tenant-wide permissions, sync) - each with
+    its own status stripe, so the state of the tenant is scannable without
+    reading prose, similar to how connection-management screens in tools
+    like Flexera/CloudHealth are laid out. Production only for anything
+    beyond the name edit - Demo tenants have no real Azure behind them, and
+    every control here stays visible but disabled for Demo (confirmed "same
+    UI, different live-ness" design), matching the existing convention.
+
+    IMPORTANT: this function is called from page_home() every rerun while
+    st.session_state["_manage_tenant_id"] == t.id - NOT gated on a button's
+    return value. Every action below ends in st.rerun(); if this were only
+    reachable via `if button: _manage_tenant_dialog(...)`, the dialog would
+    close itself after the very first action (a real bug found live 2026-08:
+    a button's clicked state doesn't persist past the one rerun immediately
+    following the click)."""
     is_demo = (mode == "demo")
     st.caption(f"{selected_provider} · {'Demo' if is_demo else 'Production'}")
 
     name_col, save_col = st.columns([4, 1])
     new_name = name_col.text_input("Tenant name", value=t.tenant_name, key=f"mgmt_name_{t.id}")
-    if save_col.button("Save", key=f"mgmt_save_name_{t.id}", use_container_width=True):
+    if save_col.button("Save", key=f"mgmt_save_name_{t.id}", width="stretch"):
         update_tenant_name(selected_provider, mode, t.id, new_name)
         st.success("Tenant name updated.")
         st.rerun()
 
-    if is_azure:
-        st.markdown("##### Service principal credentials")
+    if not is_azure:
+        st.divider()
+        if st.button("🗑️ Delete tenant", disabled=is_demo, key=f"mgmt_delete_{t.id}"):
+            delete_tenant(selected_provider, mode, t.id)
+            st.session_state["_manage_tenant_id"] = None
+            st.rerun()
+        return
+
+    subs = list_subscriptions(selected_provider, mode, t.id)
+    sub_ready = bool(subs) and all(s.permission_status == "ready" for s in subs)
+    sub_missing = any(s.permission_status == "missing_role" for s in subs)
+
+    # ── Connection health ────────────────────────────────────────────────
+    with st.container(border=True):
+        st.markdown("##### 🩺 Connection health")
+        h1, h2, h3 = st.columns(3)
+        with h1:
+            st.caption("Subscription-level")
+            if not subs:
+                st.caption("⚪ Not checked yet")
+            elif sub_ready:
+                st.success("Ready", icon="✅")
+            elif sub_missing:
+                st.warning("Missing roles", icon="⚠️")
+            else:
+                st.caption("⚪ Not checked yet")
+        with h2:
+            st.caption("Tenant-level")
+            if t.tenant_permission_status == "ready":
+                st.success("Ready", icon="✅")
+            elif t.tenant_permission_status == "missing_role":
+                st.warning("Missing roles", icon="⚠️")
+            else:
+                st.caption("⚪ Not checked yet")
+        with h3:
+            st.caption("Last sync")
+            if t.last_sync_status == "SUCCESS":
+                st.success("Healthy", icon="✅")
+            elif t.last_sync_status == "PARTIAL":
+                st.warning("Partial", icon="⚠️")
+            elif t.last_sync_status == "FAILED":
+                st.error("Failed", icon="❌")
+            else:
+                st.caption("⚪ Never run")
+        if st.button("🔁 Re-check everything", disabled=is_demo, key=f"mgmt_health_recheck_{t.id}",
+                      help="Only available for Production tenants." if is_demo else "Re-checks subscription-level AND tenant-level permissions in one step."):
+            with st.spinner("Re-checking subscription and tenant-level permissions..."):
+                _run_subscription_sync(t, mode)
+                _run_tenant_permission_check(t, mode)
+            st.rerun()
+
+    # ── Service principal credentials ────────────────────────────────────
+    with st.container(border=True):
+        st.markdown("##### 🔑 Service principal credentials")
         if is_demo:
             st.caption("Not applicable - a demo tenant has no real Service Principal behind it.")
         else:
@@ -502,56 +611,29 @@ for sub in $(az account list --query "[].id" -o tsv); do
 done
 ```
 
-**3. Assign tenant-level roles** for Reservations and Savings Plans - a separate permission system, not subscription-scoped, since neither is a subscription resource. This step needs **User Access Administrator** rights at the tenant level - a materially higher bar than step 2:
+**3. Assign tenant-level roles** for Reservations and Savings Plans - a separate permission system, not subscription-scoped, since neither is a subscription resource. This step needs **User Access Administrator** rights at the tenant level - a materially higher bar than step 2, and many accounts (e.g. student/trial subscriptions) genuinely can't get it:
 ```bash
 az role assignment create --assignee <CLIENT_ID> --role "Reservations Reader" --scope "/providers/Microsoft.Capacity"
 az role assignment create --assignee <CLIENT_ID> --role "Savings Plan Reader" --scope "/providers/Microsoft.BillingBenefits"
 ```
+Missing this step is **not fatal** - Resource inventory and cost data (step 2) sync independently of Reservations/Savings Plan data (step 3); a sync will report which parts succeeded.
 """)
 
-        st.divider()
-        st.markdown("##### Tenant-level permissions")
-        st.caption("Reservations and Savings Plans are tenant-wide resources with their own separate permission system - not covered by the subscription-level roles below.")
-        tp1, tp2 = st.columns([3, 2])
-        if t.tenant_permission_status == "ready":
-            tp1.success("Ready", icon="✅")
-        elif t.tenant_permission_status == "missing_role":
-            tp1.warning(f"Missing {t.tenant_missing_roles}", icon="⚠️")
-        else:
-            tp1.caption("Not checked yet")
-        if tp2.button("🔁 Check tenant permissions", disabled=is_demo,
-                      help="Only available for Production tenants." if is_demo else None):
-            with st.spinner("Checking tenant-level permissions..."):
-                creds = AzureCredentials(t.tenant_id, t.subscription_id, t.client_id, get_tenant_credentials(t))
-                role_check = check_tenant_role_assignments(creds)
-                update_tenant_permission_status(
-                    selected_provider, mode, t.id,
-                    "ready" if role_check["ready"] else "missing_role",
-                    ", ".join(role_check["missing_roles"]) if role_check["missing_roles"] else None,
-                )
-            st.rerun()
-
-        st.divider()
-        st.markdown("##### Subscriptions")
-        subs = list_subscriptions(selected_provider, mode, t.id)
-        if st.button("🔁 Sync subscriptions", disabled=is_demo,
-                      help="Only available for Production tenants." if is_demo else None):
+    # ── Subscriptions ─────────────────────────────────────────────────────
+    with st.container(border=True):
+        st.markdown("##### 🗂️ Subscriptions")
+        if st.button("🔁 Sync subscriptions", disabled=is_demo, key=f"mgmt_sync_subs_{t.id}",
+                      help="Only available for Production tenants." if is_demo else "Discovers subscriptions and checks Reader/Cost Management Reader on each."):
             with st.spinner("Enumerating subscriptions and checking permissions..."):
-                creds = AzureCredentials(t.tenant_id, t.subscription_id, t.client_id, get_tenant_credentials(t))
-                live_subs = list_accessible_subscriptions(creds)
+                live_subs = _run_subscription_sync(t, mode)
                 if not live_subs:
                     st.error("Could not enumerate subscriptions - check the credentials above.")
-                for s in live_subs:
-                    role_check = check_role_assignments(creds, s["subscription_id"])
-                    upsert_subscription(
-                        provider=selected_provider, mode=mode, tenant_db_id=t.id,
-                        subscription_id=s["subscription_id"], subscription_name=s["display_name"],
-                        permission_status="ready" if role_check["ready"] else "missing_role",
-                        missing_role=", ".join(role_check["missing_roles"]) if role_check["missing_roles"] else None,
-                    )
             st.rerun()
 
         if subs:
+            sc_header = st.columns([3, 3, 2, 2])
+            for c, label in zip(sc_header, ["Subscription", "ID", "Status", ""]):
+                c.caption(f"**{label}**")
             for s in subs:
                 sc = st.columns([3, 3, 2, 2])
                 sc[0].markdown(f"**{s.subscription_name or s.subscription_id}**")
@@ -562,8 +644,7 @@ az role assignment create --assignee <CLIENT_ID> --role "Savings Plan Reader" --
                     sc[2].warning(f"Missing {s.missing_role}", icon="⚠️")
                 else:
                     sc[2].caption("Not checked yet")
-                if sc[3].button("Verify permission", key=f"mgmt_verify_sub_{s.id}", disabled=is_demo,
-                                use_container_width=True,
+                if sc[3].button("Verify", key=f"mgmt_verify_sub_{s.id}", disabled=is_demo, width="stretch",
                                 help="Only available for Production tenants." if is_demo else None):
                     with st.spinner("Checking permissions..."):
                         creds = AzureCredentials(t.tenant_id, t.subscription_id, t.client_id, get_tenant_credentials(t))
@@ -576,7 +657,24 @@ az role assignment create --assignee <CLIENT_ID> --role "Savings Plan Reader" --
                         )
                     st.rerun()
         else:
-            st.caption("No subscriptions recorded yet.")
+            st.caption("No subscriptions recorded yet - click **Sync subscriptions** above.")
+
+    # ── Tenant-wide permissions (Reservations / Savings Plans) ──────────
+    with st.container(border=True):
+        st.markdown("##### 🌐 Tenant-wide permissions")
+        st.caption("Reservations and Savings Plans are tenant-wide resources with their own separate permission system, not covered by the subscription-level roles above.")
+        tp1, tp2 = st.columns([3, 2])
+        if t.tenant_permission_status == "ready":
+            tp1.success("Ready", icon="✅")
+        elif t.tenant_permission_status == "missing_role":
+            tp1.warning(f"Missing {t.tenant_missing_roles}", icon="⚠️")
+        else:
+            tp1.caption("Not checked yet")
+        if tp2.button("🔁 Check tenant permissions", disabled=is_demo, key=f"mgmt_tenant_check_{t.id}",
+                      help="Only available for Production tenants." if is_demo else None):
+            with st.spinner("Checking tenant-level permissions..."):
+                _run_tenant_permission_check(t, mode)
+            st.rerun()
 
         with st.expander("📋 Required Azure RBAC roles", expanded=False):
             st.markdown("**Subscription-scoped**")
@@ -584,32 +682,49 @@ az role assignment create --assignee <CLIENT_ID> --role "Savings Plan Reader" --
             st.markdown("**Tenant-scoped**")
             st.dataframe(pd.DataFrame(REQUIRED_TENANT_ROLES)[["Role Name", "Scope", "Purpose"]], hide_index=True, width="stretch")
 
-    st.divider()
-    sync_col, last_col = st.columns([2, 3])
-    last_col.caption(
-        f"Last synced: {t.last_synced_at[:16] if t.last_synced_at else 'Never'}  ·  "
-        "Next scheduled sync: daily at 00:00 UTC (automated 24-hour cron)"
-    )
-    if sync_col.button("⚡ Run sync now", disabled=is_demo,
-                        help="Only available for Production tenants." if is_demo else None):
-        with st.spinner(f"Running ingestion for '{t.tenant_name}'..."):
-            sync_creds = (
-                AzureCredentials(t.tenant_id, t.subscription_id, t.client_id, get_tenant_credentials(t))
-                if is_azure else None
-            )
-            res = run_ingestion_pipeline(selected_provider, creds=sync_creds, tenant_db_id=t.id)
-        if res["status"] == "SUCCESS":
-            touch_last_synced(selected_provider, mode, t.id)
-            st.cache_data.clear()
-            st.success(res["message"])
-            st.rerun()
+    # ── Sync ───────────────────────────────────────────────────────────
+    with st.container(border=True):
+        st.markdown("##### ⚡ Sync")
+        if t.last_sync_status == "SUCCESS":
+            st.success(t.last_sync_message or "Last sync succeeded.", icon="✅")
+        elif t.last_sync_status == "PARTIAL":
+            st.warning(t.last_sync_message or "Last sync partially completed.", icon="⚠️")
+        elif t.last_sync_status == "FAILED":
+            st.error(t.last_sync_message or "Last sync failed.", icon="❌")
         else:
-            st.error(res["message"])
+            st.caption("No sync attempted yet.")
+
+        current_interval = t.sync_interval_hours if t.sync_interval_hours in _SYNC_INTERVAL_LABELS else 24
+        i1, i2 = st.columns([3, 2])
+        new_interval = i1.selectbox(
+            "Automated sync interval", options=list(_SYNC_INTERVAL_LABELS.keys()),
+            format_func=lambda h: _SYNC_INTERVAL_LABELS[h],
+            index=list(_SYNC_INTERVAL_LABELS.keys()).index(current_interval),
+            key=f"mgmt_interval_{t.id}", disabled=is_demo,
+            help="A single hourly cron checks every tenant and only re-syncs the ones due, based on this setting.",
+        )
+        i2.caption("")
+        if i2.button("Save schedule", disabled=is_demo, key=f"mgmt_save_interval_{t.id}", width="stretch"):
+            update_sync_interval(selected_provider, mode, t.id, new_interval)
+            st.success("Sync schedule updated.")
+            st.rerun()
+
+        st.caption(f"Last synced: {t.last_synced_at[:16] if t.last_synced_at else 'Never'}")
+
+        if st.button("⚡ Run sync now", disabled=is_demo, key=f"mgmt_run_sync_{t.id}", type="primary",
+                     help="Only available for Production tenants." if is_demo else "Fetches live inventory, reservations, and savings plans from this tenant right now."):
+            with st.spinner(f"Running ingestion for '{t.tenant_name}'..."):
+                sync_creds = AzureCredentials(t.tenant_id, t.subscription_id, t.client_id, get_tenant_credentials(t))
+                res = run_ingestion_pipeline(selected_provider, creds=sync_creds, tenant_db_id=t.id)
+            record_sync_result(selected_provider, mode, t.id, res["status"], res["message"])
+            st.cache_data.clear()
+            st.rerun()
 
     st.divider()
-    if st.button("🗑️ Delete tenant", disabled=is_demo,
+    if st.button("🗑️ Delete tenant", disabled=is_demo, key=f"mgmt_delete_{t.id}",
                  help="Only available for Production tenants." if is_demo else None):
         delete_tenant(selected_provider, mode, t.id)
+        st.session_state["_manage_tenant_id"] = None
         st.rerun()
 
 
@@ -670,11 +785,28 @@ def page_home():
         cols[4].caption(t.last_synced_at[:16] if t.last_synced_at else "Never")
         with cols[5]:
             b1, b2 = st.columns(2)
-            if b1.button("Dashboard", key=f"home_dash_{t.id}", use_container_width=True):
+            if b1.button("Dashboard", key=f"home_dash_{t.id}", width="stretch"):
                 set_active_tenant(selected_provider, tenant_mode, t.id)
                 st.switch_page(analyze_page)
-            if b2.button("Manage", key=f"home_manage_{t.id}", use_container_width=True):
-                _manage_tenant_dialog(t, tenant_mode)
+            if b2.button("Manage", key=f"home_manage_{t.id}", width="stretch"):
+                st.session_state["_manage_tenant_id"] = t.id
+
+    # Kept OUTSIDE the button's if-block and OUTSIDE the tenant loop above,
+    # gated on session_state instead of the button's return value - a
+    # button's clicked state only lasts the one rerun immediately after the
+    # click, but every action inside _manage_tenant_dialog() ends in
+    # st.rerun(). Calling it directly inside `if button:` meant the dialog
+    # closed itself the instant you clicked anything inside it (real bug
+    # found live 2026-08). This form persists across those internal reruns
+    # and only clears via the dialog's own on_dismiss callback.
+    manage_id = st.session_state.get("_manage_tenant_id")
+    if manage_id is not None:
+        active_t = next((tt for tt in tenants if tt.id == manage_id), None)
+        if active_t is not None:
+            _manage_tenant_dialog(active_t, tenant_mode)
+        else:
+            st.session_state["_manage_tenant_id"] = None
+
     # Required-roles reference and setup guidance live inside each tenant's
     # Manage dialog now, not here - Home stays a lean summary + list, per
     # user feedback that this page had drifted from the approved sketch.
