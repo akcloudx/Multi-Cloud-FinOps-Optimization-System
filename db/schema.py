@@ -181,6 +181,18 @@ def get_engine(provider: str = "Azure", mode: str = "demo"):
             return engine
         except Exception as ex:
             print(f"[Warning] Azure SQL Database connection attempt failed ({ex}).")
+            if is_azure_env:
+                # A configured mssql connection that genuinely fails in
+                # Azure must NEVER silently fall through to local SQLite
+                # below - that file is ephemeral (wiped on every
+                # restart/redeploy) and would make a real, broken
+                # production database connection look like a working app.
+                # This exact silent-fallback masked the mssql-python
+                # timeout failures for a while (2026-08) - raising here
+                # instead surfaces it immediately as a visible Streamlit
+                # error, not a quiet wrong answer. Local dev (is_azure_env
+                # False) is unaffected - SQLite is the CORRECT choice there.
+                raise
 
     # Fallback to local SQLite ONLY for offline local desktop development
     db_path = _sqlite_path(provider_key, mode)
