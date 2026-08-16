@@ -185,6 +185,29 @@ def save_credentials_to_env_file(creds: AzureCredentials, path: str = ".env") ->
         f.writelines(lines)
 
 
+def _friendly_auth_error(err: str) -> str:
+    """Translates common Microsoft Entra authentication error codes into
+    plain-language explanations - shared by every function in this module
+    that authenticates with a stored Service Principal, so a broken
+    credential produces the SAME clear message everywhere (Manage Tenant's
+    permission checks, sync results, connection test), not a different
+    cryptic AADSTS code depending on which code path happened to hit it."""
+    if "AADSTS7000215" in err:
+        return (
+            "Invalid client secret - this is almost always the Secret ID pasted instead of the Secret Value "
+            "(Azure Portal > App registrations > your app > Certificates & secrets shows both, right next to "
+            "each other, and both look like random strings). Regenerate the secret and copy the Value column "
+            "specifically, then paste it into Service principal credentials below."
+        )
+    if "AADSTS7000222" in err:
+        return "The client secret has expired - generate a new one in App registrations > Certificates & secrets."
+    if "AADSTS700016" in err:
+        return "Application not found - check the Tenant ID and Application ID are correct."
+    if "AuthorizationFailed" in err:
+        return "Authenticated successfully, but the required role isn't assigned at this scope yet."
+    return err[:250]
+
+
 # ── Real per-subscription RBAC check ──────────────────────────────────────────
 
 def _get_principal_object_id(credential) -> Optional[str]:
@@ -265,7 +288,7 @@ def check_role_assignments(creds: AzureCredentials, subscription_id: str) -> dic
     except Exception as e:
         return {
             "checked": False, "ready": False, "assigned_roles": [], "missing_roles": [],
-            "error": str(e)[:300],
+            "error": _friendly_auth_error(str(e)),
         }
 
 
@@ -320,7 +343,7 @@ def check_tenant_role_assignments(creds: AzureCredentials) -> dict:
     except Exception as e:
         return {
             "checked": False, "ready": False, "assigned_roles": [], "missing_roles": [],
-            "error": str(e)[:300],
+            "error": _friendly_auth_error(str(e)),
         }
 
 
@@ -416,14 +439,7 @@ def test_connection(creds: AzureCredentials) -> dict:
         }
     except Exception as e:
         err = str(e)
-        if "AADSTS70011" in err:
-            msg = "Invalid client secret. Please check your Client Secret value."
-        elif "AADSTS700016" in err:
-            msg = "Application not found. Check your Tenant ID and Client ID."
-        elif "AuthorizationFailed" in err:
-            msg = "Authenticated but missing 'Reader' or 'Cost Management Reader' role on subscription."
-        else:
-            msg = f"Connection failed: {err[:200]}"
+        msg = _friendly_auth_error(err)
         return {
             "success": False,
             "message": msg,

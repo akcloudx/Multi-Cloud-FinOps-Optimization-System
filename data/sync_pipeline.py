@@ -38,7 +38,7 @@ from db.schema import (
 _MODE = "live"
 from azure_conn.connector import (
     load_credentials_from_env, fetch_live_inventory, fetch_live_reservations,
-    fetch_live_savings_plans, test_connection, AzureCredentials,
+    fetch_live_savings_plans, test_connection, AzureCredentials, _friendly_auth_error,
 )
 from aws.connector import load_aws_credentials_from_env, test_aws_connection
 from pricing.azure_retail_api import refresh_retail_prices
@@ -247,7 +247,12 @@ def run_ingestion_pipeline(provider: str = "Azure", creds=None, force_mock: bool
                 )
         except Exception as e:
             status = "FAILED"
-            message = f"API Sync Failed: {str(e)}"
+            # Same plain-language translation used everywhere else a stored
+            # credential authenticates (Manage Tenant's permission checks,
+            # test_connection) - a real tenant's broken client secret should
+            # read the same way here as it does everywhere else, not as a
+            # raw AADSTS error code dump.
+            message = f"API Sync Failed: {_friendly_auth_error(str(e))}"
             with Session(engine) as session:
                 session.add(SyncLog(
                     synced_at=now_iso,

@@ -454,17 +454,33 @@ def _clear_manage_tenant_dialog_state():
     st.session_state["_manage_tenant_id"] = None
 
 
+def _status_from_role_check(role_check: dict) -> tuple:
+    """Turns a check_role_assignments()/check_tenant_role_assignments() result
+    into a (status, detail) pair with THREE distinct states, not two - the
+    real bug found live 2026-08: when the check itself couldn't run at all
+    (checked=False - almost always a broken credential, e.g. an invalid
+    client secret), the old code collapsed that into the same "missing_role"
+    bucket as "checked fine, found N roles genuinely missing", producing a
+    nonsensical "Missing None" in the UI (missing_roles was an empty list,
+    not the reason it failed). "error" is now its own status with the real,
+    plain-language reason (see connector.py's _friendly_auth_error) - a
+    broken credential and a merely-unassigned role need different fixes and
+    should never look the same on screen."""
+    if not role_check["checked"]:
+        return "error", role_check.get("error") or "Could not check - unknown error."
+    if role_check["ready"]:
+        return "ready", None
+    return "missing_role", ", ".join(role_check["missing_roles"]) or "unknown role"
+
+
 def _run_tenant_permission_check(t, mode: str) -> dict:
     """Shared by the Connection health card's "Re-check everything" and the
     Tenant-wide permissions card's own button - real tenant-scope RBAC check
     (Reservations Reader / Savings Plan Reader)."""
     creds = AzureCredentials(t.tenant_id, t.subscription_id, t.client_id, get_tenant_credentials(t))
     role_check = check_tenant_role_assignments(creds)
-    update_tenant_permission_status(
-        selected_provider, mode, t.id,
-        "ready" if role_check["ready"] else "missing_role",
-        ", ".join(role_check["missing_roles"]) if role_check["missing_roles"] else None,
-    )
+    status, detail = _status_from_role_check(role_check)
+    update_tenant_permission_status(selected_provider, mode, t.id, status, detail)
     return role_check
 
 
@@ -477,11 +493,11 @@ def _run_subscription_sync(t, mode: str) -> list:
     live_subs = list_accessible_subscriptions(creds)
     for s in live_subs:
         role_check = check_role_assignments(creds, s["subscription_id"])
+        status, detail = _status_from_role_check(role_check)
         upsert_subscription(
             provider=selected_provider, mode=mode, tenant_db_id=t.id,
             subscription_id=s["subscription_id"], subscription_name=s["display_name"],
-            permission_status="ready" if role_check["ready"] else "missing_role",
-            missing_role=", ".join(role_check["missing_roles"]) if role_check["missing_roles"] else None,
+            permission_status=status, missing_role=detail,
         )
     return live_subs
 
@@ -525,6 +541,7 @@ def _manage_tenant_dialog(t, mode: str):
     subs = list_subscriptions(selected_provider, mode, t.id)
     sub_ready = bool(subs) and all(s.permission_status == "ready" for s in subs)
     sub_missing = any(s.permission_status == "missing_role" for s in subs)
+    sub_error = any(s.permission_status == "error" for s in subs)
 
     # ── Connection health ────────────────────────────────────────────────
     with st.container(border=True):
@@ -536,6 +553,11 @@ def _manage_tenant_dialog(t, mode: str):
                 st.caption("⚪ Not checked yet")
             elif sub_ready:
                 st.success("Ready", icon="✅")
+            elif sub_error:
+                # Distinct from "missing_role" on purpose - the check itself
+                # couldn't run (broken credential), not "ran fine, found a
+                # gap". Conflating these produced the "Missing None" bug.
+                st.error("Could not check", icon="❌")
             elif sub_missing:
                 st.warning("Missing roles", icon="⚠️")
             else:
@@ -544,6 +566,8 @@ def _manage_tenant_dialog(t, mode: str):
             st.caption("Tenant-level")
             if t.tenant_permission_status == "ready":
                 st.success("Ready", icon="✅")
+            elif t.tenant_permission_status == "error":
+                st.error("Could not check", icon="❌")
             elif t.tenant_permission_status == "missing_role":
                 st.warning("Missing roles", icon="⚠️")
             else:
@@ -640,6 +664,8 @@ Missing this step is **not fatal** - Resource inventory and cost data (step 2) s
                 sc[1].caption(s.subscription_id)
                 if s.permission_status == "ready":
                     sc[2].success("Ready", icon="✅")
+                elif s.permission_status == "error":
+                    sc[2].error(s.missing_role or "Could not check", icon="❌")
                 elif s.permission_status == "missing_role":
                     sc[2].warning(f"Missing {s.missing_role}", icon="⚠️")
                 else:
@@ -649,11 +675,11 @@ Missing this step is **not fatal** - Resource inventory and cost data (step 2) s
                     with st.spinner("Checking permissions..."):
                         creds = AzureCredentials(t.tenant_id, t.subscription_id, t.client_id, get_tenant_credentials(t))
                         role_check = check_role_assignments(creds, s.subscription_id)
+                        status, detail = _status_from_role_check(role_check)
                         upsert_subscription(
                             provider=selected_provider, mode=mode, tenant_db_id=t.id,
                             subscription_id=s.subscription_id, subscription_name=s.subscription_name,
-                            permission_status="ready" if role_check["ready"] else "missing_role",
-                            missing_role=", ".join(role_check["missing_roles"]) if role_check["missing_roles"] else None,
+                            permission_status=status, missing_role=detail,
                         )
                     st.rerun()
         else:
@@ -666,6 +692,8 @@ Missing this step is **not fatal** - Resource inventory and cost data (step 2) s
         tp1, tp2 = st.columns([3, 2])
         if t.tenant_permission_status == "ready":
             tp1.success("Ready", icon="✅")
+        elif t.tenant_permission_status == "error":
+            tp1.error(t.tenant_missing_roles or "Could not check", icon="❌")
         elif t.tenant_permission_status == "missing_role":
             tp1.warning(f"Missing {t.tenant_missing_roles}", icon="⚠️")
         else:
