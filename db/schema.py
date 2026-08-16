@@ -262,6 +262,8 @@ def init_db(provider: str = "Azure", mode: str = "demo"):
     _ensure_column(engine, schema_name, "cloud_tenants", "sync_interval_hours", "INTEGER")
     _ensure_column(engine, schema_name, "cloud_tenants", "last_sync_status", "VARCHAR(20)")
     _ensure_column(engine, schema_name, "cloud_tenants", "last_sync_message", "VARCHAR(500)")
+    _ensure_column(engine, schema_name, "cloud_tenants", "tenant_assigned_roles", "VARCHAR(255)")
+    _ensure_column(engine, schema_name, "tenant_subscriptions", "assigned_roles", "VARCHAR(255)")
     return engine
 
 
@@ -569,8 +571,14 @@ class CloudTenant(Base):
     # permission_status, since these two roles are tenant-scoped, not
     # subscription-scoped, so there's exactly one status per tenant, not one
     # per subscription.
-    tenant_permission_status = Column(String(50), default="unchecked")   # "unchecked" | "ready" | "missing_role"
+    tenant_permission_status = Column(String(50), default="unchecked")   # "unchecked" | "ready" | "missing_role" | "error"
     tenant_missing_roles     = Column(String(255), nullable=True)
+    # Which of REQUIRED_TENANT_ROLES are actually assigned, comma-joined -
+    # added alongside tenant_missing_roles so the UI can show every required
+    # role's real state (assigned/missing), not just the ones missing. Only
+    # tenant_missing_roles alone can't distinguish "checked, 0 of 2 missing"
+    # from "checked, 2 of 2 missing" without this.
+    tenant_assigned_roles    = Column(String(255), nullable=True)
     # How often the 24h-cron Azure Function should re-sync THIS tenant -
     # every tenant shares the same TimerTrigger firing (hourly - see
     # azure_function/function_app.py), which only actually calls
@@ -603,9 +611,12 @@ class TenantSubscription(Base):
     tenant_db_id       = Column(Integer, nullable=False)
     subscription_id    = Column(String(255), nullable=False)
     subscription_name  = Column(String(255), nullable=True)
-    # "unchecked" | "ready" | "missing_role"
+    # "unchecked" | "ready" | "missing_role" | "error"
     permission_status  = Column(String(50), default="unchecked")
     missing_role       = Column(String(255), nullable=True)
+    # Which of REQUIRED_SUBSCRIPTION_ROLES are actually assigned, comma-joined
+    # - same reasoning as CloudTenant.tenant_assigned_roles above.
+    assigned_roles      = Column(String(255), nullable=True)
     last_checked_at    = Column(String(255), nullable=True)
 
 

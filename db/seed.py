@@ -991,18 +991,26 @@ def seed_demo_tenant_if_empty():
         domain="demo.onmicrosoft.com",
     )
     # Tenant-wide (Reservations Reader / Savings Plan Reader) status,
-    # simulated the same way as the per-subscription ones below.
-    update_tenant_permission_status("Azure", "demo", tenant_db_id, "ready", None)
+    # simulated the same way as the per-subscription ones below. assigned_roles
+    # must agree with the status - the per-role checklist reads assigned_roles
+    # directly, so a "ready" status with no assigned_roles renders every role
+    # as missing despite the green tab icon (a real bug caught in browser
+    # verification 2026-08).
+    update_tenant_permission_status(
+        "Azure", "demo", tenant_db_id, "ready", None,
+        assigned_roles="Reservations Reader, Savings Plan Reader",
+    )
     upsert_subscription(
         provider="Azure", mode="demo", tenant_db_id=tenant_db_id,
         subscription_id="66666666-7777-8888-9999-000000000000",
         subscription_name="Production", permission_status="ready",
+        assigned_roles="Reader, Cost Management Reader",
     )
     upsert_subscription(
         provider="Azure", mode="demo", tenant_db_id=tenant_db_id,
         subscription_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
         subscription_name="Sandbox", permission_status="missing_role",
-        missing_role="Cost Management Reader",
+        missing_role="Cost Management Reader", assigned_roles="Reader",
     )
     print("[OK] Seeded demo tenant 'Demo Tenant 1' with 2 subscriptions.")
 

@@ -117,18 +117,21 @@ def update_tenant_name(provider: str, mode: str, tenant_db_id: int, tenant_name:
 
 
 def update_tenant_permission_status(provider: str, mode: str, tenant_db_id: int,
-                                     status: str, missing_roles: Optional[str] = None) -> None:
+                                     status: str, missing_roles: Optional[str] = None,
+                                     assigned_roles: Optional[str] = None) -> None:
     """Stamps the tenant-WIDE permission status (Reservations Reader /
     Savings Plan Reader - see azure_conn/connector.py's
-    check_tenant_role_assignments). `missing_roles` is a plain comma-joined
-    string, not a relational list - there are only ever 0-2 of these roles,
-    a dedicated table would be overkill."""
+    check_tenant_role_assignments). `missing_roles`/`assigned_roles` are
+    plain comma-joined strings, not relational lists - there are only ever
+    0-2 of these roles, a dedicated table would be overkill. Both are stored
+    (not just missing) so the UI can show every required role's real state."""
     init_db(provider, mode)
     engine = get_engine(provider, mode)
     with Session(engine) as session:
         session.query(CloudTenant).filter(CloudTenant.id == tenant_db_id).update({
             "tenant_permission_status": status,
             "tenant_missing_roles": missing_roles,
+            "tenant_assigned_roles": assigned_roles,
         })
         session.commit()
 
@@ -225,11 +228,14 @@ def list_subscriptions(provider: str, mode: str, tenant_db_id: int) -> list[Tena
 def upsert_subscription(provider: str, mode: str, tenant_db_id: int, subscription_id: str,
                          subscription_name: Optional[str] = None,
                          permission_status: str = "unchecked",
-                         missing_role: Optional[str] = None) -> int:
+                         missing_role: Optional[str] = None,
+                         assigned_roles: Optional[str] = None) -> int:
     """Insert or update one subscription row under a tenant, keyed on
     (tenant_db_id, subscription_id). Used both by the real Azure "Sync
     subscriptions" flow (re-enumerating + re-checking permissions) and by
-    demo seeding (writing pre-set simulated results directly)."""
+    demo seeding (writing pre-set simulated results directly). assigned_roles
+    (comma-joined, alongside the existing missing_role) lets the UI show
+    every required role's real state, not just the missing ones."""
     init_db(provider, mode)
     engine = get_engine(provider, mode)
     now_iso = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -243,6 +249,7 @@ def upsert_subscription(provider: str, mode: str, tenant_db_id: int, subscriptio
                 existing.subscription_name = subscription_name
             existing.permission_status = permission_status
             existing.missing_role = missing_role
+            existing.assigned_roles = assigned_roles
             existing.last_checked_at = now_iso
             session.commit()
             return existing.id
@@ -250,7 +257,7 @@ def upsert_subscription(provider: str, mode: str, tenant_db_id: int, subscriptio
         row = TenantSubscription(
             tenant_db_id=tenant_db_id, subscription_id=subscription_id,
             subscription_name=subscription_name, permission_status=permission_status,
-            missing_role=missing_role, last_checked_at=now_iso,
+            missing_role=missing_role, assigned_roles=assigned_roles, last_checked_at=now_iso,
         )
         session.add(row)
         session.commit()

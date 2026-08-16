@@ -456,62 +456,83 @@ def _clear_manage_tenant_dialog_state():
 
 def _status_from_role_check(role_check: dict) -> tuple:
     """Turns a check_role_assignments()/check_tenant_role_assignments() result
-    into a (status, detail) pair with THREE distinct states, not two - the
-    real bug found live 2026-08: when the check itself couldn't run at all
-    (checked=False - almost always a broken credential, e.g. an invalid
-    client secret), the old code collapsed that into the same "missing_role"
-    bucket as "checked fine, found N roles genuinely missing", producing a
-    nonsensical "Missing None" in the UI (missing_roles was an empty list,
-    not the reason it failed). "error" is now its own status with the real,
-    plain-language reason (see connector.py's _friendly_auth_error) - a
-    broken credential and a merely-unassigned role need different fixes and
-    should never look the same on screen."""
+    into a (status, missing, assigned) triple with THREE distinct states, not
+    two - the real bug found live 2026-08: when the check itself couldn't run
+    at all (checked=False - almost always a broken credential, e.g. an
+    invalid client secret), the old code collapsed that into the same
+    "missing_role" bucket as "checked fine, found N roles genuinely missing",
+    producing a nonsensical "Missing None" in the UI. "error" is now its own
+    status with the real, plain-language reason (see connector.py's
+    _friendly_auth_error). Both missing AND assigned roles are returned
+    (comma-joined strings) - not just missing - so the caller can show every
+    required role's real state, not just the gaps."""
     if not role_check["checked"]:
-        return "error", role_check.get("error") or "Could not check - unknown error."
-    if role_check["ready"]:
-        return "ready", None
-    return "missing_role", ", ".join(role_check["missing_roles"]) or "unknown role"
+        return "error", role_check.get("error") or "Could not check - unknown error.", None
+    status = "ready" if role_check["ready"] else "missing_role"
+    missing = ", ".join(role_check["missing_roles"]) or None
+    assigned = ", ".join(role_check["assigned_roles"]) or None
+    return status, missing, assigned
+
+
+def _render_role_checklist(required_roles: list, status: str, assigned_str: str):
+    """Shows every required role's real assigned/missing state, one line
+    each - replaces the old single aggregate "Missing X, Y" line, which
+    couldn't distinguish "checked, 0 missing" from "checked, all missing"
+    without reading the detail text. Only meaningful when status is "ready"
+    or "missing_role" (the check actually ran) - callers handle
+    "error"/"unchecked" themselves, since there's no real per-role data for
+    those states."""
+    assigned_set = {r.strip() for r in (assigned_str or "").split(",") if r.strip()}
+    for role in required_roles:
+        name = role["Role Name"]
+        if name in assigned_set:
+            st.markdown(f"✅ {name}")
+        else:
+            st.markdown(f"❌ {name}")
 
 
 def _run_tenant_permission_check(t, mode: str) -> dict:
-    """Shared by the Connection health card's "Re-check everything" and the
-    Tenant-wide permissions card's own button - real tenant-scope RBAC check
-    (Reservations Reader / Savings Plan Reader)."""
+    """Shared by the Tenant-wide permissions tab's "Check tenant permissions"
+    button (and formerly the Connection health card's "Re-check everything",
+    since folded into this simpler tab-based layout) - real tenant-scope
+    RBAC check (Reservations Reader / Savings Plan Reader)."""
     creds = AzureCredentials(t.tenant_id, t.subscription_id, t.client_id, get_tenant_credentials(t))
     role_check = check_tenant_role_assignments(creds)
-    status, detail = _status_from_role_check(role_check)
-    update_tenant_permission_status(selected_provider, mode, t.id, status, detail)
+    status, missing, assigned = _status_from_role_check(role_check)
+    update_tenant_permission_status(selected_provider, mode, t.id, status, missing, assigned)
     return role_check
 
 
 def _run_subscription_sync(t, mode: str) -> list:
-    """Shared by the Connection health card's "Re-check everything" and the
-    Subscriptions card's own "Sync subscriptions" button - (re)discovers
-    every subscription the Service Principal can see and checks its
-    subscription-level role assignment (Reader / Cost Management Reader)."""
+    """Shared by the Subscriptions tab's "Sync subscriptions" button -
+    (re)discovers every subscription the Service Principal can see and
+    checks its subscription-level role assignment (Reader / Cost Management
+    Reader)."""
     creds = AzureCredentials(t.tenant_id, t.subscription_id, t.client_id, get_tenant_credentials(t))
     live_subs = list_accessible_subscriptions(creds)
     for s in live_subs:
         role_check = check_role_assignments(creds, s["subscription_id"])
-        status, detail = _status_from_role_check(role_check)
+        status, missing, assigned = _status_from_role_check(role_check)
         upsert_subscription(
             provider=selected_provider, mode=mode, tenant_db_id=t.id,
             subscription_id=s["subscription_id"], subscription_name=s["display_name"],
-            permission_status=status, missing_role=detail,
+            permission_status=status, missing_role=missing, assigned_roles=assigned,
         )
     return live_subs
 
 
 @st.dialog("Manage tenant", width="large", on_dismiss=_clear_manage_tenant_dialog_state)
 def _manage_tenant_dialog(t, mode: str):
-    """Per-tenant editing, organized as bordered cards (connection health,
-    credentials, subscriptions, tenant-wide permissions, sync) - each with
-    its own status stripe, so the state of the tenant is scannable without
-    reading prose, similar to how connection-management screens in tools
-    like Flexera/CloudHealth are laid out. Production only for anything
-    beyond the name edit - Demo tenants have no real Azure behind them, and
-    every control here stays visible but disabled for Demo (confirmed "same
-    UI, different live-ness" design), matching the existing convention.
+    """Per-tenant editing, laid out as tabs (Credentials / Subscriptions /
+    Tenant-wide permissions / Sync / Features) rather than a stack of
+    bordered cards - approved sketch 2026-08, referencing Azure Portal's own
+    resource blade pattern (Essentials-style plain status lines, one focused
+    section visible at a time instead of everything scrolling past at once).
+    Each tab whose status matters shows a small icon in its own label so you
+    can tell what needs attention without opening it. Production only for
+    anything beyond the name edit - Demo tenants have no real Azure behind
+    them, and every control here stays visible but disabled for Demo
+    (confirmed "same UI, different live-ness" design).
 
     IMPORTANT: this function is called from page_home() every rerun while
     st.session_state["_manage_tenant_id"] == t.id - NOT gated on a button's
@@ -542,56 +563,20 @@ def _manage_tenant_dialog(t, mode: str):
     sub_ready = bool(subs) and all(s.permission_status == "ready" for s in subs)
     sub_missing = any(s.permission_status == "missing_role" for s in subs)
     sub_error = any(s.permission_status == "error" for s in subs)
+    sub_icon = "✅" if sub_ready else "❌" if sub_error else "⚠️" if sub_missing else ""
+    tenant_icon = {"ready": "✅", "error": "❌", "missing_role": "⚠️"}.get(t.tenant_permission_status, "")
+    sync_icon = {"SUCCESS": "✅", "FAILED": "❌", "PARTIAL": "⚠️"}.get(t.last_sync_status, "")
 
-    # ── Connection health ────────────────────────────────────────────────
-    with st.container(border=True):
-        st.markdown("##### 🩺 Connection health")
-        h1, h2, h3 = st.columns(3)
-        with h1:
-            st.caption("Subscription-level")
-            if not subs:
-                st.caption("⚪ Not checked yet")
-            elif sub_ready:
-                st.success("Ready", icon="✅")
-            elif sub_error:
-                # Distinct from "missing_role" on purpose - the check itself
-                # couldn't run (broken credential), not "ran fine, found a
-                # gap". Conflating these produced the "Missing None" bug.
-                st.error("Could not check", icon="❌")
-            elif sub_missing:
-                st.warning("Missing roles", icon="⚠️")
-            else:
-                st.caption("⚪ Not checked yet")
-        with h2:
-            st.caption("Tenant-level")
-            if t.tenant_permission_status == "ready":
-                st.success("Ready", icon="✅")
-            elif t.tenant_permission_status == "error":
-                st.error("Could not check", icon="❌")
-            elif t.tenant_permission_status == "missing_role":
-                st.warning("Missing roles", icon="⚠️")
-            else:
-                st.caption("⚪ Not checked yet")
-        with h3:
-            st.caption("Last sync")
-            if t.last_sync_status == "SUCCESS":
-                st.success("Healthy", icon="✅")
-            elif t.last_sync_status == "PARTIAL":
-                st.warning("Partial", icon="⚠️")
-            elif t.last_sync_status == "FAILED":
-                st.error("Failed", icon="❌")
-            else:
-                st.caption("⚪ Never run")
-        if st.button("🔁 Re-check everything", disabled=is_demo, key=f"mgmt_health_recheck_{t.id}",
-                      help="Only available for Production tenants." if is_demo else "Re-checks subscription-level AND tenant-level permissions in one step."):
-            with st.spinner("Re-checking subscription and tenant-level permissions..."):
-                _run_subscription_sync(t, mode)
-                _run_tenant_permission_check(t, mode)
-            st.rerun()
+    tab_credentials, tab_subs, tab_tenant, tab_sync, tab_features = st.tabs([
+        "Credentials",
+        f"Subscriptions {sub_icon}".rstrip(),
+        f"Tenant-wide permissions {tenant_icon}".rstrip(),
+        f"Sync {sync_icon}".rstrip(),
+        "Features",
+    ])
 
-    # ── Service principal credentials ────────────────────────────────────
-    with st.container(border=True):
-        st.markdown("##### 🔑 Service principal credentials")
+    # ── Credentials ───────────────────────────────────────────────────────
+    with tab_credentials:
         if is_demo:
             st.caption("Not applicable - a demo tenant has no real Service Principal behind it.")
         else:
@@ -644,61 +629,53 @@ Missing this step is **not fatal** - Resource inventory and cost data (step 2) s
 """)
 
     # ── Subscriptions ─────────────────────────────────────────────────────
-    with st.container(border=True):
-        st.markdown("##### 🗂️ Subscriptions")
+    with tab_subs:
         if st.button("🔁 Sync subscriptions", disabled=is_demo, key=f"mgmt_sync_subs_{t.id}",
                       help="Only available for Production tenants." if is_demo else "Discovers subscriptions and checks Reader/Cost Management Reader on each."):
             with st.spinner("Enumerating subscriptions and checking permissions..."):
                 live_subs = _run_subscription_sync(t, mode)
                 if not live_subs:
-                    st.error("Could not enumerate subscriptions - check the credentials above.")
+                    st.error("Could not enumerate subscriptions - check the credentials in the Credentials tab.")
             st.rerun()
 
         if subs:
-            sc_header = st.columns([3, 3, 2, 2])
-            for c, label in zip(sc_header, ["Subscription", "ID", "Status", ""]):
-                c.caption(f"**{label}**")
             for s in subs:
-                sc = st.columns([3, 3, 2, 2])
-                sc[0].markdown(f"**{s.subscription_name or s.subscription_id}**")
-                sc[1].caption(s.subscription_id)
-                if s.permission_status == "ready":
-                    sc[2].success("Ready", icon="✅")
+                st.markdown(f"**{s.subscription_name or s.subscription_id}**")
+                st.caption(s.subscription_id)
+                if s.permission_status in ("ready", "missing_role"):
+                    _render_role_checklist(REQUIRED_SUBSCRIPTION_ROLES, s.permission_status, s.assigned_roles)
                 elif s.permission_status == "error":
-                    sc[2].error(s.missing_role or "Could not check", icon="❌")
-                elif s.permission_status == "missing_role":
-                    sc[2].warning(f"Missing {s.missing_role}", icon="⚠️")
+                    st.error(s.missing_role or "Could not check", icon="❌")
                 else:
-                    sc[2].caption("Not checked yet")
-                if sc[3].button("Verify", key=f"mgmt_verify_sub_{s.id}", disabled=is_demo, width="stretch",
-                                help="Only available for Production tenants." if is_demo else None):
+                    st.caption("Not checked yet.")
+                if st.button("Verify", key=f"mgmt_verify_sub_{s.id}", disabled=is_demo,
+                             help="Only available for Production tenants." if is_demo else None):
                     with st.spinner("Checking permissions..."):
                         creds = AzureCredentials(t.tenant_id, t.subscription_id, t.client_id, get_tenant_credentials(t))
                         role_check = check_role_assignments(creds, s.subscription_id)
-                        status, detail = _status_from_role_check(role_check)
+                        status, missing, assigned = _status_from_role_check(role_check)
                         upsert_subscription(
                             provider=selected_provider, mode=mode, tenant_db_id=t.id,
                             subscription_id=s.subscription_id, subscription_name=s.subscription_name,
-                            permission_status=status, missing_role=detail,
+                            permission_status=status, missing_role=missing, assigned_roles=assigned,
                         )
                     st.rerun()
+                st.divider()
         else:
             st.caption("No subscriptions recorded yet - click **Sync subscriptions** above.")
 
     # ── Tenant-wide permissions (Reservations / Savings Plans) ──────────
-    with st.container(border=True):
-        st.markdown("##### 🌐 Tenant-wide permissions")
+    with tab_tenant:
         st.caption("Reservations and Savings Plans are tenant-wide resources with their own separate permission system, not covered by the subscription-level roles above.")
-        tp1, tp2 = st.columns([3, 2])
-        if t.tenant_permission_status == "ready":
-            tp1.success("Ready", icon="✅")
+        if t.tenant_permission_status in ("ready", "missing_role"):
+            _render_role_checklist(REQUIRED_TENANT_ROLES, t.tenant_permission_status, t.tenant_assigned_roles)
+            if t.tenant_permission_status == "missing_role":
+                st.caption("Needs User Access Administrator at the tenant level - often unavailable on student/trial accounts. Inventory and cost data are unaffected; only Reservations/Savings Plan data needs this.")
         elif t.tenant_permission_status == "error":
-            tp1.error(t.tenant_missing_roles or "Could not check", icon="❌")
-        elif t.tenant_permission_status == "missing_role":
-            tp1.warning(f"Missing {t.tenant_missing_roles}", icon="⚠️")
+            st.error(t.tenant_missing_roles or "Could not check", icon="❌")
         else:
-            tp1.caption("Not checked yet")
-        if tp2.button("🔁 Check tenant permissions", disabled=is_demo, key=f"mgmt_tenant_check_{t.id}",
+            st.caption("Not checked yet.")
+        if st.button("🔁 Check tenant permissions", disabled=is_demo, key=f"mgmt_tenant_check_{t.id}",
                       help="Only available for Production tenants." if is_demo else None):
             with st.spinner("Checking tenant-level permissions..."):
                 _run_tenant_permission_check(t, mode)
@@ -711,8 +688,7 @@ Missing this step is **not fatal** - Resource inventory and cost data (step 2) s
             st.dataframe(pd.DataFrame(REQUIRED_TENANT_ROLES)[["Role Name", "Scope", "Purpose"]], hide_index=True, width="stretch")
 
     # ── Sync ───────────────────────────────────────────────────────────
-    with st.container(border=True):
-        st.markdown("##### ⚡ Sync")
+    with tab_sync:
         if t.last_sync_status == "SUCCESS":
             st.success(t.last_sync_message or "Last sync succeeded.", icon="✅")
         elif t.last_sync_status == "PARTIAL":
@@ -748,8 +724,12 @@ Missing this step is **not fatal** - Resource inventory and cost data (step 2) s
             st.cache_data.clear()
             st.rerun()
 
+    # ── Features (placeholder) ────────────────────────────────────────
+    with tab_features:
+        st.caption("Nothing here yet - reserved for upcoming tenant-level features.")
+
     st.divider()
-    if st.button("🗑️ Delete tenant", disabled=is_demo, key=f"mgmt_delete_{t.id}",
+    if st.button("🗑️ Delete tenant", disabled=is_demo, key=f"mgmt_delete_prod_{t.id}",
                  help="Only available for Production tenants." if is_demo else None):
         delete_tenant(selected_provider, mode, t.id)
         st.session_state["_manage_tenant_id"] = None
