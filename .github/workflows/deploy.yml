@@ -75,3 +75,18 @@ jobs:
           app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
           package: dist-func
           publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}
+          # Azure/functions-action@v1 defaults BOTH of these to false when
+          # unset (confirmed from a real run's log, 2026-08-16: "Setting
+          # SCM_DO_BUILD_DURING_DEPLOYMENT in Kudu container to false") - the
+          # raw zip gets uploaded as-is with no `pip install
+          # -r requirements.txt` ever running server-side. Every past deploy
+          # "succeeded" while silently shipping a package with none of its
+          # third-party dependencies (sqlalchemy, mssql-python,
+          # azure-identity, boto3, cryptography, ...) installed - imports
+          # failed at cold start and zero functions ever indexed, on top of
+          # the separate missing-sibling-folders bug fixed above in the same
+          # commit. Both flags are required together for Python remote Oryx
+          # build - Microsoft's own official Python Functions Action sample
+          # sets both, not just one.
+          scm-do-build-during-deployment: true
+          enable-oryx-build: true
