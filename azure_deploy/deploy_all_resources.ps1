@@ -165,6 +165,11 @@ if (-not $funcExists) {
 Write-Host "        Enabling Managed Identity ..." -ForegroundColor Yellow
 az functionapp identity assign --resource-group $ResourceGroupName --name $FunctionAppName -o none
 az functionapp config appsettings set --resource-group $ResourceGroupName --name $FunctionAppName --settings AZURE_SQL_SERVER="$SqlServerFqdn" AZURE_SQL_DATABASE="$SqlDbName" -o none
+# Explicitly remove any leftover DATABASE_URL from a prior password-based
+# deploy - db/schema.py's get_engine() checks DATABASE_URL FIRST, so a
+# stale setting here would silently keep using the old password path
+# instead of the new Managed Identity one. Safe no-op if it was never set.
+az functionapp config appsettings delete --resource-group $ResourceGroupName --name $FunctionAppName --setting-names DATABASE_URL -o none 2>$null
 
 # Fix PowerShell 5.1 Join-Path syntax: use nested 2-argument Join-Path calls
 $parentPath   = Join-Path $PSScriptRoot ".."
@@ -237,6 +242,10 @@ Write-Host "        Enabling Managed Identity ..." -ForegroundColor Yellow
 az webapp identity assign --resource-group $ResourceGroupName --name $WebAppName -o none
 
 az webapp config appsettings set --resource-group $ResourceGroupName --name $WebAppName --settings SCM_DO_BUILD_DURING_DEPLOYMENT="true" WEBSITES_PORT="8000" WEBSITES_CONTAINER_STARTTIME_LIMIT="1800" AZURE_SQL_SERVER="$SqlServerFqdn" AZURE_SQL_DATABASE="$SqlDbName" STREAMLIT_SERVER_PORT="8000" STREAMLIT_SERVER_ADDRESS="0.0.0.0" STREAMLIT_SERVER_HEADLESS="true" -o none
+# Same reasoning as the Function App above: remove any leftover DATABASE_URL
+# from a prior password-based deploy so it can't silently shadow the new
+# Managed Identity path. Safe no-op if it was never set.
+az webapp config appsettings delete --resource-group $ResourceGroupName --name $WebAppName --setting-names DATABASE_URL -o none 2>$null
 
 Write-Host "        [OK] App Service settings configured. Pausing 10s for container stabilization..." -ForegroundColor Green
 Start-Sleep -Seconds 10
