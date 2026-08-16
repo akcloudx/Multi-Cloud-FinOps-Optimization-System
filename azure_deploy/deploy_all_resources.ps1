@@ -171,6 +171,28 @@ az functionapp config appsettings set --resource-group $ResourceGroupName --name
 # instead of the new Managed Identity one. Safe no-op if it was never set.
 az functionapp config appsettings delete --resource-group $ResourceGroupName --name $FunctionAppName --setting-names DATABASE_URL -o none 2>$null
 
+# Shared encryption key for CloudTenant.client_secret at rest (db/crypto.py).
+# Without this app setting, crypto.py falls back to a key auto-generated and
+# cached in a local file - fine for local dev, but this Free-tier plan's
+# Oryx build produces a brand-new container on every code deploy, so that
+# local file (never committed, never persisted) is gone on the next push.
+# Every redeploy silently rotated the key and made every already-stored
+# client secret undecryptable garbage (real incident, 2026-08 - showed up as
+# "Invalid client secret" on a secret that was actually fine). Resolved ONCE
+# here and reused on every re-run of this script (read back from whichever
+# app already has it set, so re-running never rotates a working key out from
+# under already-saved tenants) - and must be IDENTICAL on both apps, since
+# the Function App's cron sync decrypts what the Web App encrypted.
+Write-Host "        Configuring shared encryption key (TENANT_SECRET_KEY) ..." -ForegroundColor Yellow
+$sharedSecretKey = az functionapp config appsettings list --resource-group $ResourceGroupName --name $FunctionAppName --query "[?name=='TENANT_SECRET_KEY'].value" -o tsv 2>$null
+if (-not $sharedSecretKey) {
+    $sharedSecretKey = python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    Write-Host "        [OK] Generated a new TENANT_SECRET_KEY." -ForegroundColor Green
+} else {
+    Write-Host "        [OK] Reusing existing TENANT_SECRET_KEY - already-saved client secrets stay valid." -ForegroundColor DarkGreen
+}
+az functionapp config appsettings set --resource-group $ResourceGroupName --name $FunctionAppName --settings TENANT_SECRET_KEY="$sharedSecretKey" -o none
+
 # Fix PowerShell 5.1 Join-Path syntax: use nested 2-argument Join-Path calls
 $parentPath   = Join-Path $PSScriptRoot ".."
 $funcCodePath = [System.IO.Path]::GetFullPath((Join-Path $parentPath "azure_function"))
@@ -241,7 +263,7 @@ az webapp config set --resource-group $ResourceGroupName --name $WebAppName --st
 Write-Host "        Enabling Managed Identity ..." -ForegroundColor Yellow
 az webapp identity assign --resource-group $ResourceGroupName --name $WebAppName -o none
 
-az webapp config appsettings set --resource-group $ResourceGroupName --name $WebAppName --settings SCM_DO_BUILD_DURING_DEPLOYMENT="true" WEBSITES_PORT="8000" WEBSITES_CONTAINER_STARTTIME_LIMIT="1800" AZURE_SQL_SERVER="$SqlServerFqdn" AZURE_SQL_DATABASE="$SqlDbName" STREAMLIT_SERVER_PORT="8000" STREAMLIT_SERVER_ADDRESS="0.0.0.0" STREAMLIT_SERVER_HEADLESS="true" -o none
+az webapp config appsettings set --resource-group $ResourceGroupName --name $WebAppName --settings SCM_DO_BUILD_DURING_DEPLOYMENT="true" WEBSITES_PORT="8000" WEBSITES_CONTAINER_STARTTIME_LIMIT="1800" AZURE_SQL_SERVER="$SqlServerFqdn" AZURE_SQL_DATABASE="$SqlDbName" STREAMLIT_SERVER_PORT="8000" STREAMLIT_SERVER_ADDRESS="0.0.0.0" STREAMLIT_SERVER_HEADLESS="true" TENANT_SECRET_KEY="$sharedSecretKey" -o none
 # Same reasoning as the Function App above: remove any leftover DATABASE_URL
 # from a prior password-based deploy so it can't silently shadow the new
 # Managed Identity path. Safe no-op if it was never set.
