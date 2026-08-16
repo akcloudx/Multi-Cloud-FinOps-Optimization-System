@@ -548,14 +548,25 @@ def _manage_tenant_dialog(t, mode: str):
     is_demo = (mode == "demo")
     st.caption(f"{selected_provider} · {'Demo' if is_demo else 'Production'}")
 
-    name_col, save_col = st.columns([4, 1])
-    new_name = name_col.text_input("Tenant name", value=t.tenant_name, key=f"mgmt_name_{t.id}")
-    if save_col.button("Save", key=f"mgmt_save_name_{t.id}", width="stretch"):
-        update_tenant_name(selected_provider, mode, t.id, new_name)
-        st.success("Tenant name updated.")
-        st.rerun()
+    # Reserved now, filled in further down (after segmented_control has run) -
+    # a Streamlit container's screen position is fixed at creation, not at
+    # the point its content is written, so this stays visually first. Needed
+    # because the Save button below calls st.rerun(), and if that happens
+    # BEFORE segmented_control executes even once in a given script run,
+    # Streamlit prunes that widget's session-state entry as "not used this
+    # run" - which is what caused the segmented control to keep resetting to
+    # its first option every time this Save button was clicked (real bug
+    # found live 2026-08, several layers deeper than it first looked).
+    name_row = st.container()
 
     if not is_azure:
+        with name_row:
+            name_col, save_col = st.columns([4, 1])
+            new_name = name_col.text_input("Tenant name", value=t.tenant_name, key=f"mgmt_name_{t.id}")
+            if save_col.button("Save", key=f"mgmt_save_name_{t.id}", width="stretch"):
+                update_tenant_name(selected_provider, mode, t.id, new_name)
+                st.success("Tenant name updated.")
+                st.rerun()
         st.divider()
         if st.button("🗑️ Delete tenant", disabled=is_demo, key=f"mgmt_delete_{t.id}"):
             delete_tenant(selected_provider, mode, t.id)
@@ -571,16 +582,48 @@ def _manage_tenant_dialog(t, mode: str):
     tenant_icon = {"ready": "✅", "error": "❌", "missing_role": "⚠️"}.get(t.tenant_permission_status, "")
     sync_icon = {"SUCCESS": "✅", "FAILED": "❌", "PARTIAL": "⚠️"}.get(t.last_sync_status, "")
 
-    tab_credentials, tab_subs, tab_tenant, tab_sync, tab_features = st.tabs([
-        "Credentials",
-        f"Subscriptions {sub_icon}".rstrip(),
-        f"Tenant-wide permissions {tenant_icon}".rstrip(),
-        f"Sync {sync_icon}".rstrip(),
-        "Features",
-    ])
+    # st.tabs() has no session-state-backed selection - every st.rerun() call
+    # below (Verify, Sync, Save, Run sync now...) remounts it fresh and it
+    # snaps back to the first tab, losing whatever section the user was
+    # looking at (real bug found live 2026-08, same root cause as the
+    # @st.dialog session-state gating above: Streamlit UI state that isn't
+    # explicitly stored in st.session_state doesn't survive a rerun).
+    # st.segmented_control IS a real keyed widget - its value round-trips
+    # through st.session_state[key] like any other widget, so it stays on
+    # the active section across every action in this dialog. Option VALUES
+    # are kept stable ("Subscriptions", not "Subscriptions ⚠️") and the
+    # status icon is applied only for display via format_func - if the icon
+    # were part of the value itself, a status change (e.g. ⚠️ -> ✅ right
+    # after Verify) would make the stored selection match nothing in the
+    # next render's options list and reset anyway.
+    _SECTIONS = ["Credentials", "Subscriptions", "Tenant-wide permissions", "Sync", "Features"]
+    _section_icons = {"Subscriptions": sub_icon, "Tenant-wide permissions": tenant_icon, "Sync": sync_icon}
+    _section_key = f"mgmt_section_{t.id}"
+    # `default` is only the seed value for the FIRST render - passing a
+    # hardcoded default here every time (the original mistake) silently wins
+    # over the widget's own persisted selection on every rerun, which looked
+    # identical to st.tabs()'s reset bug. Reading the prior value back out of
+    # session_state before rendering is what actually makes it sticky.
+    active_section = st.segmented_control(
+        "Section", options=_SECTIONS,
+        format_func=lambda name: f"{name} {_section_icons.get(name, '')}".rstrip(),
+        default=st.session_state.get(_section_key, _SECTIONS[0]),
+        required=True, key=_section_key,
+        label_visibility="collapsed",
+    )
+
+    # Filled in now (registered above, drawn into the reserved slot from
+    # before) - see name_row's creation comment for why this ordering matters.
+    with name_row:
+        name_col, save_col = st.columns([4, 1])
+        new_name = name_col.text_input("Tenant name", value=t.tenant_name, key=f"mgmt_name_{t.id}")
+        if save_col.button("Save", key=f"mgmt_save_name_{t.id}", width="stretch"):
+            update_tenant_name(selected_provider, mode, t.id, new_name)
+            st.success("Tenant name updated.")
+            st.rerun()
 
     # ── Credentials ───────────────────────────────────────────────────────
-    with tab_credentials:
+    if active_section == "Credentials":
         if is_demo:
             st.caption("Not applicable - a demo tenant has no real Service Principal behind it.")
         else:
@@ -633,7 +676,7 @@ Missing this step is **not fatal** - Resource inventory and cost data (step 2) s
 """)
 
     # ── Subscriptions ─────────────────────────────────────────────────────
-    with tab_subs:
+    elif active_section == "Subscriptions":
         if st.button("🔁 Sync subscriptions", disabled=is_demo, key=f"mgmt_sync_subs_{t.id}",
                       help="Only available for Production tenants." if is_demo else "Discovers subscriptions and checks Reader/Cost Management Reader on each."):
             with st.spinner("Enumerating subscriptions and checking permissions..."):
@@ -669,7 +712,7 @@ Missing this step is **not fatal** - Resource inventory and cost data (step 2) s
             st.caption("No subscriptions recorded yet - click **Sync subscriptions** above.")
 
     # ── Tenant-wide permissions (Reservations / Savings Plans) ──────────
-    with tab_tenant:
+    elif active_section == "Tenant-wide permissions":
         st.caption("Reservations and Savings Plans are tenant-wide resources with their own separate permission system, not covered by the subscription-level roles above.")
         if t.tenant_permission_status in ("ready", "missing_role"):
             _render_role_checklist(REQUIRED_TENANT_ROLES, t.tenant_permission_status, t.tenant_assigned_roles)
@@ -692,7 +735,7 @@ Missing this step is **not fatal** - Resource inventory and cost data (step 2) s
             st.dataframe(pd.DataFrame(REQUIRED_TENANT_ROLES)[["Role Name", "Scope", "Purpose"]], hide_index=True, width="stretch")
 
     # ── Sync ───────────────────────────────────────────────────────────
-    with tab_sync:
+    elif active_section == "Sync":
         if t.last_sync_status == "SUCCESS":
             st.success(t.last_sync_message or "Last sync succeeded.", icon="✅")
         elif t.last_sync_status == "PARTIAL":
@@ -729,7 +772,7 @@ Missing this step is **not fatal** - Resource inventory and cost data (step 2) s
             st.rerun()
 
     # ── Features (placeholder) ────────────────────────────────────────
-    with tab_features:
+    elif active_section == "Features":
         st.caption("Nothing here yet - reserved for upcoming tenant-level features.")
 
     st.divider()
