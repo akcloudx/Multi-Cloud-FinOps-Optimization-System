@@ -21,6 +21,7 @@ real schemas the same way), each scope is a separate .db file instead.
 """
 
 import os
+import time
 from sqlalchemy import (
     create_engine, Column, String, Float, Integer, Boolean, Text, inspect, text
 )
@@ -137,11 +138,41 @@ def get_engine(provider: str = "Azure", mode: str = "demo"):
     if db_url and "mssql" in db_url:
         if "mssqlpython" not in db_url and "pymssql" not in db_url and "pyodbc" not in db_url:
             db_url = db_url.replace("mssql://", "mssql+pymssql://")
+        # mssql-python's `timeout` is a real top-level connect() parameter
+        # (verified against the installed package's own source, 2026-08) -
+        # genuinely different from its documented-but-broken "Connection
+        # Timeout" connection-STRING keyword (microsoft/mssql-python#339).
+        # Set generously (60s, well beyond the default that was hitting
+        # "TCP Provider: Timeout error [258]" on a cold-starting F1 Free
+        # tier instance authenticating via Managed Identity - token
+        # acquisition + TLS + TCP handshake all have to complete within it).
+        engine_kwargs = {"echo": False, "future": True, "pool_pre_ping": True}
+        if "mssqlpython" in db_url:
+            engine_kwargs["connect_args"] = {"timeout": 60}
         try:
             if provider_key not in _base_mssql_engines:
-                base_engine = create_engine(db_url, echo=False, future=True, pool_pre_ping=True)
-                with base_engine.connect() as conn:
-                    pass
+                base_engine = create_engine(db_url, **engine_kwargs)
+                # Retry the first real connection a few times with backoff -
+                # a cold F1 instance's first outbound TCP attempt to Azure
+                # SQL has genuinely been observed to time out while a
+                # follow-up attempt (warm DNS/TLS/IMDS token cache) succeeds
+                # moments later. Only wraps this initial probe, not every
+                # query - pool_pre_ping above already handles later
+                # recycling of connections that go stale mid-session.
+                last_error = None
+                for attempt in range(1, 4):
+                    try:
+                        with base_engine.connect() as conn:
+                            pass
+                        last_error = None
+                        break
+                    except Exception as retry_ex:
+                        last_error = retry_ex
+                        if attempt < 3:
+                            print(f"[Info] Azure SQL connection attempt {attempt}/3 failed ({retry_ex}) - retrying in {attempt * 3}s...")
+                            time.sleep(attempt * 3)
+                if last_error is not None:
+                    raise last_error
                 _base_mssql_engines[provider_key] = base_engine
                 print(f"[Info] Successfully connected to Production Azure SQL Database for {provider_key}")
             schema_name = _schema_name(provider_key, mode)
