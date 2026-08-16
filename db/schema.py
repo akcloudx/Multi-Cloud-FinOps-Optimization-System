@@ -237,6 +237,34 @@ def _ensure_column(engine, schema_name, table_name: str, column_name: str, colum
             conn.execute(text(f"ALTER TABLE {qualified} ADD {column_name} {column_type_sql}"))
 
 
+def _widen_column(engine, schema_name, table_name: str, column_name: str, min_length: int):
+    """Widens an already-existing VARCHAR column that turned out too narrow
+    for real data - unlike _ensure_column (add-if-missing), this handles a
+    column that exists but is undersized. SQL Server ENFORCES VARCHAR length
+    and raises on overflow rather than silently truncating like SQLite does,
+    so a too-narrow column breaks the write outright in production while
+    looking fine in local/demo testing (real incident, 2026-08: missing_role
+    started also carrying full plain-language auth-error text, not just a
+    short role-name list, and blew past its original VARCHAR(255)).
+    No-op on SQLite (doesn't enforce VARCHAR length, nothing to fix) and
+    no-op once already wide enough, so this is cheap to call every startup."""
+    if engine.dialect.name != "mssql":
+        return
+    inspector = inspect(engine)
+    if table_name not in inspector.get_table_names(schema=schema_name):
+        return
+    cols = {c["name"]: c for c in inspector.get_columns(table_name, schema=schema_name)}
+    col = cols.get(column_name)
+    if col is None:
+        return
+    current_length = getattr(col["type"], "length", None)
+    if current_length is not None and current_length >= min_length:
+        return
+    qualified = f"[{schema_name}].{table_name}"
+    with engine.begin() as conn:
+        conn.execute(text(f"ALTER TABLE {qualified} ALTER COLUMN {column_name} VARCHAR({min_length})"))
+
+
 def init_db(provider: str = "Azure", mode: str = "demo"):
     """Create all tables for the specified (provider, mode) scope if they
     don't exist yet, and migrate any columns added after a table already
@@ -264,6 +292,8 @@ def init_db(provider: str = "Azure", mode: str = "demo"):
     _ensure_column(engine, schema_name, "cloud_tenants", "last_sync_message", "VARCHAR(500)")
     _ensure_column(engine, schema_name, "cloud_tenants", "tenant_assigned_roles", "VARCHAR(255)")
     _ensure_column(engine, schema_name, "tenant_subscriptions", "assigned_roles", "VARCHAR(255)")
+    _widen_column(engine, schema_name, "cloud_tenants", "tenant_missing_roles", 1000)
+    _widen_column(engine, schema_name, "tenant_subscriptions", "missing_role", 1000)
     return engine
 
 
@@ -572,7 +602,12 @@ class CloudTenant(Base):
     # subscription-scoped, so there's exactly one status per tenant, not one
     # per subscription.
     tenant_permission_status = Column(String(50), default="unchecked")   # "unchecked" | "ready" | "missing_role" | "error"
-    tenant_missing_roles     = Column(String(255), nullable=True)
+    # 1000 chars, not a short role-name list - this column also carries the
+    # full plain-language message from azure_conn.connector._friendly_auth_error
+    # (e.g. the AADSTS7000215 explanation) when status == "error"; SQL Server
+    # raises on overflow rather than silently truncating like SQLite, so this
+    # was originally undersized at 255 (real bug, caught 2026-08).
+    tenant_missing_roles     = Column(String(1000), nullable=True)
     # Which of REQUIRED_TENANT_ROLES are actually assigned, comma-joined -
     # added alongside tenant_missing_roles so the UI can show every required
     # role's real state (assigned/missing), not just the ones missing. Only
@@ -613,7 +648,10 @@ class TenantSubscription(Base):
     subscription_name  = Column(String(255), nullable=True)
     # "unchecked" | "ready" | "missing_role" | "error"
     permission_status  = Column(String(50), default="unchecked")
-    missing_role       = Column(String(255), nullable=True)
+    # 1000 chars - see CloudTenant.tenant_missing_roles above, same reasoning
+    # (this column also carries the full _friendly_auth_error message on
+    # status == "error", not just a short role-name list).
+    missing_role       = Column(String(1000), nullable=True)
     # Which of REQUIRED_SUBSCRIPTION_ROLES are actually assigned, comma-joined
     # - same reasoning as CloudTenant.tenant_assigned_roles above.
     assigned_roles      = Column(String(255), nullable=True)

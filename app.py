@@ -467,7 +467,11 @@ def _status_from_role_check(role_check: dict) -> tuple:
     (comma-joined strings) - not just missing - so the caller can show every
     required role's real state, not just the gaps."""
     if not role_check["checked"]:
-        return "error", role_check.get("error") or "Could not check - unknown error.", None
+        # Capped defensively - this string round-trips through a DB column
+        # sized for error text (VARCHAR(1000) in Azure SQL, see
+        # db/schema.py's _widen_column), not unbounded free text.
+        err = (role_check.get("error") or "Could not check - unknown error.")[:900]
+        return "error", err, None
     status = "ready" if role_check["ready"] else "missing_role"
     missing = ", ".join(role_check["missing_roles"]) or None
     assigned = ", ".join(role_check["assigned_roles"]) or None
