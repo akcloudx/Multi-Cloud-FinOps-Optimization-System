@@ -57,6 +57,31 @@ function Fail([string]$msg) {
     exit 1
 }
 
+# Checked up front, before touching any Azure resource - a missing tool
+# discovered mid-script (e.g. at the Function App publish step) leaves
+# whatever got created so far in a half-finished state, and PowerShell's own
+# "command not found" error for a genuinely-missing executable is a raw,
+# unfriendly `CommandNotFoundException`, not a clean message. This matters
+# for running this script on a DIFFERENT machine than the one it was
+# developed on (a mentor's/examiner's laptop, a fresh clone) - `az` and
+# `python` were already implicitly required, `func` (Azure Functions Core
+# Tools) too, but none of the three were ever verified present before this.
+Write-Host "  Checking prerequisites ..." -ForegroundColor Yellow
+$missingTools = @()
+if (-not (Get-Command az -ErrorAction SilentlyContinue)) { $missingTools += "az (Azure CLI - https://learn.microsoft.com/cli/azure/install-azure-cli)" }
+if (-not (Get-Command python -ErrorAction SilentlyContinue)) { $missingTools += "python (Python 3 - https://www.python.org/downloads/)" }
+if (-not (Get-Command func -ErrorAction SilentlyContinue)) { $missingTools += "func (Azure Functions Core Tools - https://learn.microsoft.com/azure/azure-functions/functions-run-local)" }
+if ($missingTools.Count -gt 0) {
+    Write-Host ""
+    Write-Host "  [ERROR] Missing required tool(s):" -ForegroundColor Red
+    foreach ($tool in $missingTools) { Write-Host "    - $tool" -ForegroundColor Red }
+    Write-Host ""
+    Write-Host "  Install the above, then re-run this script. Nothing has been created yet." -ForegroundColor Yellow
+    Write-Host ""
+    exit 1
+}
+Write-Host "        [OK] az, python, and func are all available." -ForegroundColor Green
+
 $subId = (az account show --query id -o tsv 2>&1).Trim()
 if ($LASTEXITCODE -ne 0) { Fail "Cannot reach Azure CLI. Run 'az login' first." }
 
