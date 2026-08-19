@@ -13,13 +13,19 @@
 #    at the plan-creation step for the one open risk (Oryx remote build behavior not yet verified on F1).
 #    Passwordless DB auth: both apps connect to Azure SQL via System-Assigned Managed Identity
 #    (mssql-python driver) - no password/connection-string secret is ever stored anywhere. Step 7
-#    below prints a one-time manual T-SQL grant you run in the Portal Query editor to finish setup.
+#    grants both identities DB access automatically (falls back to printing a one-time manual
+#    T-SQL grant for the Portal Query editor if the local venv isn't available).
 
 # SqlAdminPassword has no default on purpose - it used to be a hardcoded
 # real password here (found and fixed 2026-08, alongside the same
 # credential duplicated in db/schema.py and azure_deploy/seed_azure_sql.py).
-# Pass it explicitly, e.g.:
-#   .\deploy_all_resources.ps1 -SqlAdminPassword (Read-Host -AsSecureString "SQL admin password" | ConvertFrom-SecureString -AsPlainText)
+# Typed as [SecureString] (not [string]) specifically so PowerShell prompts
+# for it itself, masked, whenever it's omitted - a Mandatory SecureString
+# parameter gets this behavior built in, no separate Read-Host dance needed:
+#   .\deploy_all_resources.ps1
+# (PowerShell will then prompt "SqlAdminPassword: " with masked input). Still
+# scriptable non-interactively if needed, e.g. from CI:
+#   .\deploy_all_resources.ps1 -SqlAdminPassword (ConvertTo-SecureString $env:SQL_ADMIN_PW -AsPlainText -Force)
 #
 # NOTE 2026-08: SqlAdminUser/SqlAdminPassword are ONLY used to create the SQL
 # Server's own break-glass admin login (Azure SQL requires some admin
@@ -32,8 +38,15 @@ param (
     [string]$Location          = "westus3",
     [string]$SqlAdminUser      = "finopsadmin",
     [Parameter(Mandatory = $true)]
-    [string]$SqlAdminPassword,
+    [SecureString]$SqlAdminPassword,
     [string]$AppNamePrefix     = "finops"
+)
+
+# Converted once, right here, to the plain string az CLI actually needs -
+# the SecureString above exists only to get PowerShell's built-in masked
+# prompt; nothing downstream should reference $SqlAdminPassword directly.
+$SqlAdminPasswordPlain = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+    [Runtime.InteropServices.Marshal]::SecureStringToBSTR($SqlAdminPassword)
 )
 
 function Fail([string]$msg) {
@@ -95,7 +108,7 @@ Write-Host "  [4/7] Azure SQL Server and Serverless Database ..." -ForegroundCol
 $sqlExists = az sql server show --name $SqlServerName --resource-group $ResourceGroupName --query name -o tsv 2>$null
 if (-not $sqlExists) {
     Write-Host "        Creating SQL Server '$SqlServerName'..." -ForegroundColor Yellow
-    $sqlOut = az sql server create --name $SqlServerName --resource-group $ResourceGroupName --location $Location --admin-user $SqlAdminUser --admin-password $SqlAdminPassword
+    $sqlOut = az sql server create --name $SqlServerName --resource-group $ResourceGroupName --location $Location --admin-user $SqlAdminUser --admin-password $SqlAdminPasswordPlain
     if ($LASTEXITCODE -ne 0) {
         Write-Host "        [WARNING] SQL Server creation failed in '$Location'. Error: $sqlOut" -ForegroundColor Red
         Fail "SQL Server creation failed. Check subscription SQL quotas or location."
@@ -132,7 +145,7 @@ if (-not $dbExists) {
     }
     if ($LASTEXITCODE -ne 0) {
         Write-Host "        Re-creating SQL Server and Database..." -ForegroundColor Yellow
-        az sql server create --name $SqlServerName --resource-group $ResourceGroupName --location $Location --admin-user $SqlAdminUser --admin-password $SqlAdminPassword -o none
+        az sql server create --name $SqlServerName --resource-group $ResourceGroupName --location $Location --admin-user $SqlAdminUser --admin-password $SqlAdminPasswordPlain -o none
         az sql server firewall-rule create --resource-group $ResourceGroupName --server $SqlServerName --name AllowAzureServices --start-ip-address 0.0.0.0 --end-ip-address 0.0.0.0 -o none
         az sql db create --resource-group $ResourceGroupName --server $SqlServerName --name $SqlDbName --edition GeneralPurpose --family Gen5 --compute-model Serverless --capacity 1 --auto-pause-delay 60 -o none
         if ($LASTEXITCODE -ne 0) { Fail "Creating SQL database '$SqlDbName'" }
@@ -186,11 +199,31 @@ az functionapp config appsettings delete --resource-group $ResourceGroupName --n
 Write-Host "        Configuring shared encryption key (TENANT_SECRET_KEY) ..." -ForegroundColor Yellow
 $sharedSecretKey = az functionapp config appsettings list --resource-group $ResourceGroupName --name $FunctionAppName --query "[?name=='TENANT_SECRET_KEY'].value" -o tsv 2>$null
 if (-not $sharedSecretKey) {
-    $sharedSecretKey = python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    # Generated with pure .NET crypto, NOT `python -c "from cryptography..."`
+    # - the earlier version shelled out to whatever `python` resolves to on
+    # PATH, which silently has no guarantee of being this project's venv
+    # (real incident, 2026-08-19: system python was 3.14 with no
+    # `cryptography` installed, the command threw ModuleNotFoundError on
+    # stderr, and the script's missing exit-code check let it print "[OK]"
+    # and set TENANT_SECRET_KEY to an EMPTY string on both apps anyway -
+    # silently reintroducing the exact "every redeploy breaks stored client
+    # secrets" bug this block exists to prevent). A Fernet key is just 32
+    # random bytes, base64-urlsafe-encoded - identical to what
+    # cryptography.fernet.Fernet.generate_key() produces, no Python needed.
+    # RandomNumberGenerator.Create()+GetBytes() (not the newer static
+    # ::Fill(), which is .NET 6+ only and doesn't exist on Windows
+    # PowerShell 5.1's .NET Framework runtime - confirmed by testing both
+    # against the actual target PS version this script declares support for).
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    $keyBytes = New-Object byte[] 32
+    $rng.GetBytes($keyBytes)
+    $rng.Dispose()
+    $sharedSecretKey = [Convert]::ToBase64String($keyBytes).Replace('+', '-').Replace('/', '_')
     Write-Host "        [OK] Generated a new TENANT_SECRET_KEY." -ForegroundColor Green
 } else {
     Write-Host "        [OK] Reusing existing TENANT_SECRET_KEY - already-saved client secrets stay valid." -ForegroundColor DarkGreen
 }
+if (-not $sharedSecretKey) { Fail "TENANT_SECRET_KEY resolved empty - refusing to deploy with a blank encryption key." }
 az functionapp config appsettings set --resource-group $ResourceGroupName --name $FunctionAppName --settings TENANT_SECRET_KEY="$sharedSecretKey" -o none
 
 # Fix PowerShell 5.1 Join-Path syntax: use nested 2-argument Join-Path calls
@@ -337,14 +370,20 @@ if (Test-Path $appPy) {
 }
 
 # 7. Grant both apps' Managed Identities access to the SQL Database
-# This is the one step that genuinely can't be fully automated from here:
-# it requires running T-SQL AS a Microsoft Entra admin against the database
-# itself, not just an ARM/az CLI resource operation. Sets the current
-# signed-in az CLI user as the SQL Server's Entra admin (idempotent - safe
-# to re-run), then prints the exact statements to run once in the Portal's
-# built-in Query Editor (Azure SQL Database > Query editor - authenticates
-# with your Entra login directly, no extra firewall rule or local sqlcmd
-# install needed).
+# Sets the current signed-in az CLI user as the SQL Server's Entra admin
+# (idempotent - safe to re-run), then attempts the actual CREATE USER/ALTER
+# ROLE grant automatically via grant_managed_identity_access.py - this
+# genuinely CAN be automated (confirmed 2026-08-19, previously assumed it
+# couldn't be): mssql-python's token_provider parameter accepts an
+# AzureCliCredential directly, reusing the exact same `az login` session this
+# script already requires, so no extra credential/secret is needed. A direct
+# client connection (unlike the Portal's Query editor, which runs inside
+# Azure's own network) needs THIS machine's own public IP allowed though -
+# AllowAzureServices (from step 4) only covers Azure services - so a firewall
+# rule is added just for the duration of the grant, then removed. Falls back
+# to printing the manual T-SQL if the local venv/Python dependencies aren't
+# available (e.g. Azure Cloud Shell, a fresh clone with no venv set up yet)
+# or the automated attempt fails for any reason - never blocks the deploy.
 Write-Host "  [7/7] Granting Managed Identity database access ..." -ForegroundColor Yellow
 $signedInUser = az ad signed-in-user show --query "{upn:userPrincipalName, oid:id}" -o json 2>$null | ConvertFrom-Json
 if ($signedInUser) {
@@ -355,24 +394,58 @@ if ($signedInUser) {
     Write-Host "        Set a Microsoft Entra admin manually: az sql server ad-admin create --resource-group $ResourceGroupName --server-name $SqlServerName --display-name <ADMIN> --object-id <ADMIN_OBJECT_ID>" -ForegroundColor DarkYellow
 }
 
-Write-Host ""
-Write-Host "        ACTION NEEDED - run this once in the Azure Portal:" -ForegroundColor Yellow
-Write-Host "        Azure SQL Database ($SqlDbName) > Query editor (preview) > sign in with Microsoft Entra > run:" -ForegroundColor Yellow
-Write-Host ""
-Write-Host "          CREATE USER [$WebAppName] FROM EXTERNAL PROVIDER;" -ForegroundColor White
-Write-Host "          ALTER ROLE db_datareader ADD MEMBER [$WebAppName];" -ForegroundColor White
-Write-Host "          ALTER ROLE db_datawriter ADD MEMBER [$WebAppName];" -ForegroundColor White
-Write-Host "          ALTER ROLE db_ddladmin ADD MEMBER [$WebAppName];" -ForegroundColor White
-Write-Host "          CREATE USER [$FunctionAppName] FROM EXTERNAL PROVIDER;" -ForegroundColor White
-Write-Host "          ALTER ROLE db_datareader ADD MEMBER [$FunctionAppName];" -ForegroundColor White
-Write-Host "          ALTER ROLE db_datawriter ADD MEMBER [$FunctionAppName];" -ForegroundColor White
-Write-Host "          ALTER ROLE db_ddladmin ADD MEMBER [$FunctionAppName];" -ForegroundColor White
-Write-Host ""
-Write-Host "        (db_ddladmin is needed because this app runs its own schema migrations -" -ForegroundColor DarkGray
-Write-Host "         see db/schema.py's _ensure_column - not just plain row reads/writes.)" -ForegroundColor DarkGray
-Write-Host "        Until this runs, the app will show a clear connection error rather than silently" -ForegroundColor DarkGray
-Write-Host "         using stale/local data - check the Web App's Log stream if inventory looks empty." -ForegroundColor DarkGray
-Write-Host ""
+$grantScriptPath = Join-Path $PSScriptRoot "grant_managed_identity_access.py"
+$venvPython       = Join-Path $parentPath "venv\Scripts\python.exe"
+$grantAutomated   = $false
+if ($signedInUser -and (Test-Path $venvPython) -and (Test-Path $grantScriptPath)) {
+    Write-Host "        Attempting automated grant ..." -ForegroundColor Yellow
+    Start-Sleep -Seconds 10   # let the AD-admin assignment above propagate
+    $myIp = $null
+    try { $myIp = (Invoke-RestMethod -Uri "https://api.ipify.org" -TimeoutSec 10) } catch {}
+    if ($myIp) {
+        az sql server firewall-rule create --resource-group $ResourceGroupName --server $SqlServerName --name "TempDeployAccess" --start-ip-address $myIp --end-ip-address $myIp -o none 2>$null
+        Start-Sleep -Seconds 15   # firewall rule propagation
+        & $venvPython $grantScriptPath $SqlServerFqdn $SqlDbName $WebAppName $FunctionAppName
+        if ($LASTEXITCODE -eq 0) {
+            $grantAutomated = $true
+            Write-Host "        [OK] Managed Identity database access granted automatically." -ForegroundColor Green
+        } else {
+            Write-Host "        [WARNING] Automated grant failed - falling back to manual instructions below." -ForegroundColor DarkYellow
+        }
+        az sql server firewall-rule delete --resource-group $ResourceGroupName --server $SqlServerName --name "TempDeployAccess" -o none 2>$null
+    } else {
+        Write-Host "        [WARNING] Could not detect this machine's public IP - falling back to manual instructions below." -ForegroundColor DarkYellow
+    }
+} else {
+    Write-Host "        [INFO] Local venv (venv\Scripts\python.exe) not found - falling back to manual instructions below." -ForegroundColor DarkYellow
+}
+
+if (-not $grantAutomated) {
+    # Guarded with IF NOT EXISTS, not plain CREATE USER/ALTER ROLE - the
+    # automated attempt above can fail PARTWAY through (e.g. the Web App's
+    # grant succeeds, then something breaks before the Function App's does),
+    # and a plain re-run of these statements would throw "principal already
+    # exists" on whichever one already went through. Safe to paste this
+    # whole block regardless of how much the automation completed first.
+    Write-Host ""
+    Write-Host "        ACTION NEEDED - run this once in the Azure Portal:" -ForegroundColor Yellow
+    Write-Host "        Azure SQL Database ($SqlDbName) > Query editor (preview) > sign in with Microsoft Entra > run:" -ForegroundColor Yellow
+    Write-Host ""
+    foreach ($principal in @($WebAppName, $FunctionAppName)) {
+        Write-Host "          IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = '$principal')" -ForegroundColor White
+        Write-Host "              CREATE USER [$principal] FROM EXTERNAL PROVIDER;" -ForegroundColor White
+        foreach ($role in @("db_datareader", "db_datawriter", "db_ddladmin")) {
+            Write-Host "          IF NOT EXISTS (SELECT 1 FROM sys.database_role_members rm JOIN sys.database_principals r ON rm.role_principal_id = r.principal_id JOIN sys.database_principals m ON rm.member_principal_id = m.principal_id WHERE r.name = '$role' AND m.name = '$principal')" -ForegroundColor White
+            Write-Host "              ALTER ROLE $role ADD MEMBER [$principal];" -ForegroundColor White
+        }
+        Write-Host "" -ForegroundColor White
+    }
+    Write-Host "        (db_ddladmin is needed because this app runs its own schema migrations -" -ForegroundColor DarkGray
+    Write-Host "         see db/schema.py's _ensure_column - not just plain row reads/writes.)" -ForegroundColor DarkGray
+    Write-Host "        Until this runs, the app will show a clear connection error rather than silently" -ForegroundColor DarkGray
+    Write-Host "         using stale/local data - check the Web App's Log stream if inventory looks empty." -ForegroundColor DarkGray
+    Write-Host ""
+}
 
 Write-Host ""
 Write-Host "========================================================================" -ForegroundColor Green
@@ -384,6 +457,8 @@ Write-Host "   Function App  : $FunctionAppName" -ForegroundColor Cyan
 Write-Host "   Resource Group: $ResourceGroupName" -ForegroundColor Cyan
 Write-Host "========================================================================" -ForegroundColor Green
 Write-Host "  First load takes ~2 min while the container warms up." -ForegroundColor DarkYellow
-Write-Host "  Don't forget step 7 above (Query editor grant) - the app can't reach the" -ForegroundColor DarkYellow
-Write-Host "  database until that runs once." -ForegroundColor DarkYellow
+if (-not $grantAutomated) {
+    Write-Host "  Don't forget step 7 above (Query editor grant) - the app can't reach the" -ForegroundColor DarkYellow
+    Write-Host "  database until that runs once." -ForegroundColor DarkYellow
+}
 Write-Host ""
