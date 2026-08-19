@@ -208,6 +208,36 @@ def _friendly_auth_error(err: str) -> str:
     return err[:250]
 
 
+def status_from_role_check(role_check: dict) -> tuple:
+    """Turns a check_role_assignments()/check_tenant_role_assignments() result
+    into a (status, missing, assigned) triple with THREE distinct states, not
+    two - the real bug found live 2026-08: when the check itself couldn't run
+    at all (checked=False - almost always a broken credential, e.g. an
+    invalid client secret), the old code collapsed that into the same
+    "missing_role" bucket as "checked fine, found N roles genuinely missing",
+    producing a nonsensical "Missing None" in the UI. "error" is now its own
+    status with the real, plain-language reason (see _friendly_auth_error
+    above). Both missing AND assigned roles are returned (comma-joined
+    strings) - not just missing - so the caller can show every required
+    role's real state, not just the gaps.
+
+    Lives here (not in app.py, where it was originally written) so both
+    app.py (UI) and data/sync_pipeline.py (the shared ingestion pipeline,
+    also run by the Function App's cron - which can't import app.py, since
+    that pulls in streamlit and isn't shipped to the Function App at all)
+    can use the exact same status logic without duplicating it."""
+    if not role_check["checked"]:
+        # Capped defensively - this string round-trips through a DB column
+        # sized for error text (VARCHAR(1000) in Azure SQL, see
+        # db/schema.py's _widen_column), not unbounded free text.
+        err = (role_check.get("error") or "Could not check - unknown error.")[:900]
+        return "error", err, None
+    status = "ready" if role_check["ready"] else "missing_role"
+    missing = ", ".join(role_check["missing_roles"]) or None
+    assigned = ", ".join(role_check["assigned_roles"]) or None
+    return status, missing, assigned
+
+
 # ── Real per-subscription RBAC check ──────────────────────────────────────────
 
 def _get_principal_object_id(credential) -> Optional[str]:

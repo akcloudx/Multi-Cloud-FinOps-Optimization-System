@@ -39,11 +39,13 @@ _MODE = "live"
 from azure_conn.connector import (
     load_credentials_from_env, fetch_live_inventory, fetch_live_reservations,
     fetch_live_savings_plans, test_connection, AzureCredentials, _friendly_auth_error,
+    list_accessible_subscriptions, check_role_assignments, status_from_role_check,
 )
 from aws.connector import load_aws_credentials_from_env, test_aws_connection
 from pricing.azure_retail_api import refresh_retail_prices
 from pricing.commitment_pricing import refresh_commitment_prices
 from pricing.commitment_mapping import derive_reservation_commitment_fields, derive_savings_plan_commitment_fields
+from db.tenants import upsert_subscription
 
 
 def _reservation_commitment_id(r: dict) -> str:
@@ -235,6 +237,37 @@ def run_ingestion_pipeline(provider: str = "Azure", creds=None, force_mock: bool
                     source="Live API ingestion"   # caller-agnostic - triggered by either the hourly cron or the Manage Tenant "Run sync now" button, no way to distinguish here
                 ))
                 session.commit()
+
+            # Subscription discovery + per-subscription RBAC check - moved
+            # here from being a UI-only action (the Manage Tenant dialog's
+            # "Sync subscriptions" button) so EVERY sync keeps it current,
+            # not just a one-off click. Real gap found live 2026-08: a newly
+            # added tenant showed "0 subscriptions" until someone manually
+            # triggered this separately, and the hourly cron (which also
+            # calls this same function, via azure_function/function_app.py)
+            # never refreshed it AT ALL even after new subscriptions were
+            # granted to the Service Principal later - each sync cycle
+            # should just keep this current on its own, like everything
+            # else here. Isolated in its own try/except, same reasoning as
+            # the RI/SP fetch above - a failure here must not blow up an
+            # otherwise-successful inventory sync.
+            subscription_sync_error = None
+            synced_subscription_count = 0
+            if is_azure and tenant_db_id is not None:
+                try:
+                    live_subs = list_accessible_subscriptions(live_creds)
+                    for s in live_subs:
+                        role_check = check_role_assignments(live_creds, s["subscription_id"])
+                        sub_status, missing, assigned = status_from_role_check(role_check)
+                        upsert_subscription(
+                            provider=provider, mode=_MODE, tenant_db_id=tenant_db_id,
+                            subscription_id=s["subscription_id"], subscription_name=s["display_name"],
+                            permission_status=sub_status, missing_role=missing, assigned_roles=assigned,
+                        )
+                    synced_subscription_count = len(live_subs)
+                except Exception as e:
+                    subscription_sync_error = str(e)[:300]
+
             if ri_sp_error:
                 message = (
                     f"Inventory synced: {synced_count} resource(s). Reservation/Savings Plan fetch skipped - "
@@ -245,6 +278,11 @@ def run_ingestion_pipeline(provider: str = "Azure", creds=None, force_mock: bool
                     f"Live API ingestion completed cleanly. Synced {synced_count} resources, "
                     f"{ri_written} reservation(s), and {len(savings_plan_commitments)} savings plan(s) from {provider}."
                 )
+            if is_azure and tenant_db_id is not None:
+                if subscription_sync_error:
+                    message += f" Subscription sync skipped - {subscription_sync_error}"
+                else:
+                    message += f" Verified {synced_subscription_count} subscription(s)."
         except Exception as e:
             status = "FAILED"
             # Same plain-language translation used everywhere else a stored

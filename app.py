@@ -128,7 +128,7 @@ from db.tenants import (
 from azure_conn.connector import (
     AzureCredentials, load_credentials_from_env, save_credentials_to_env_file,
     test_connection, check_role_assignments, check_tenant_role_assignments,
-    list_accessible_subscriptions,
+    list_accessible_subscriptions, status_from_role_check,
     REQUIRED_ROLES, REQUIRED_SUBSCRIPTION_ROLES, REQUIRED_TENANT_ROLES,
     HAS_AZURE_IDENTITY,
 )
@@ -202,21 +202,16 @@ def _render_azure_connect_form(key_prefix: str, mode: str = "live"):
                     client_secret=az_sec,
                     domain=az_domain or None,
                 )
-                res = run_ingestion_pipeline("Azure", creds=new_az, tenant_db_id=tenant_db_id)
                 # Connecting a tenant IS a sync, not just an inventory pull -
-                # without these two calls the Home page showed "0
-                # subscriptions" and "Last synced: Never" on a tenant that
-                # had just been fully ingested seconds earlier (real gap
-                # found live 2026-08: only the Manage Tenant dialog's
-                # separate "Sync subscriptions"/"Run sync now" buttons ever
-                # touched TenantSubscription or last_synced_at - adding a
-                # tenant here never did). upsert_tenant() above always makes
-                # the new/updated tenant the active one for this scope, so
-                # get_active_tenant() reliably resolves back to it.
-                new_t = get_active_tenant("Azure", mode)
-                if new_t is not None:
-                    _run_subscription_sync(new_t, mode)
-                    record_sync_result("Azure", mode, tenant_db_id, res["status"], res["message"])
+                # run_ingestion_pipeline() itself now also discovers/checks
+                # subscriptions on every call (moved there from being a
+                # UI-only action - real gap found live 2026-08: without it,
+                # only a separate manual click ever populated
+                # TenantSubscription, and the hourly cron never refreshed it
+                # at all), so this one call is enough - no separate
+                # subscription-sync call needed here anymore.
+                res = run_ingestion_pipeline("Azure", creds=new_az, tenant_db_id=tenant_db_id)
+                record_sync_result("Azure", mode, tenant_db_id, res["status"], res["message"])
                 if res["status"] == "SUCCESS":
                     st.success(f"🎉 **Live Tenant Ingestion Complete!** {res['message']}")
                     return True
@@ -347,28 +342,10 @@ def _clear_manage_tenant_dialog_state():
     st.session_state["_manage_tenant_id"] = None
 
 
-def _status_from_role_check(role_check: dict) -> tuple:
-    """Turns a check_role_assignments()/check_tenant_role_assignments() result
-    into a (status, missing, assigned) triple with THREE distinct states, not
-    two - the real bug found live 2026-08: when the check itself couldn't run
-    at all (checked=False - almost always a broken credential, e.g. an
-    invalid client secret), the old code collapsed that into the same
-    "missing_role" bucket as "checked fine, found N roles genuinely missing",
-    producing a nonsensical "Missing None" in the UI. "error" is now its own
-    status with the real, plain-language reason (see connector.py's
-    _friendly_auth_error). Both missing AND assigned roles are returned
-    (comma-joined strings) - not just missing - so the caller can show every
-    required role's real state, not just the gaps."""
-    if not role_check["checked"]:
-        # Capped defensively - this string round-trips through a DB column
-        # sized for error text (VARCHAR(1000) in Azure SQL, see
-        # db/schema.py's _widen_column), not unbounded free text.
-        err = (role_check.get("error") or "Could not check - unknown error.")[:900]
-        return "error", err, None
-    status = "ready" if role_check["ready"] else "missing_role"
-    missing = ", ".join(role_check["missing_roles"]) or None
-    assigned = ", ".join(role_check["assigned_roles"]) or None
-    return status, missing, assigned
+# _status_from_role_check moved to azure_conn.connector.status_from_role_check
+# (imported below) so data/sync_pipeline.py - which can't import app.py, since
+# that pulls in streamlit and isn't shipped to the Function App - can use the
+# exact same status logic instead of a duplicated copy.
 
 
 def _render_role_checklist(required_roles: list, status: str, assigned_str: str):
@@ -395,7 +372,7 @@ def _run_tenant_permission_check(t, mode: str) -> dict:
     RBAC check (Reservations Reader / Savings Plan Reader)."""
     creds = AzureCredentials(t.tenant_id, t.subscription_id, t.client_id, get_tenant_credentials(t))
     role_check = check_tenant_role_assignments(creds)
-    status, missing, assigned = _status_from_role_check(role_check)
+    status, missing, assigned = status_from_role_check(role_check)
     update_tenant_permission_status(selected_provider, mode, t.id, status, missing, assigned)
     return role_check
 
@@ -409,7 +386,7 @@ def _run_subscription_sync(t, mode: str) -> list:
     live_subs = list_accessible_subscriptions(creds)
     for s in live_subs:
         role_check = check_role_assignments(creds, s["subscription_id"])
-        status, missing, assigned = _status_from_role_check(role_check)
+        status, missing, assigned = status_from_role_check(role_check)
         upsert_subscription(
             provider=selected_provider, mode=mode, tenant_db_id=t.id,
             subscription_id=s["subscription_id"], subscription_name=s["display_name"],
@@ -593,7 +570,7 @@ Missing this step is **not fatal** - Resource inventory and cost data (step 2) s
                     with st.spinner("Checking permissions..."):
                         creds = AzureCredentials(t.tenant_id, t.subscription_id, t.client_id, get_tenant_credentials(t))
                         role_check = check_role_assignments(creds, s.subscription_id)
-                        status, missing, assigned = _status_from_role_check(role_check)
+                        status, missing, assigned = status_from_role_check(role_check)
                         upsert_subscription(
                             provider=selected_provider, mode=mode, tenant_db_id=t.id,
                             subscription_id=s.subscription_id, subscription_name=s.subscription_name,
