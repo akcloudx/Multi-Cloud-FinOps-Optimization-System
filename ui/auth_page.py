@@ -21,7 +21,24 @@ from db.users import (
     user_count, production_user_count, create_user, verify_login,
     ensure_demo_user, DEMO_USERNAME, DEMO_PASSWORD,
 )
+from db.sessions import create_session, get_session, delete_session
 from ui.styling import inject_global_css
+
+_ENV_MODE_BY_MODE = {"demo": "Demo / Benchmark Mode", "live": "Live Cloud API"}
+
+
+def _start_session(user: dict, mode: str) -> None:
+    """Signs `user` in for this browser tab AND makes it survive a refresh -
+    stores auth_user in session_state (fast path for every rerun within this
+    same connection) plus a token in the URL query string mapped to a DB row
+    (db/sessions.py) that a fresh page load restores from, since
+    session_state alone doesn't survive one. Call this instead of setting
+    st.session_state["auth_user"] directly."""
+    st.session_state["auth_user"] = user
+    st.session_state["env_mode_widget"] = _ENV_MODE_BY_MODE[mode]
+    token = create_session(user, mode)
+    st.session_state["_session_token"] = token
+    st.query_params["s"] = token
 
 
 def require_login() -> dict:
@@ -32,6 +49,23 @@ def require_login() -> dict:
     init, before anything else renders."""
     if st.session_state.get("auth_user"):
         return st.session_state["auth_user"]
+
+    # Not in session_state - either genuinely never logged in, or this is a
+    # fresh page load (refresh/reopened tab) that lost it, as every one does
+    # in Streamlit. Check for a session token in the URL before falling back
+    # to the login screen - restores the exact same session transparently.
+    token = st.query_params.get("s")
+    if token:
+        restored = get_session(token)
+        if restored:
+            user = {"id": restored["id"], "username": restored["username"], "display_name": restored["display_name"]}
+            st.session_state["auth_user"] = user
+            st.session_state["env_mode_widget"] = _ENV_MODE_BY_MODE[restored["mode"]]
+            st.session_state["_session_token"] = token
+            return user
+        # Stale/expired/unknown token - drop it from the URL so it doesn't
+        # keep getting checked (and failing) on every subsequent load.
+        del st.query_params["s"]
 
     inject_global_css()
 
@@ -81,11 +115,7 @@ def _render_demo_login():
     if submitted:
         user = verify_login(username, password, mode="demo")
         if user:
-            st.session_state["auth_user"] = user
-            # Demo Mode skips the tenant-connection gate entirely - straight
-            # to the dashboard on Demo / Benchmark data.
-            st.session_state["env_mode_widget"] = "Demo / Benchmark Mode"
-            st.session_state["setup_complete"] = True
+            _start_session(user, "demo")
             st.rerun()
         else:
             st.error("Invalid username or password.")
@@ -143,11 +173,9 @@ def _render_production_login_form():
     if submitted:
         user = verify_login(username, password, mode="live")
         if user:
-            st.session_state["auth_user"] = user
-            # Production Mode still needs a cloud tenant - the (now
-            # tenant-only) setup gate in app.py handles that next.
-            st.session_state["env_mode_widget"] = "Live Cloud API"
-            st.session_state["setup_complete"] = False
+            # Lands directly on Home (tenant connection happens there now,
+            # via its own "Add a new tenant" - no separate gate screen).
+            _start_session(user, "live")
             st.rerun()
         else:
             st.error("Invalid username or password.")
@@ -158,11 +186,18 @@ def _clear_session():
     the next rerun back to the login screen (Mode toggle reset to its Demo
     default). Shared by both the explicit Log out button and the Switch Mode
     button below - switching between Demo and Live is a full sign-out, not
-    an in-session toggle (see render_switch_mode_control for why)."""
+    an in-session toggle (see render_switch_mode_control for why).
+
+    Also deletes the server-side session row and drops the token from the
+    URL - without this, the (now stale) URL would still restore the old
+    session on the very next page load, undoing the sign-out."""
+    delete_session(st.session_state.get("_session_token"))
+    if "s" in st.query_params:
+        del st.query_params["s"]
     st.session_state.pop("auth_user", None)
     st.session_state.pop("_login_mode_widget", None)
-    st.session_state.pop("setup_complete", None)
     st.session_state.pop("env_mode_widget", None)
+    st.session_state.pop("_session_token", None)
 
 
 def render_logout_control():

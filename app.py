@@ -203,6 +203,20 @@ def _render_azure_connect_form(key_prefix: str, mode: str = "live"):
                     domain=az_domain or None,
                 )
                 res = run_ingestion_pipeline("Azure", creds=new_az, tenant_db_id=tenant_db_id)
+                # Connecting a tenant IS a sync, not just an inventory pull -
+                # without these two calls the Home page showed "0
+                # subscriptions" and "Last synced: Never" on a tenant that
+                # had just been fully ingested seconds earlier (real gap
+                # found live 2026-08: only the Manage Tenant dialog's
+                # separate "Sync subscriptions"/"Run sync now" buttons ever
+                # touched TenantSubscription or last_synced_at - adding a
+                # tenant here never did). upsert_tenant() above always makes
+                # the new/updated tenant the active one for this scope, so
+                # get_active_tenant() reliably resolves back to it.
+                new_t = get_active_tenant("Azure", mode)
+                if new_t is not None:
+                    _run_subscription_sync(new_t, mode)
+                    record_sync_result("Azure", mode, tenant_db_id, res["status"], res["message"])
                 if res["status"] == "SUCCESS":
                     st.success(f"🎉 **Live Tenant Ingestion Complete!** {res['message']}")
                     return True
@@ -213,86 +227,11 @@ def _render_azure_connect_form(key_prefix: str, mode: str = "live"):
     return False
 
 
-def _render_azure_tenant_list(key_prefix: str, mode: str = "live"):
-    """Renders the connected-tenants list with Activate/Delete buttons - used
-    by the Production setup gate only (always mode="live", since that gate
-    never runs for Demo sessions). The Home page has its own richer table
-    with Dashboard/Manage actions instead of this simpler Activate/Delete one.
-    Returns True if the active tenant just changed (Activate clicked)."""
-    azure_tenants = list_tenants("Azure", mode)
-    if not azure_tenants:
-        st.caption("No tenants connected yet. Fill in the form above and click **Connect, Save & Ingest**.")
-        return False
-
-    changed = False
-    for t in azure_tenants:
-        t_count = resource_count("Azure", mode, t.id)
-        cols = st.columns([3, 3, 2, 2, 2])
-        cols[0].markdown(f"{'🟢' if t.is_active else '⚪'} **{t.tenant_name}**")
-        cols[1].caption(f"Tenant: `{t.tenant_id[:8]}…` · Sub: `{t.subscription_id[:8]}…`")
-        cols[2].caption(f"{t_count} resource{'s' if t_count != 1 else ''}")
-        cols[3].caption(f"Added {t.created_at[:10]}")
-        with cols[4]:
-            b1, b2 = st.columns(2)
-            if not t.is_active:
-                if b1.button("Activate", key=f"{key_prefix}_activate_az_{t.id}", use_container_width=True):
-                    set_active_tenant("Azure", mode, t.id)
-                    changed = True
-            if b2.button("🗑️", key=f"{key_prefix}_delete_az_{t.id}", use_container_width=True, help="Remove this tenant and its synced data"):
-                delete_tenant("Azure", mode, t.id)
-                changed = True
-    st.caption("🟢 = active tenant shown in Live Cloud API mode. Only one tenant is active at a time.")
-    return changed
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# POST-LOGIN SETUP GATE — tenant selection for Production Mode sessions
-# ─────────────────────────────────────────────────────────────────────────────
-def _render_setup_gate():
-    """Tenant-connection gate for Production Mode sessions - the Demo-vs-
-    Production choice itself now happens on the login screen (ui/auth_page.py)
-    before this ever runs; a Demo Mode login sets setup_complete=True at
-    login time and never reaches this gate at all."""
-    st.markdown(
-        '<div class="finops-hero-badge">☁️</div>'
-        f"<h2 style=\"margin-bottom:0\">Connect a Cloud Tenant</h2>",
-        unsafe_allow_html=True,
-    )
-    st.caption(
-        f"Welcome, {current_user['display_name'] or current_user['username']}. "
-        "Connect an Azure tenant to analyze real cloud spend, or skip for now to explore with Demo data."
-    )
-
-    active = get_active_tenant("Azure", "live")
-    if list_tenants("Azure", "live"):
-        st.caption("Select which connected tenant to use for this session, or add another below.")
-        if _render_azure_tenant_list("setup", "live"):
-            st.rerun()
-        st.divider()
-
-    with st.expander("➕ Add a new tenant", expanded=(active is None)):
-        if _render_azure_connect_form("setup", "live"):
-            st.rerun()
-
-    b1, b2 = st.columns([1, 3])
-    if b1.button("Skip for now", key="setup_skip"):
-        st.session_state["env_mode_widget"] = "Demo / Benchmark Mode"
-        st.session_state["setup_complete"] = True
-        st.rerun()
-    active_now = get_active_tenant("Azure", "live")
-    if b2.button(
-        "Continue to Dashboard →", key="setup_go_live", type="primary", use_container_width=True,
-        disabled=active_now is None,
-        help=None if active_now else "Connect or activate a tenant above first.",
-    ):
-        st.session_state["env_mode_widget"] = "Live Cloud API"
-        st.session_state["setup_complete"] = True
-        st.rerun()
-    st.stop()
-
-
-if not st.session_state.get("setup_complete"):
-    _render_setup_gate()
+# Post-login setup gate (a separate "connect a tenant before you can see
+# anything" screen) removed 2026-08 - the Home page's tenant table + "Add a
+# new tenant" button (both using the same _render_azure_connect_form above)
+# now cover everything the gate did, so Production logins land directly on
+# Home like Demo logins always have, instead of a redundant extra screen.
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -392,52 +331,6 @@ def _render_aws_connect_form(key_prefix: str, mode: str = "live"):
         else:
             st.error("Please fill in Access Key ID and Secret Access Key.")
     return False
-
-
-def _portfolio_summary_metrics(provider: str, mode: str) -> dict:
-    """Aggregates PAYG spend, savings identified (heuristic), and blended
-    SP+RI coverage % across every tenant in this (provider, mode) scope - the
-    Home page's portfolio cards. For "demo" there's just the one shared
-    dataset (tenant_id=None convention, same as everywhere else in this
-    app); for "live" it loops every registered tenant. Reuses the exact same
-    per-tenant analysis functions load_benchmark_data/load_live_data already
-    call, just summed across all of them instead of one."""
-    tenants = list_tenants(provider, mode)
-    tenant_ids = [t.id for t in tenants] if mode == "live" else [None]
-    if mode == "live" and not tenant_ids:
-        return {"total_payg_monthly": 0.0, "total_savings_monthly": 0.0, "coverage_pct": 0.0}
-
-    sp_eligible_types = (
-        (COMPUTE_SP_ELIGIBLE_TYPES | DATABASE_SP_ELIGIBLE_TYPES) if provider == "Azure"
-        else (AWS_COMPUTE_SP_TYPES | AWS_DATABASE_SP_TYPES)
-    )
-    total_payg_hr = 0.0
-    total_committed_hr = 0.0
-    total_savings_mo = 0.0
-    for tid in tenant_ids:
-        inv = get_compute_inventory(provider=provider, mode=mode, tenant_id=tid)
-        if inv.empty:
-            continue
-        running = inv[inv["Resource State"] == "Running"]
-        total_payg_hr += float(running["PAYG Hourly Cost USD"].sum())
-
-        sp_df = get_existing_savings_plans(provider=provider, mode=mode, tenant_id=tid)
-        ri_df = get_existing_reservations(provider=provider, mode=mode, tenant_id=tid)
-        total_committed_hr += float(sp_df["hourly_usd_commitment"].sum()) if not sp_df.empty else 0.0
-        total_committed_hr += float((ri_df["hourly_usd_commitment"] * ri_df["reserved_qty"]).sum()) if not ri_df.empty else 0.0
-
-        wf = run_waterfall(inv, ri_df, sp_df, simulate_days=simulate_days)
-        sp_res = savings_plan_analysis(inv, sp_df, safety_buffer=safety_buffer, eligible_types=list(sp_eligible_types))
-        ri_res = reservation_analysis(inv, ri_df)
-        recs = generate_recommendations(sp_res, ri_res, wf, safety_buffer=safety_buffer)
-        total_savings_mo += sum(r.get("financial_impact_hr", 0.0) for r in recs) * 730
-
-    coverage_pct = (total_committed_hr / total_payg_hr * 100) if total_payg_hr > 0 else 0.0
-    return {
-        "total_payg_monthly": total_payg_hr * 730,
-        "total_savings_monthly": total_savings_mo,
-        "coverage_pct": coverage_pct,
-    }
 
 
 _SYNC_INTERVAL_LABELS = {1: "Every hour", 3: "Every 3 hours", 6: "Every 6 hours", 12: "Every 12 hours", 24: "Daily (24h)"}
@@ -784,21 +677,28 @@ Missing this step is **not fatal** - Resource inventory and cost data (step 2) s
 
 
 def page_home():
+    """Pure landing page - no metrics, no tenant table. Everything
+    tenant-related (list, add, manage) moved to its own Tenant Management
+    page 2026-08, per approved sketch (Home / Tenant Management / User
+    Management as three flat sidebar entries, no "Workspace" section) -
+    Home had drifted into being a tenant-ops screen with a welcome banner
+    bolted on top, not an actual home page."""
     st.markdown("## 🏠 Home")
     st.caption(f"Welcome to Multi-Cloud FinOps Optimization System, hello {current_user['display_name'] or current_user['username']}!")
     _finops_tag("Manage the FinOps Practice", "FinOps Practice Operations & Automation, Tools & Services")
-
-    metrics = _portfolio_summary_metrics(selected_provider, tenant_mode)
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Total monthly spend", fmt(metrics["total_payg_monthly"], 2))
-    m2.metric("Savings identified", fmt(metrics["total_savings_monthly"], 2) + "/mo")
-    m3.metric("SP + RI coverage", f"{metrics['coverage_pct']:.0f}%")
-
     st.divider()
+    st.markdown("Connect a cloud tenant, review its sync status, or jump into its dashboard - all from Tenant Management.")
+    if st.button("🗂️ Go to Tenant Management", type="primary"):
+        st.switch_page(tenant_mgmt_page)
+
+
+def page_tenant_management():
+    st.markdown("## 🗂️ Tenant Management")
+    st.caption(f"Connect, sync, and manage {selected_provider} tenants.")
 
     hdr_l, hdr_r = st.columns([4, 1])
     with hdr_l:
-        st.markdown(f"#### 🗂️ {selected_provider} Tenants")
+        st.markdown(f"#### {selected_provider} Tenants")
     with hdr_r:
         add_disabled = (tenant_mode == "demo")
         if st.button("➕ Add a new tenant", use_container_width=True, type="primary",
@@ -863,8 +763,7 @@ def page_home():
             st.session_state["_manage_tenant_id"] = None
 
     # Required-roles reference and setup guidance live inside each tenant's
-    # Manage dialog now, not here - Home stays a lean summary + list, per
-    # user feedback that this page had drifted from the approved sketch.
+    # Manage dialog now, not here.
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1725,17 +1624,20 @@ def page_analyze():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# NAVIGATION — small left sidebar rail: Manage (Tenants, User Management) and
-# a single Workspace entry whose content is the top-tabbed Analyze view.
+# NAVIGATION — flat 3-item sidebar (Home / Tenant Management / User
+# Management), per approved sketch 2026-08 - no section headers, no separate
+# "Workspace" entry. Analyze is still a real registered page (needed for
+# st.switch_page to work at all) but visibility="hidden" keeps it out of the
+# sidebar - it's reached only via a tenant's own "Dashboard" button in
+# Tenant Management, never browsed to directly, since analyzing data only
+# makes sense once a specific tenant is active.
 # ─────────────────────────────────────────────────────────────────────────────
-home_page    = st.Page(page_home,    title="Home",           icon="🏠", default=True)
-users_page   = st.Page(page_users,   title="User Management", icon="👥")
-analyze_page = st.Page(page_analyze, title="Analyze",         icon="📊")
+home_page        = st.Page(page_home,              title="Home",              icon="🏠", default=True)
+tenant_mgmt_page = st.Page(page_tenant_management,  title="Tenant Management", icon="🗂️")
+users_page       = st.Page(page_users,              title="User Management",   icon="👥")
+analyze_page     = st.Page(page_analyze,            title="Analyze",           icon="📊", visibility="hidden")
 
-pg = st.navigation({
-    "🏢 Manage":    [home_page, users_page],
-    "📊 Workspace": [analyze_page],
-}, position="sidebar")
+pg = st.navigation([home_page, tenant_mgmt_page, users_page, analyze_page], position="sidebar")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SIDEBAR CONTROLS — rendered below the nav menu above. Only cross-cutting
@@ -1766,10 +1668,6 @@ with st.sidebar:
     # live are separate login accounts and separate data now, so switching
     # means signing out and back in, not flipping a toggle mid-session.
     env_mode = render_switch_mode_control()
-
-    if env_mode == "Live Cloud API" and st.button("🔁 Manage Tenant Connection", use_container_width=True, help="Connect, switch, or review your active Azure tenant."):
-        st.session_state["setup_complete"] = False
-        st.rerun()
 
     st.divider()
 

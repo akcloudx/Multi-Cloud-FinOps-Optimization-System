@@ -676,3 +676,38 @@ class AppUser(Base):
     is_active      = Column(Boolean, default=True)
     created_at     = Column(String(255), nullable=False)
     last_login_at  = Column(String(255), nullable=True)
+
+
+class AppSession(Base):
+    """
+    Server-side session store backing login persistence across a real browser
+    refresh - plain st.session_state alone does NOT survive one (confirmed by
+    reproducing it on the local dev server, not just in Azure - a fresh page
+    load always gets a brand-new, empty session_state in Streamlit; only
+    reruns over the same still-open WebSocket connection, like a button
+    click, keep it). The fix: a random token is put in the page's URL query
+    string (st.query_params) at login time, a row here maps that token back
+    to who's signed in, and ui/auth_page.py's require_login() restores
+    st.session_state from this row whenever auth_user is missing but the
+    token is present - i.e. exactly on a fresh load, not on every rerun.
+
+    Backed by the real DB (not an in-memory dict) so it also survives an App
+    Service cold-start restart (this app runs on a Free/F1 plan with no
+    "Always On" - the whole process, and any in-memory state, is gone after
+    an idle period), not just a same-process page refresh.
+
+    Always lives in the Azure/live schema regardless of whether the session
+    itself is a demo or production login - the whole point of looking a
+    token up is to find out its mode, so the table it lives in can't itself
+    be split by mode the way AppUser is (that would mean checking both
+    schemas for every unauthenticated request).
+    """
+    __tablename__ = "app_sessions"
+
+    token          = Column(String(64), primary_key=True)
+    user_id        = Column(Integer, nullable=False)
+    username       = Column(String(255), nullable=False)
+    display_name   = Column(String(255), nullable=True)
+    mode           = Column(String(10), nullable=False)   # "demo" | "live"
+    created_at     = Column(String(255), nullable=False)
+    last_seen_at   = Column(String(255), nullable=False)
