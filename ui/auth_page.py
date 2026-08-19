@@ -33,12 +33,18 @@ def _start_session(user: dict, mode: str) -> None:
     same connection) plus a token in the URL query string mapped to a DB row
     (db/sessions.py) that a fresh page load restores from, since
     session_state alone doesn't survive one. Call this instead of setting
-    st.session_state["auth_user"] directly."""
+    st.session_state["auth_user"] directly.
+
+    create_session() can return None (a transient DB hiccup, e.g. right as
+    Azure SQL Serverless wakes from auto-pause) - sign-in still succeeds for
+    this connection either way; only refresh-persistence is degraded, and
+    only until the next successful login."""
     st.session_state["auth_user"] = user
     st.session_state["env_mode_widget"] = _ENV_MODE_BY_MODE[mode]
     token = create_session(user, mode)
-    st.session_state["_session_token"] = token
-    st.query_params["s"] = token
+    if token:
+        st.session_state["_session_token"] = token
+        st.query_params["s"] = token
 
 
 def require_login() -> dict:
