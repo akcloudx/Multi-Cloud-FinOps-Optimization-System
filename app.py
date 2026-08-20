@@ -1664,6 +1664,23 @@ with st.sidebar:
     # Update query parameters to persist selection across page refreshes
     st.query_params["currency"] = selected_currency
 
+    # Same reasoning, same fix pattern - the login session token (?s=...,
+    # see ui/auth_page.py) needs this exact same "re-set on every rerun"
+    # treatment. Real bug caught on video 2026-08-20: Streamlit's sidebar
+    # multi-page nav links (Home/Tenant Management/User Management) do NOT
+    # reliably carry a query param forward into their href when it was only
+    # ever set once (at login) - one click on a nav link and it's silently
+    # gone from the address bar, so the next ordinary refresh (now on a URL
+    # with no token) correctly but unhelpfully bounces back to login.
+    # "currency" survives the identical navigation only because it's
+    # unconditionally re-set on every single rerun, right here - mirroring
+    # that pattern (and this exact location, not require_login()'s early
+    # fast path - that placement broke sidebar rendering entirely when
+    # tried) is what actually fixes it.
+    _session_token = st.session_state.get("_session_token")
+    if _session_token:
+        st.query_params["s"] = _session_token
+
     st.caption(f"Platform `{selected_provider}` · Mode `{env_mode}` · Currency `{selected_currency}`")
 
     st.divider()
