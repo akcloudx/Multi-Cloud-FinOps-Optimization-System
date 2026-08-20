@@ -149,7 +149,7 @@ from azure_conn.connector import (
 )
 from aws.connector import (
     AWSCredentials, load_aws_credentials_from_env, save_aws_credentials_to_env_file,
-    test_aws_connection, REQUIRED_AWS_POLICIES, HAS_BOTO3,
+    test_aws_connection, check_aws_permissions, REQUIRED_AWS_POLICIES, HAS_BOTO3,
 )
 
 # Load .env
@@ -314,7 +314,12 @@ def _render_aws_connect_form(key_prefix: str, mode: str = "live"):
 5. Select **Command Line Interface (CLI)** and copy the generated credentials:
    - **Access Key ID**
    - **Secret Access Key**
-6. Ensure the IAM user has `ec2:DescribeInstances`, `rds:DescribeDBInstances`, and `ce:GetCostAndUsage` policies attached.
+6. Ensure the IAM user has these policies attached (use **🧪 Test Access Permissions** below to check for real):
+   - `ec2:DescribeInstances` — mandatory
+   - `rds:DescribeDBInstances` — mandatory
+   - `savingsplans:DescribeSavingsPlans` — for Savings Plan data
+   - `ce:GetCostAndUsage` — for Cost Explorer usage/PAYG rates
+   - `ce:GetReservationUtilization` — for Reserved Instance data
 """)
     env_aws = load_aws_credentials_from_env()
     with st.form(f"{key_prefix}_aws_form"):
@@ -324,7 +329,24 @@ def _render_aws_connect_form(key_prefix: str, mode: str = "live"):
             aws_reg = st.text_input("Default AWS Region", value=env_aws.region if env_aws else "us-east-1", placeholder="us-east-1")
         with col2:
             aws_sec = st.text_input("AWS Secret Access Key", value=env_aws.secret_access_key if env_aws else "", type="password")
-        aws_sub_btn = st.form_submit_button("💾 Connect & Save AWS Credentials", type="primary")
+
+        c_btn1, c_btn2 = st.columns(2)
+        with c_btn1:
+            aws_test_btn = st.form_submit_button("🧪 Test Access Permissions", use_container_width=True)
+        with c_btn2:
+            aws_sub_btn = st.form_submit_button("💾 Connect & Save AWS Credentials", type="primary", use_container_width=True)
+
+    if aws_test_btn:
+        new_aws = AWSCredentials(aws_key, aws_sec, aws_reg)
+        if new_aws.is_complete:
+            with st.spinner("Checking IAM permissions..."):
+                check = check_aws_permissions(new_aws)
+            if check["checked"]:
+                _render_aws_permission_checklist(check["results"])
+            else:
+                st.error(f"❌ Could not check permissions: {check['error']}")
+        else:
+            st.error("Please fill in Access Key ID and Secret Access Key before testing.")
 
     if aws_sub_btn:
         new_aws = AWSCredentials(aws_key, aws_sec, aws_reg)
@@ -378,6 +400,23 @@ def _render_role_checklist(required_roles: list, status: str, assigned_str: str)
             st.markdown(f"✅ {name}")
         else:
             st.markdown(f"❌ {name}")
+
+
+def _render_aws_permission_checklist(results: list):
+    """AWS equivalent of _render_role_checklist above - one line per
+    REQUIRED_AWS_POLICIES action, straight from check_aws_permissions()'s
+    real per-action results. Not collapsed into one aggregate status the way
+    Azure's assigned/missing comma-string is, because AWS permissions are
+    fundamentally checked action-by-action (no single named "role" the way
+    Azure RBAC has) - see check_aws_permissions()'s docstring for the full
+    reasoning, including why ce:* actions show "unverified" rather than a
+    real pass/fail here."""
+    icons = {"ready": "✅", "missing": "❌", "error": "⚠️", "unverified": "🕓"}
+    for r in results:
+        icon = icons.get(r["status"], "❓")
+        st.markdown(f"{icon} `{r['action']}`")
+        if r.get("detail") and r["status"] in ("missing", "error", "unverified"):
+            st.caption(r["detail"])
 
 
 def _run_tenant_permission_check(t, mode: str) -> dict:
