@@ -10,11 +10,11 @@ Handles:
 
 REQUIRED AWS IAM POLICY PERMISSIONS:
   - ec2:DescribeInstances
+  - ec2:DescribeReservedInstances
   - rds:DescribeDBInstances
+  - rds:DescribeReservedDBInstances
   - savingsplans:DescribeSavingsPlans
   - ce:GetCostAndUsage
-  - ce:GetSavingsPlansUtilization
-  - ce:GetReservationUtilization
 """
 
 import os
@@ -40,33 +40,70 @@ except ImportError:
 _ACCESS_DENIED_CODES = {"AccessDenied", "AccessDeniedException", "UnauthorizedOperation"}
 
 
+# AWS Managed Policy names verified against official AWS docs (each policy's
+# own reference page + JSON document), not guessed - confirmed live 2026-08
+# while the user tested this feature and asked for exact, non-confusing
+# naming between "what Instructions says to attach" and "what the Test
+# checklist reports".
+#
+# Reservations correction (2026-08-20): this list originally used
+# ce:GetReservationUtilization for "read owned Reservations", which was
+# wrong - confirmed via https://docs.aws.amazon.com/aws-cost-management/latest/APIReference/API_GetReservationUtilization.html
+# that it's a utilization-percentage/time-series metrics API, not a listing
+# of owned reservations, and it's also a paid Cost Explorer API (see
+# check_aws_permissions()'s docstring). The correct APIs for "what
+# reservations do I own" are ec2:DescribeReservedInstances (confirmed via
+# https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeReservedInstances.html)
+# and rds:DescribeReservedDBInstances (confirmed via
+# https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_DescribeReservedDBInstances.html)
+# - both free, both already covered by the same AmazonEC2ReadOnlyAccess /
+# AmazonRDSReadOnlyAccess policies used for inventory (they're part of each
+# service's own Describe* family), so no custom inline policy is needed
+# after all.
 REQUIRED_AWS_POLICIES = [
     {
         "Policy / Action": "ec2:DescribeInstances",
+        "AWS Managed Policy": "AmazonEC2ReadOnlyAccess",
         "Required":        "Yes — Mandatory",
         "Purpose":         "Scan all EC2 instances across regions",
     },
     {
+        "Policy / Action": "ec2:DescribeReservedInstances",
+        "AWS Managed Policy": "AmazonEC2ReadOnlyAccess",
+        "Required":        "Yes — For RI data",
+        "Purpose":         "Read active EC2 Reserved Instances you own",
+    },
+    {
         "Policy / Action": "rds:DescribeDBInstances",
+        "AWS Managed Policy": "AmazonRDSReadOnlyAccess",
         "Required":        "Yes — Mandatory",
         "Purpose":         "Scan RDS instances and database clusters",
     },
     {
+        "Policy / Action": "rds:DescribeReservedDBInstances",
+        "AWS Managed Policy": "AmazonRDSReadOnlyAccess",
+        "Required":        "Yes — For RI data",
+        "Purpose":         "Read active RDS Reserved Instances you own",
+    },
+    {
         "Policy / Action": "savingsplans:DescribeSavingsPlans",
+        "AWS Managed Policy": "AWSSavingsPlansReadOnlyAccess",
         "Required":        "Yes — For SP data",
         "Purpose":         "Fetch active AWS Compute & EC2 Savings Plans",
     },
     {
         "Policy / Action": "ce:GetCostAndUsage",
+        "AWS Managed Policy": "AWSBillingReadOnlyAccess",
         "Required":        "Yes — For Cost Explorer",
         "Purpose":         "Query AWS Cost Explorer for un-discounted PAYG rates and usage",
     },
-    {
-        "Policy / Action": "ce:GetReservationUtilization",
-        "Required":        "Yes — For RI data",
-        "Purpose":         "Read active EC2 & RDS Reserved Instance utilization",
-    },
 ]
+
+# Fast lookup for the checklist renderer (app.py) - keeps the exact same
+# managed-policy name in sync between the Instructions panel and the live
+# Test Access Permissions result for the same action, so there's never a
+# naming mismatch to cross-reference.
+_MANAGED_POLICY_BY_ACTION = {p["Policy / Action"]: p["AWS Managed Policy"] for p in REQUIRED_AWS_POLICIES}
 
 
 class AWSCredentials:
@@ -140,22 +177,30 @@ def check_aws_permissions(creds: AWSCredentials) -> dict:
     So this checks each REQUIRED_AWS_POLICIES action directly, with one
     deliberate exception:
 
-    - ec2:DescribeInstances - checked via the real EC2 DryRun=True mechanism
-      (AWS's own purpose-built "would this be allowed" flag for this
-      service): a DryRunOperation response means allowed, UnauthorizedOperation
-      means denied. No real call, no data pulled, no cost.
-    - rds:DescribeDBInstances / savingsplans:DescribeSavingsPlans - EC2's
-      DryRun convention isn't universal (RDS/Savings Plans don't support it),
-      so these are checked with a real, minimal, genuinely free read-only
-      call (MaxRecords=20 is RDS's own required minimum, not a chosen value).
-    - ce:GetCostAndUsage / ce:GetReservationUtilization - deliberately NOT
-      probed live. AWS's own Cost Explorer docs are explicit: "Each
-      paginated API request incurs a charge of $0.01" (https://docs.aws.amazon.com/cost-management/latest/userguide/ce-what-is.html)
+    - ec2:DescribeInstances / ec2:DescribeReservedInstances - both checked
+      via the real EC2 DryRun=True mechanism (AWS's own purpose-built "would
+      this be allowed" flag for this service): a DryRunOperation response
+      means allowed, UnauthorizedOperation means denied. No real call, no
+      data pulled, no cost. Confirmed via boto3 docs that DescribeReservedInstances
+      supports DryRun just like DescribeInstances.
+    - rds:DescribeDBInstances / rds:DescribeReservedDBInstances /
+      savingsplans:DescribeSavingsPlans - EC2's DryRun convention isn't
+      universal (RDS/Savings Plans don't support it), so these are checked
+      with a real, minimal, genuinely free read-only call (MaxRecords=20 is
+      RDS's own required minimum, not a chosen value).
+    - ce:GetCostAndUsage - deliberately NOT probed live. AWS's own Cost
+      Explorer docs are explicit: "Each paginated API request incurs a
+      charge of $0.01" (https://docs.aws.amazon.com/cost-management/latest/userguide/ce-what-is.html)
       - a permission CHECK should never itself cost real money. Reported as
       "unverified" here; the real status gets confirmed the first time an
-      actual cost sync calls these for real data anyway (data/sync_pipeline.py,
+      actual cost sync calls this for real data anyway (data/sync_pipeline.py,
       once AWS live fetch exists), so the $0.01 is only ever spent getting
-      real data, never spent just to check a box.
+      real data, never spent just to check a box. (ec2:DescribeReservedInstances /
+      rds:DescribeReservedDBInstances used to also be a paid Cost Explorer
+      call via the now-removed ce:GetReservationUtilization - see
+      REQUIRED_AWS_POLICIES's comment above for that correction - so they no
+      longer need this "unverified" treatment at all; they're free and
+      checked live like everything else above.)
 
     Returns {"checked": bool, "error": str|None, "results": [{"action",
     "status" ("ready"|"missing"|"unverified"|"error"), "detail"}]}. "error"
@@ -202,15 +247,24 @@ def check_aws_permissions(creds: AWSCredentials) -> dict:
         dry_run_convention=True,
     )
     _probe(
+        "ec2:DescribeReservedInstances",
+        lambda: session.client("ec2").describe_reserved_instances(DryRun=True),
+        dry_run_convention=True,
+    )
+    _probe(
         "rds:DescribeDBInstances",
         lambda: session.client("rds").describe_db_instances(MaxRecords=20),
+    )
+    _probe(
+        "rds:DescribeReservedDBInstances",
+        lambda: session.client("rds").describe_reserved_db_instances(MaxRecords=20),
     )
     _probe(
         "savingsplans:DescribeSavingsPlans",
         lambda: session.client("savingsplans").describe_savings_plans(maxResults=1),
     )
 
-    for action in ["ce:GetCostAndUsage", "ce:GetReservationUtilization"]:
+    for action in ["ce:GetCostAndUsage"]:
         results.append({
             "action": action,
             "status": "unverified",
@@ -218,6 +272,12 @@ def check_aws_permissions(creds: AWSCredentials) -> dict:
                       "so this is confirmed the first time real cost data is synced, not by a "
                       "standalone check.",
         })
+
+    # Attaches the exact same managed-policy name shown in the Instructions
+    # panel to each result, so the live checklist and the setup instructions
+    # never say two different things for the same action.
+    for r in results:
+        r["managed_policy"] = _MANAGED_POLICY_BY_ACTION.get(r["action"])
 
     return {"checked": True, "error": None, "results": results}
 

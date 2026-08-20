@@ -116,6 +116,20 @@ def update_tenant_name(provider: str, mode: str, tenant_db_id: int, tenant_name:
         session.commit()
 
 
+def update_aws_account_id(provider: str, mode: str, tenant_db_id: int, account_id: Optional[str]) -> None:
+    """AWS-only - stores the real AWS account ID resolved via STS
+    GetCallerIdentity (aws/connector.py's test_aws_connection), shown in the
+    Tenant Management table's "Account ID" column for AWS rows. Called
+    whenever AWS credentials are saved or tested, best-effort - a failed
+    resolution just leaves this None rather than blocking the save/check
+    it's piggybacking on."""
+    init_db(provider, mode)
+    engine = get_engine(provider, mode)
+    with Session(engine) as session:
+        session.query(CloudTenant).filter(CloudTenant.id == tenant_db_id).update({"aws_account_id": account_id})
+        session.commit()
+
+
 def update_tenant_permission_status(provider: str, mode: str, tenant_db_id: int,
                                      status: str, missing_roles: Optional[str] = None,
                                      assigned_roles: Optional[str] = None) -> None:

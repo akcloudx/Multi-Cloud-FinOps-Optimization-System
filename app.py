@@ -139,6 +139,7 @@ from db.tenants import (
     update_tenant_name, touch_last_synced, set_active_tenant, delete_tenant,
     resource_count, list_subscriptions, upsert_subscription,
     update_tenant_permission_status, record_sync_result, update_sync_interval,
+    update_aws_account_id,
 )
 from azure_conn.connector import (
     AzureCredentials, load_credentials_from_env, save_credentials_to_env_file,
@@ -314,13 +315,25 @@ def _render_aws_connect_form(key_prefix: str, mode: str = "live"):
 5. Select **Command Line Interface (CLI)** and copy the generated credentials:
    - **Access Key ID**
    - **Secret Access Key**
-6. Ensure the IAM user has these policies attached (use **🧪 Test Access Permissions** below to check for real):
-   - `ec2:DescribeInstances` — mandatory
-   - `rds:DescribeDBInstances` — mandatory
-   - `savingsplans:DescribeSavingsPlans` — for Savings Plan data
-   - `ce:GetCostAndUsage` — for Cost Explorer usage/PAYG rates
-   - `ce:GetReservationUtilization` — for Reserved Instance data
+6. Attach these AWS managed policies (verified against AWS's own policy reference pages, not guessed - use **🧪 Test Access Permissions** below to check for real, and it'll report these exact same policy names):
 """)
+        # Generated FROM REQUIRED_AWS_POLICIES (aws/connector.py), not
+        # hand-typed a second time here - keeps this list and the live Test
+        # checklist saying the exact same managed-policy name for the exact
+        # same action, permanently, instead of the two silently drifting out
+        # of sync the way they had before (real gap the user caught live).
+        for policy in REQUIRED_AWS_POLICIES:
+            action = policy["Policy / Action"]
+            managed_policy = policy["AWS Managed Policy"]
+            if managed_policy.startswith("("):
+                st.markdown(f"   - `{action}` — {managed_policy}")
+            else:
+                st.markdown(f"   - `{action}` → attach **`{managed_policy}`**")
+        st.caption(
+            "Only 4 managed policies to attach in total - EC2 and RDS each cover both the "
+            "inventory scan and the Reserved Instances read (`Describe*` family), so nothing "
+            "extra is needed for RI data beyond what's already required for inventory."
+        )
     env_aws = load_aws_credentials_from_env()
     with st.form(f"{key_prefix}_aws_form"):
         col1, col2 = st.columns(2)
@@ -352,11 +365,18 @@ def _render_aws_connect_form(key_prefix: str, mode: str = "live"):
         new_aws = AWSCredentials(aws_key, aws_sec, aws_reg)
         if new_aws.is_complete:
             save_aws_credentials_to_env_file(new_aws)
-            upsert_tenant(
+            tenant_db_id = upsert_tenant(
                 provider="AWS", mode=mode, tenant_name=f"AWS ({aws_reg})",
                 tenant_id=aws_reg, subscription_id=aws_reg,
                 client_id=aws_key, client_secret=aws_sec,
             )
+            # Best-effort - resolves the real AWS Account ID via STS
+            # (shown in the Tenant Management table's Account ID column)
+            # without blocking the save if it fails; a bad credential still
+            # gets registered, just without an account ID until fixed.
+            conn_check = test_aws_connection(new_aws)
+            if conn_check["success"]:
+                update_aws_account_id("AWS", mode, tenant_db_id, conn_check["account_id"])
             st.success("✅ AWS credentials saved to the tenant registry.")
             st.info("ℹ️ Live AWS inventory fetch (EC2/RDS via boto3) isn't implemented yet — this account is registered, but Live mode will show no resources until that's built.")
             return True
@@ -414,7 +434,13 @@ def _render_aws_permission_checklist(results: list):
     icons = {"ready": "✅", "missing": "❌", "error": "⚠️", "unverified": "🕓"}
     for r in results:
         icon = icons.get(r["status"], "❓")
-        st.markdown(f"{icon} `{r['action']}`")
+        # Same managed-policy name as the Instructions expander above -
+        # check_aws_permissions() attaches it to every result specifically
+        # so there's one name to attach in AWS, shown consistently here and
+        # in Instructions, not two different labels to cross-reference.
+        policy = r.get("managed_policy")
+        policy_suffix = f" — `{policy}`" if policy and not policy.startswith("(") else ""
+        st.markdown(f"{icon} `{r['action']}`{policy_suffix}")
         if r.get("detail") and r["status"] in ("missing", "error", "unverified"):
             st.caption(r["detail"])
 
@@ -484,6 +510,19 @@ def _manage_tenant_dialog(t, mode: str):
     name_row = st.container()
 
     if not is_azure:
+        # Same two lessons already learned on the Azure side, applied here
+        # too: the segmented control must register BEFORE the name-Save
+        # button's st.rerun() (or it gets pruned and resets), and the
+        # name row's screen position is reserved via a placeholder so it
+        # still renders first visually.
+        _AWS_SECTIONS = ["Credentials", "Permissions"]
+        aws_section_key = f"mgmt_aws_section_{t.id}"
+        active_aws_section = st.segmented_control(
+            "Section", options=_AWS_SECTIONS,
+            default=st.session_state.get(aws_section_key, _AWS_SECTIONS[0]),
+            required=True, key=aws_section_key, label_visibility="collapsed",
+        )
+
         with name_row:
             name_col, save_col = st.columns([4, 1])
             new_name = name_col.text_input("Tenant name", value=t.tenant_name, key=f"mgmt_name_{t.id}")
@@ -491,6 +530,42 @@ def _manage_tenant_dialog(t, mode: str):
                 update_tenant_name(selected_provider, mode, t.id, new_name)
                 st.success("Tenant name updated.")
                 st.rerun()
+
+        if active_aws_section == "Credentials":
+            if is_demo:
+                st.caption("Not applicable - a demo tenant has no real AWS credentials behind it.")
+            else:
+                with st.form(f"mgmt_aws_creds_{t.id}"):
+                    aws_key_edit = st.text_input("AWS Access Key ID", value=t.client_id)
+                    aws_reg_edit = st.text_input("Default AWS Region", value=t.tenant_id)
+                    aws_sec_edit = st.text_input("AWS Secret Access Key", value="", type="password",
+                                                  placeholder="Leave blank to keep the current secret")
+                    if st.form_submit_button("Save credentials", type="primary"):
+                        secret_to_save = aws_sec_edit if aws_sec_edit else get_tenant_credentials(t)
+                        upsert_tenant(
+                            provider="AWS", mode=mode, tenant_name=new_name or t.tenant_name,
+                            tenant_id=aws_reg_edit, subscription_id=aws_reg_edit,
+                            client_id=aws_key_edit, client_secret=secret_to_save,
+                        )
+                        st.success("Credentials updated.")
+                        st.rerun()
+        elif active_aws_section == "Permissions":
+            if is_demo:
+                st.caption("Not applicable - a demo tenant has no real AWS credentials behind it.")
+            else:
+                st.caption("Checked live against AWS each time - not persisted, same as the Add a new tenant form's test.")
+                if st.button("🔁 Check permissions", disabled=is_demo, key=f"mgmt_aws_check_{t.id}"):
+                    creds = AWSCredentials(t.client_id, get_tenant_credentials(t), t.tenant_id)
+                    with st.spinner("Checking IAM permissions..."):
+                        check = check_aws_permissions(creds)
+                        conn_check = test_aws_connection(creds)
+                    if conn_check["success"]:
+                        update_aws_account_id(selected_provider, mode, t.id, conn_check["account_id"])
+                    if check["checked"]:
+                        _render_aws_permission_checklist(check["results"])
+                    else:
+                        st.error(f"❌ Could not check permissions: {check['error']}")
+
         st.divider()
         if st.button("🗑️ Delete tenant", disabled=is_demo, key=f"mgmt_delete_{t.id}"):
             delete_tenant(selected_provider, mode, t.id)
@@ -758,16 +833,22 @@ def page_tenant_management():
         )
         return
 
+    # "Subscriptions" is Azure-only (a count of sub-scopes under one
+    # tenant) - AWS has no equivalent (one credential set = one account),
+    # so that column becomes "Account ID" (resolved via STS, see
+    # aws/connector.py's test_aws_connection) for AWS rows instead, per the
+    # user's own call confirmed live 2026-08.
+    fourth_col_label = "Subscriptions" if is_azure else "Account ID"
     header_cols = st.columns([3, 1.3, 2, 1.3, 1.8, 2.2])
-    for c, label in zip(header_cols, ["Tenant name", "Status", "Authentication", "Subscriptions", "Last synced", "Actions"]):
+    for c, label in zip(header_cols, ["Tenant name", "Status", "Authentication", fourth_col_label, "Last synced", "Actions"]):
         c.caption(f"**{label}**")
     for t in tenants:
-        sub_count = len(list_subscriptions(selected_provider, tenant_mode, t.id)) if is_azure else None
+        fourth_col_value = len(list_subscriptions(selected_provider, tenant_mode, t.id)) if is_azure else (t.aws_account_id or "—")
         cols = st.columns([3, 1.3, 2, 1.3, 1.8, 2.2])
         cols[0].markdown(f"{'🟢' if t.is_active else '⚪'} {t.tenant_name}")
         cols[1].caption("Active" if t.is_active else "Inactive")
         cols[2].caption("Service principal" if is_azure else "IAM access key")
-        cols[3].caption(str(sub_count) if sub_count is not None else "—")
+        cols[3].caption(str(fourth_col_value))
         cols[4].caption(t.last_synced_at[:16] if t.last_synced_at else "Never")
         with cols[5]:
             b1, b2 = st.columns(2)

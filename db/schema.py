@@ -294,6 +294,7 @@ def init_db(provider: str = "Azure", mode: str = "demo"):
     _ensure_column(engine, schema_name, "tenant_subscriptions", "assigned_roles", "VARCHAR(255)")
     _widen_column(engine, schema_name, "cloud_tenants", "tenant_missing_roles", 1000)
     _widen_column(engine, schema_name, "tenant_subscriptions", "missing_role", 1000)
+    _ensure_column(engine, schema_name, "cloud_tenants", "aws_account_id", "VARCHAR(50)")
     return engine
 
 
@@ -628,6 +629,13 @@ class CloudTenant(Base):
     # the next rerun happens.
     last_sync_status         = Column(String(20), nullable=True)    # "SUCCESS" | "PARTIAL" | "FAILED"
     last_sync_message        = Column(String(500), nullable=True)
+    # AWS-only - resolved via sts:GetCallerIdentity (azure_conn... no,
+    # aws/connector.py's test_aws_connection) whenever credentials are
+    # saved or tested. Shown in the Tenant Management table's "Account ID"
+    # column for AWS rows in place of Azure's "Subscriptions" count, which
+    # has no AWS equivalent (one credential set = one account here, not a
+    # list of sub-scopes) - user's own call, confirmed live 2026-08.
+    aws_account_id           = Column(String(50), nullable=True)
 
 
 class TenantSubscription(Base):
