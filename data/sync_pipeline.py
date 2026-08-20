@@ -41,7 +41,7 @@ from azure_conn.connector import (
     fetch_live_savings_plans, test_connection, AzureCredentials, _friendly_auth_error,
     list_accessible_subscriptions, check_role_assignments, status_from_role_check,
 )
-from aws.connector import load_aws_credentials_from_env, test_aws_connection
+from aws.connector import load_aws_credentials_from_env, test_aws_connection, fetch_live_inventory as fetch_live_aws_inventory
 from pricing.azure_retail_api import refresh_retail_prices
 from pricing.commitment_pricing import refresh_commitment_prices
 from pricing.commitment_mapping import derive_reservation_commitment_fields, derive_savings_plan_commitment_fields
@@ -88,9 +88,8 @@ def run_ingestion_pipeline(provider: str = "Azure", creds=None, force_mock: bool
                 df_live = fetch_live_inventory(live_creds)
                 records = df_live.to_dict(orient="records")
             else:
-                # AWS live fetch fallback - not implemented yet (aws/connector.py
-                # has no live fetch at all).
-                records = []
+                df_live = fetch_live_aws_inventory(live_creds)
+                records = df_live.to_dict(orient="records")
 
             # Reservations/Savings Plans require SEPARATE, elevated tenant-level
             # RBAC (Reservations Reader / Savings Plan Reader at
@@ -115,7 +114,15 @@ def run_ingestion_pipeline(provider: str = "Azure", creds=None, force_mock: bool
                     ri_sp_error = str(e)[:300]
                     reservation_records, savings_plan_records = [], []
 
-            rates = refresh_retail_prices(engine, records, provider=provider) if records else {}
+            # Azure-only: both of these call Azure's real Retail Prices API,
+            # which has no AWS pricing equivalent wired up yet (AWS's
+            # required-permissions list already includes ce:GetCostAndUsage
+            # for this exact future purpose - see aws/connector.py - but
+            # nothing calls it yet). Gating on is_azure avoids wastefully
+            # querying Azure's API with AWS SKU strings (e.g. "t3.medium")
+            # that could never match anything there; AWS rows keep the
+            # honest 0.0 placeholder fetch_live_inventory() already sets.
+            rates = refresh_retail_prices(engine, records, provider=provider) if (is_azure and records) else {}
             for r in records:
                 key = (r.get("SKU"), r.get("Region"), r.get("OS"))
                 if key in rates:
@@ -124,7 +131,7 @@ def run_ingestion_pipeline(provider: str = "Azure", creds=None, force_mock: bool
             # Real 1yr/3yr Savings Plan + Reserved Instance rates for every
             # SKU/region/OS just synced - what savings_plan_analysis() and
             # reservation_analysis() use instead of a flat safety-buffer guess.
-            if records:
+            if is_azure and records:
                 refresh_commitment_prices(engine, records, provider=provider)
 
             # Derive this app's simplified Commitment rows from the raw

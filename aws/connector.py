@@ -326,3 +326,186 @@ def test_aws_connection(creds: AWSCredentials) -> dict:
             "account_id": None,
             "error": err,
         }
+
+
+# ── Live Inventory Fetch (EC2 + RDS) ─────────────────────────────────────────
+# AWS has no single "list every resource in my account" API the way Azure's
+# Resource Graph is subscription-wide - ec2:DescribeInstances and
+# rds:DescribeDBInstances are both REGION-scoped, confirmed via their own API
+# references (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeInstances.html,
+# https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_DescribeDBInstances.html).
+# So getting full account-wide coverage means calling each once per enabled
+# region - decided with the user (asked first, chose "all regions" over
+# "just the tenant's one default region") specifically so a resource running
+# outside the default region isn't silently invisible to the app, mirroring
+# how Azure's fetch already covers an entire subscription, not one resource
+# group. Both calls are free (see check_aws_permissions()'s docstring for the
+# Cost Explorer contrast), so scanning every region costs nothing extra
+# beyond a little latency.
+def _discover_regions(session) -> list:
+    """Regions enabled for this account only (not ALL AWS regions that
+    exist) - confirmed via https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeRegions.html
+    that omitting AllRegions defaults to enabled-only, which is what we want:
+    scanning a disabled/not-opted-in region would just fail with an auth
+    error, so there's no point including it."""
+    ec2 = session.client("ec2")
+    resp = ec2.describe_regions()
+    return [r["RegionName"] for r in resp.get("Regions", [])]
+
+
+def _map_ec2_state(state: str) -> str:
+    """Collapses EC2's 6 lifecycle states into the exact two categorical
+    values analysis/engine.py keys off of (`== "Running"` / `== "Stopped
+    (deallocated)"`, checked literally, not a general "not running" test -
+    see engine.py lines 89/373/393/449/537). "stopped" is the real EC2
+    equivalent of Azure's "deallocated" state (confirmed via AWS's own EC2
+    pricing docs: a stopped instance is not billed for compute) - same
+    semantic, reusing the same label rather than inventing an AWS-specific
+    one so the shared analysis engine treats it identically."""
+    s = (state or "").lower()
+    if s in ("stopped", "stopping", "shutting-down"):
+        return "Stopped (deallocated)"
+    return "Running"   # running, pending, or any future/unknown state - matches Azure's own fallback default.
+
+
+def _map_rds_state(status: str) -> str:
+    """Same two-bucket mapping as _map_ec2_state, for RDS's DBInstanceStatus.
+    RDS's own docs confirm a "stopped" DB instance is not billed for compute
+    (storage still bills, same nuance EC2 has) - genuinely equivalent to
+    Azure's "deallocated" concept, not just a display label chosen for
+    convenience."""
+    s = (status or "").lower()
+    if s == "stopped":
+        return "Stopped (deallocated)"
+    return "Running"
+
+
+def _map_ec2_platform(platform_details: str) -> str:
+    """EC2's platformDetails is a free-text billing field (e.g. "Windows",
+    "Windows with SQL Server Standard", "Linux/UNIX", "Red Hat Enterprise
+    Linux") - collapsed to the same "Windows"/"Linux" categories the Azure
+    side already displays, since no AWS pricing engine exists yet to
+    consume anything more granular (see check_aws_permissions() module
+    docstring / project memory - AWS pricing is a separate, not-yet-built
+    round)."""
+    return "Windows" if "windows" in (platform_details or "").lower() else "Linux"
+
+
+_RDS_ENGINE_LABELS = {
+    "mysql":              "Amazon RDS for MySQL",
+    "postgres":           "Amazon RDS for PostgreSQL",
+    "mariadb":            "Amazon RDS for MariaDB",
+    "oracle-ee":          "Amazon RDS for Oracle",
+    "oracle-ee-cdb":      "Amazon RDS for Oracle",
+    "oracle-se2":         "Amazon RDS for Oracle",
+    "oracle-se2-cdb":     "Amazon RDS for Oracle",
+    "sqlserver-ee":       "Amazon RDS for SQL Server",
+    "sqlserver-se":       "Amazon RDS for SQL Server",
+    "sqlserver-ex":       "Amazon RDS for SQL Server",
+    "sqlserver-web":      "Amazon RDS for SQL Server",
+    "aurora-mysql":       "Amazon Aurora (MySQL)",
+    "aurora-postgresql":  "Amazon Aurora (PostgreSQL)",
+}
+
+
+def _map_rds_engine(engine: str) -> str:
+    """RDS's `Engine` field (e.g. "mysql", "aurora-postgresql") - confirmed
+    valid values via https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_CreateDBInstance.html's
+    Engine parameter enum. Falls back to the raw engine string (rather than
+    a generic "Database" bucket) for any engine not in the map, so an
+    unrecognized/future engine is still visible and identifiable, not
+    silently mislabeled."""
+    return _RDS_ENGINE_LABELS.get((engine or "").lower(), engine or "Unknown")
+
+
+def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
+    """
+    Fetches live EC2 + RDS inventory across every AWS region enabled for
+    this account. Returns a DataFrame in the exact same shape as
+    azure_conn.connector.fetch_live_inventory() so both providers feed
+    data/sync_pipeline.py identically.
+
+    "PAYG Hourly Cost USD" is left at 0.0 for every row - there is no AWS
+    pricing engine yet (unlike Azure's pricing/azure_retail_api.py real
+    Retail Prices API sync), so this is an honest placeholder, not a
+    computed value, until that's built as its own round.
+
+    "Subscription" holds the real AWS Account ID (via sts:GetCallerIdentity,
+    which requires no IAM permission at all for any authenticated principal -
+    confirmed AWS-wide behavior, not gated by REQUIRED_AWS_POLICIES) since
+    AWS has no "subscription" concept - this mirrors the same Account ID
+    already tracked/displayed elsewhere for AWS tenants (db/schema.py's
+    CloudTenant.aws_account_id).
+    """
+    if not HAS_BOTO3:
+        raise ImportError("boto3 library is not installed. Run: pip install boto3")
+    if not creds.is_complete:
+        raise ValueError("AWS Access Key ID and Secret Access Key are required.")
+
+    session = boto3.Session(
+        aws_access_key_id=creds.access_key_id,
+        aws_secret_access_key=creds.secret_access_key,
+        region_name=creds.region,
+    )
+
+    account_id = session.client("sts").get_caller_identity().get("Account", "")
+    regions = _discover_regions(session)
+
+    records = []
+
+    for region in regions:
+        try:
+            ec2 = session.client("ec2", region_name=region)
+            paginator = ec2.get_paginator("describe_instances")
+            for page in paginator.paginate():
+                for reservation in page.get("Reservations", []):
+                    for inst in reservation.get("Instances", []):
+                        state = inst.get("State", {}).get("Name", "")
+                        if state == "terminated":
+                            continue   # gone, not a resource that still exists - matches how Resource Graph never returns deleted Azure resources either.
+                        tags = {t.get("Key"): t.get("Value") for t in inst.get("Tags", [])}
+                        instance_id = inst.get("InstanceId", "")
+                        records.append({
+                            "Resource ID":             instance_id,
+                            "Resource Name":           tags.get("Name") or instance_id,
+                            "Resource Type":           "Compute",
+                            "Resource State":          _map_ec2_state(state),
+                            "Region":                  region,
+                            "OS":                      _map_ec2_platform(inst.get("PlatformDetails", "")),
+                            "SKU":                     inst.get("InstanceType", "N/A"),
+                            "Redundancy":              "N/A",
+                            "HA Replicas":             0,
+                            "PAYG Hourly Cost USD":    0.0,
+                            "Avg Daily Running Hours": 24,
+                            "Subscription":            account_id,
+                            "Provider":                "AWS",
+                            "Is Orphaned":             False,
+                        })
+        except (ClientError, BotoCoreError):
+            pass   # region not usable with these credentials (e.g. a just-enabled region still propagating) - skip it, don't fail the whole account-wide scan over one region.
+
+        try:
+            rds = session.client("rds", region_name=region)
+            paginator = rds.get_paginator("describe_db_instances")
+            for page in paginator.paginate():
+                for db in page.get("DBInstances", []):
+                    records.append({
+                        "Resource ID":             db.get("DBInstanceArn") or db.get("DBInstanceIdentifier", ""),
+                        "Resource Name":           db.get("DBInstanceIdentifier", ""),
+                        "Resource Type":           _map_rds_engine(db.get("Engine", "")),
+                        "Resource State":          _map_rds_state(db.get("DBInstanceStatus", "")),
+                        "Region":                  region,
+                        "OS":                      "N/A",
+                        "SKU":                     db.get("DBInstanceClass", "N/A"),
+                        "Redundancy":              "Zone Redundant" if db.get("MultiAZ") else "Locally Redundant",
+                        "HA Replicas":             0,
+                        "PAYG Hourly Cost USD":    0.0,
+                        "Avg Daily Running Hours": 24,
+                        "Subscription":            account_id,
+                        "Provider":                "AWS",
+                        "Is Orphaned":             False,
+                    })
+        except (ClientError, BotoCoreError):
+            pass
+
+    return pd.DataFrame(records)
