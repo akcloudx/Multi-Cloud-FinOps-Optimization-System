@@ -45,6 +45,21 @@ if "currency" in st.query_params:
 else:
     initial_currency = "USD"
 
+# Cloud Platform (Azure/AWS) had NO persistence at all before this - a
+# hardcoded default="Azure" and nothing reading/writing query params for it,
+# so it reverted to Azure on every single refresh regardless of what was
+# selected (real bug reported live 2026-08-20, alongside currency - this one
+# was unconditionally broken, not the same subtler "works until you click a
+# sidebar link" bug currency/the login token had). Same fix pattern as
+# currency: read the initial value from the query string here, re-assert it
+# into query_params on every rerun down in the sidebar section below.
+if "provider" in st.query_params:
+    initial_provider = st.query_params["provider"]
+    if initial_provider not in ["Azure", "AWS"]:
+        initial_provider = "Azure"
+else:
+    initial_provider = "Azure"
+
 st.set_page_config(
     page_title="FinOps Optimization System",
     page_icon=":material/bolt:",
@@ -1632,13 +1647,20 @@ with st.sidebar:
     selected_provider = st.segmented_control(
         "Cloud Platform",
         options=["Azure", "AWS"],
-        default="Azure",
+        default=initial_provider,
         key="provider_selector_widget",
         on_change=reset_app_cache,
         help="Select cloud environment to optimize.",
     )
     if not selected_provider:
-        selected_provider = "Azure"
+        selected_provider = initial_provider
+
+    # Re-asserted on every rerun (not just written once) - same reasoning as
+    # currency/the login token just below: Streamlit's sidebar nav links
+    # don't reliably carry a query param forward unless it's freshly
+    # rewritten on every single script run, not just at the moment it was
+    # first set.
+    st.query_params["provider"] = selected_provider
 
     # Deliberately NOT a free-switching widget - see
     # ui.auth_page.render_switch_mode_control's docstring for why: demo and
