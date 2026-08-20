@@ -1,19 +1,29 @@
 """
-azure_function/function_app.py — Azure Function Cron Ingestion Trigger
+azure_function/function_app.py — Azure Function Cron Ingestion Triggers
 
-Fires every hour (schedule="0 0 * * * *") - NOT because every tenant syncs
-hourly, but because a single Azure Function TimerTrigger schedule is fixed
-at deploy time and can't vary per tenant on its own. Each firing loops every
-connected tenant and only actually calls run_ingestion_pipeline() for the
-ones that are DUE, based on that tenant's own CloudTenant.sync_interval_hours
-(set per-tenant from the Manage Tenant dialog's Sync card, default 24h) and
-CloudTenant.last_synced_at. This lets different tenants run on different
-cadences (hourly through daily) without needing a separate Function or
-Durable Functions orchestration per tenant - the standard lightweight
-pattern for per-resource scheduling at this scale.
+Two independent Timer Trigger functions, azure_hourly_cron_sync and
+aws_hourly_cron_sync, both in this same Function App (one deployed
+resource, same F1 CPU-minute budget - not two separate Function Apps).
+Split 2026-08-21 from a single combined finops_hourly_cron_sync per the
+user's own call: each provider gets its own name, own invocation history,
+and own log stream in the Azure Portal, so a failure or slowdown in one
+provider's sync is never mixed into the other's logs - previously a single
+Azure API outage, say, would bury the unrelated AWS sync results (or vice
+versa) in the same combined log entry.
+
+Both fire every hour (schedule="0 0 * * * *") - NOT because every tenant
+syncs hourly, but because a Timer Trigger schedule is fixed at deploy time
+and can't vary per tenant on its own. Each firing loops every connected
+tenant for its own provider and only actually calls run_ingestion_pipeline()
+for the ones that are DUE, based on that tenant's own
+CloudTenant.sync_interval_hours (set per-tenant from the Manage Tenant
+dialog's Sync section, default 24h) and CloudTenant.last_synced_at. This
+lets different tenants run on different cadences (hourly through daily)
+without needing Durable Functions orchestration per tenant - the standard
+lightweight pattern for per-resource scheduling at this scale.
 
 Extracts cloud resource metadata via Azure Resource Graph / Reservations /
-Billing Benefits / AWS APIs and ingests into the SQL star schema.
+Billing Benefits / AWS EC2 & RDS APIs and ingests into the SQL star schema.
 """
 
 import logging
@@ -22,6 +32,7 @@ import azure.functions as func
 from data.sync_pipeline import run_ingestion_pipeline
 from db.tenants import list_tenants, get_tenant_credentials, record_sync_result
 from azure_conn.connector import AzureCredentials
+from aws.connector import AWSCredentials
 
 app = func.FunctionApp()
 
@@ -43,13 +54,13 @@ def _is_due(t) -> bool:
 
 
 @app.timer_trigger(schedule="0 0 * * * *", arg_name="myTimer", run_on_startup=False, use_monitor=False)
-def finops_hourly_cron_sync(myTimer: func.TimerRequest) -> None:
+def azure_hourly_cron_sync(myTimer: func.TimerRequest) -> None:
     utc_timestamp = datetime.datetime.utcnow().replace(tzinfo=datetime.timezone.utc).isoformat()
 
     if myTimer.past_due:
-        logging.info('The hourly cron timer is running past due!')
+        logging.info('The Azure hourly cron timer is running past due!')
 
-    logging.info(f'Starting FinOps automated extraction pipeline at {utc_timestamp}...')
+    logging.info(f'Starting Azure automated extraction pipeline at {utc_timestamp}...')
 
     # Sync EVERY connected Azure tenant in the "live" scope (registry lives in
     # SQL DB, db/tenants.py - tenants exist in "demo" too now, but the cron
@@ -69,13 +80,39 @@ def finops_hourly_cron_sync(myTimer: func.TimerRequest) -> None:
         record_sync_result("Azure", "live", t.id, res["status"], res["message"])
         logging.info(f"Azure Sync Result [{t.tenant_name}]: {res['message']}")
 
-    # AWS live fetch isn't implemented yet (aws/connector.py) - this currently
-    # no-ops per tenant, kept here so it starts working automatically once it is.
-    for t in list_tenants("AWS", "live"):
+    logging.info(f'Azure automated extraction pipeline completed cleanly at {utc_timestamp}.')
+
+
+@app.timer_trigger(schedule="0 0 * * * *", arg_name="myTimer", run_on_startup=False, use_monitor=False)
+def aws_hourly_cron_sync(myTimer: func.TimerRequest) -> None:
+    utc_timestamp = datetime.datetime.utcnow().replace(tzinfo=datetime.timezone.utc).isoformat()
+
+    if myTimer.past_due:
+        logging.info('The AWS hourly cron timer is running past due!')
+
+    logging.info(f'Starting AWS automated extraction pipeline at {utc_timestamp}...')
+
+    # Same per-tenant credential pattern as azure_hourly_cron_sync above.
+    # Fixed 2026-08-21: this used to call run_ingestion_pipeline("AWS",
+    # tenant_db_id=t.id) with no creds= at all, which fell back to a single
+    # global .env-based AWS credential (or none) instead of each tenant's
+    # own stored Access Key - harmless while aws/connector.py's live fetch
+    # was a no-op, but a real bug now that it does real work: with more
+    # than one AWS tenant, every tenant's cron sync would either no-op or
+    # pull the SAME account's data into every tenant's inventory.
+    # CloudTenant's AWS field mapping (see app.py's AWS Manage dialog /
+    # Credentials tab): client_id = Access Key ID, tenant_id = region,
+    # encrypted client_secret = Secret Access Key.
+    aws_tenants = list_tenants("AWS", "live")
+    if not aws_tenants:
+        logging.info("No AWS tenants connected - skipping AWS sync.")
+    for t in aws_tenants:
         if not _is_due(t):
+            logging.info(f"AWS tenant '{t.tenant_name}' not due yet (interval {t.sync_interval_hours or _DEFAULT_INTERVAL_HOURS}h) - skipping.")
             continue
-        res = run_ingestion_pipeline("AWS", tenant_db_id=t.id)
+        creds = AWSCredentials(t.client_id, get_tenant_credentials(t), t.tenant_id)
+        res = run_ingestion_pipeline("AWS", creds=creds, tenant_db_id=t.id)
         record_sync_result("AWS", "live", t.id, res["status"], res["message"])
         logging.info(f"AWS Sync Result [{t.tenant_name}]: {res['message']}")
 
-    logging.info(f'FinOps automated extraction pipeline completed cleanly at {utc_timestamp}.')
+    logging.info(f'AWS automated extraction pipeline completed cleanly at {utc_timestamp}.')

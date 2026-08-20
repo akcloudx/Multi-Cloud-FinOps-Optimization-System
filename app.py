@@ -53,7 +53,23 @@ else:
 # sidebar link" bug currency/the login token had). Same fix pattern as
 # currency: read the initial value from the query string here, re-assert it
 # into query_params on every rerun down in the sidebar section below.
-if "provider" in st.query_params:
+#
+# _pending_provider takes priority over the query string - confirmed live
+# 2026-08-21 (screen recording) that st.switch_page() (used by the "Dashboard"
+# button in Tenant Management) clears st.query_params on its way to the
+# destination page, AND the Cloud Platform segmented_control's own widget
+# state is treated as a fresh instantiation on that same landing, so its
+# `default=` argument wins - meaning re-asserting st.query_params["provider"]
+# right before calling switch_page (the same fix that worked for the sidebar
+# nav-link/session-token bug) does NOT survive switch_page specifically, and
+# the app silently fell back to Azure regardless of which tenant's Dashboard
+# button was actually clicked. A plain (non-widget) session_state key isn't
+# subject to either limitation - it's set right before switch_page and
+# consumed exactly once here, one rerun later, before the widget ever reads
+# a default.
+if "_pending_provider" in st.session_state:
+    initial_provider = st.session_state.pop("_pending_provider")
+elif "provider" in st.query_params:
     initial_provider = st.query_params["provider"]
     if initial_provider not in ["Azure", "AWS"]:
         initial_provider = "Azure"
@@ -515,10 +531,13 @@ def _manage_tenant_dialog(t, mode: str):
         # button's st.rerun() (or it gets pruned and resets), and the
         # name row's screen position is reserved via a placeholder so it
         # still renders first visually.
-        _AWS_SECTIONS = ["Credentials", "Permissions"]
+        aws_sync_icon = {"SUCCESS": "✅", "FAILED": "❌", "PARTIAL": "⚠️"}.get(t.last_sync_status, "")
+        _AWS_SECTIONS = ["Credentials", "Permissions", "Sync"]
+        _aws_section_icons = {"Sync": aws_sync_icon}
         aws_section_key = f"mgmt_aws_section_{t.id}"
         active_aws_section = st.segmented_control(
             "Section", options=_AWS_SECTIONS,
+            format_func=lambda name: f"{name} {_aws_section_icons.get(name, '')}".rstrip(),
             default=st.session_state.get(aws_section_key, _AWS_SECTIONS[0]),
             required=True, key=aws_section_key, label_visibility="collapsed",
         )
@@ -565,6 +584,41 @@ def _manage_tenant_dialog(t, mode: str):
                         _render_aws_permission_checklist(check["results"])
                     else:
                         st.error(f"❌ Could not check permissions: {check['error']}")
+        elif active_aws_section == "Sync":
+            if t.last_sync_status == "SUCCESS":
+                st.success(t.last_sync_message or "Last sync succeeded.", icon="✅")
+            elif t.last_sync_status == "PARTIAL":
+                st.warning(t.last_sync_message or "Last sync partially completed.", icon="⚠️")
+            elif t.last_sync_status == "FAILED":
+                st.error(t.last_sync_message or "Last sync failed.", icon="❌")
+            else:
+                st.caption("No sync attempted yet.")
+
+            current_interval = t.sync_interval_hours if t.sync_interval_hours in _SYNC_INTERVAL_LABELS else 24
+            i1, i2 = st.columns([3, 2])
+            new_interval = i1.selectbox(
+                "Automated sync interval", options=list(_SYNC_INTERVAL_LABELS.keys()),
+                format_func=lambda h: _SYNC_INTERVAL_LABELS[h],
+                index=list(_SYNC_INTERVAL_LABELS.keys()).index(current_interval),
+                key=f"mgmt_aws_interval_{t.id}", disabled=is_demo,
+                help="A single hourly cron checks every tenant and only re-syncs the ones due, based on this setting.",
+            )
+            i2.caption("")
+            if i2.button("Save schedule", disabled=is_demo, key=f"mgmt_aws_save_interval_{t.id}", width="stretch"):
+                update_sync_interval(selected_provider, mode, t.id, new_interval)
+                st.success("Sync schedule updated.")
+                st.rerun()
+
+            st.caption(f"Last synced: {t.last_synced_at[:16] if t.last_synced_at else 'Never'}")
+
+            if st.button("⚡ Run sync now", disabled=is_demo, key=f"mgmt_aws_run_sync_{t.id}", type="primary",
+                         help="Only available for Production tenants." if is_demo else "Fetches live EC2/RDS inventory from this tenant right now."):
+                with st.spinner(f"Running ingestion for '{t.tenant_name}'..."):
+                    sync_creds = AWSCredentials(t.client_id, get_tenant_credentials(t), t.tenant_id)
+                    res = run_ingestion_pipeline(selected_provider, creds=sync_creds, tenant_db_id=t.id)
+                record_sync_result(selected_provider, mode, t.id, res["status"], res["message"])
+                st.cache_data.clear()
+                st.rerun()
 
         st.divider()
         if st.button("🗑️ Delete tenant", disabled=is_demo, key=f"mgmt_delete_{t.id}"):
@@ -854,6 +908,24 @@ def page_tenant_management():
             b1, b2 = st.columns(2)
             if b1.button("Dashboard", key=f"home_dash_{t.id}", width="stretch"):
                 set_active_tenant(selected_provider, tenant_mode, t.id)
+                # st.switch_page() clears st.query_params on its way to the
+                # destination page, and the Cloud Platform segmented_control
+                # is treated as a fresh instantiation there too (its `default=`
+                # wins over any prior selection) - confirmed live via screen
+                # recording 2026-08-21: an AWS tenant's Dashboard button
+                # silently landed on the Azure dashboard instead, because
+                # BOTH of the app's usual "provider" persistence mechanisms
+                # (query param re-assertion, widget session_state) turned out
+                # not to survive switch_page specifically, unlike a plain
+                # sidebar-link click or refresh. A directly-assigned widget
+                # session_state key was tried first and raises
+                # StreamlitAPIException ("cannot be modified after the widget
+                # is instantiated") since the widget already rendered earlier
+                # in this same script run. _pending_provider is a plain,
+                # non-widget key instead - consumed once at the top of the
+                # script (see the "provider" persistence comment there) before
+                # the widget ever reads a default, so it can't be stale.
+                st.session_state["_pending_provider"] = selected_provider
                 st.switch_page(analyze_page)
             if b2.button("Manage", key=f"home_manage_{t.id}", width="stretch"):
                 st.session_state["_manage_tenant_id"] = t.id
