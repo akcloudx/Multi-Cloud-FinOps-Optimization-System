@@ -29,7 +29,8 @@ if _PROJECT_ROOT not in sys.path:
 
 from db.schema import (
     init_db, get_engine, CloudInventory, Commitment, SyncLog, CloudTenant,
-    ReservationPurchase, SavingsPlanPurchase, CommitmentPriceCache,
+    ReservationPurchase, SavingsPlanPurchase, AWSReservationPurchase, AWSSavingsPlanPurchase,
+    CommitmentPriceCache,
 )
 
 # Live-tenant ingestion always operates in the "live" scope (db/schema.py's
@@ -41,11 +42,15 @@ from azure_conn.connector import (
     fetch_live_savings_plans, test_connection, AzureCredentials, _friendly_auth_error,
     list_accessible_subscriptions, check_role_assignments, status_from_role_check,
 )
-from aws.connector import load_aws_credentials_from_env, test_aws_connection, fetch_live_inventory as fetch_live_aws_inventory
+from aws.connector import (
+    load_aws_credentials_from_env, test_aws_connection, fetch_live_inventory as fetch_live_aws_inventory,
+    fetch_live_reservations as fetch_live_aws_reservations, fetch_live_savings_plans as fetch_live_aws_savings_plans,
+)
 from pricing.azure_retail_api import refresh_retail_prices
 from pricing.aws_price_list import refresh_aws_prices
 from pricing.commitment_pricing import refresh_commitment_prices
 from pricing.commitment_mapping import derive_reservation_commitment_fields, derive_savings_plan_commitment_fields
+from pricing.aws_commitment_mapping import derive_aws_reservation_commitment_fields, derive_aws_savings_plan_commitment_fields
 from db.tenants import upsert_subscription
 
 
@@ -55,6 +60,14 @@ def _reservation_commitment_id(r: dict) -> str:
 
 def _savings_plan_commitment_id(s: dict) -> str:
     return f"LIVE-SP-{s.get('savings_plan_id') or s.get('name') or s.get('savings_plan_order_id')}"
+
+
+def _aws_reservation_commitment_id(r: dict) -> str:
+    return f"LIVE-RI-{r.get('reserved_instance_id')}"
+
+
+def _aws_savings_plan_commitment_id(s: dict) -> str:
+    return f"LIVE-SP-{s.get('savings_plan_id')}"
 
 
 def run_ingestion_pipeline(provider: str = "Azure", creds=None, force_mock: bool = False, tenant_db_id=None) -> dict:
@@ -114,6 +127,22 @@ def run_ingestion_pipeline(provider: str = "Azure", creds=None, force_mock: bool
                 except Exception as e:
                     ri_sp_error = str(e)[:300]
                     reservation_records, savings_plan_records = [], []
+            else:
+                # No separate elevated-permission gap on the AWS side the
+                # way Azure's tenant-level Reservations/Savings Plan Reader
+                # roles are (ec2:DescribeReservedInstances/
+                # rds:DescribeReservedDBInstances/savingsplans:DescribeSavingsPlans
+                # are all already in REQUIRED_AWS_POLICIES, same as
+                # inventory) - still isolated in its own try/except so a
+                # transient failure here can't blow up an otherwise-
+                # successful inventory sync, same discipline as the Azure
+                # branch above.
+                try:
+                    reservation_records = fetch_live_aws_reservations(live_creds).to_dict(orient="records")
+                    savings_plan_records = fetch_live_aws_savings_plans(live_creds).to_dict(orient="records")
+                except Exception as e:
+                    ri_sp_error = str(e)[:300]
+                    reservation_records, savings_plan_records = [], []
 
             # PAYG rate lookup - Azure's Retail Prices API needs no
             # credentials (public endpoint), AWS's Price List Query API
@@ -147,34 +176,54 @@ def run_ingestion_pipeline(provider: str = "Azure", creds=None, force_mock: bool
                 refresh_commitment_prices(engine, records, provider=provider)
 
             # Derive this app's simplified Commitment rows from the raw
-            # purchase records (pricing/commitment_mapping.py) - Reservations
-            # need a real 1yr/3yr rate looked up (they carry no $ amount of
-            # their own); Savings Plans already carry their own $/hr rate
-            # (commitment.amount) and need no lookup. See that module's
-            # docstring for why this isn't a 1:1 field copy.
+            # purchase records. Azure's Reservations carry no $ amount at
+            # all - pricing/commitment_mapping.py needs a real 1yr/3yr rate
+            # looked up separately (Retail Prices API). AWS's Reservations
+            # already carry UsagePrice/FixedPrice/Duration, so
+            # pricing/aws_commitment_mapping.py computes the effective
+            # hourly rate directly - no separate lookup step, and no
+            # "(fields, lookup)" tuple shape needed the way Azure's does.
+            # Both providers' Savings Plans already carry their own $/hr
+            # rate and need no lookup either way.
             reservation_commitments = []
-            ri_pricing_lookup_rows = []
-            for r in reservation_records:
-                fields = derive_reservation_commitment_fields(r)
-                if fields is None:
-                    continue
-                lookup = fields.pop("_pricing_lookup")
-                fields["commitment_id"] = _reservation_commitment_id(r)
-                reservation_commitments.append((fields, lookup))
-                ri_pricing_lookup_rows.append({
-                    "resource_type": lookup["resource_type"], "sku": lookup["sku"],
-                    "region": lookup["region"], "os": lookup["os"], "redundancy": lookup["redundancy"],
-                })
-            if ri_pricing_lookup_rows:
-                refresh_commitment_prices(engine, ri_pricing_lookup_rows, provider="Azure")
-
             savings_plan_commitments = []
-            for s in savings_plan_records:
-                fields = derive_savings_plan_commitment_fields(s)
-                if fields.get("hourly_usd_commitment") is None:
-                    continue   # commitment.grain wasn't 'Hourly' - can't fabricate a rate, skip rather than guess.
-                fields["commitment_id"] = _savings_plan_commitment_id(s)
-                savings_plan_commitments.append(fields)
+
+            if is_azure:
+                ri_pricing_lookup_rows = []
+                for r in reservation_records:
+                    fields = derive_reservation_commitment_fields(r)
+                    if fields is None:
+                        continue
+                    lookup = fields.pop("_pricing_lookup")
+                    fields["commitment_id"] = _reservation_commitment_id(r)
+                    reservation_commitments.append((fields, lookup))
+                    ri_pricing_lookup_rows.append({
+                        "resource_type": lookup["resource_type"], "sku": lookup["sku"],
+                        "region": lookup["region"], "os": lookup["os"], "redundancy": lookup["redundancy"],
+                    })
+                if ri_pricing_lookup_rows:
+                    refresh_commitment_prices(engine, ri_pricing_lookup_rows, provider="Azure")
+
+                for s in savings_plan_records:
+                    fields = derive_savings_plan_commitment_fields(s)
+                    if fields.get("hourly_usd_commitment") is None:
+                        continue   # commitment.grain wasn't 'Hourly' - can't fabricate a rate, skip rather than guess.
+                    fields["commitment_id"] = _savings_plan_commitment_id(s)
+                    savings_plan_commitments.append(fields)
+            else:
+                for r in reservation_records:
+                    fields = derive_aws_reservation_commitment_fields(r)
+                    if fields is None:
+                        continue   # unrecognized service, or duration wasn't a real 1yr/3yr value - see pricing/aws_commitment_mapping.py.
+                    fields["commitment_id"] = _aws_reservation_commitment_id(r)
+                    reservation_commitments.append(fields)
+
+                for s in savings_plan_records:
+                    fields = derive_aws_savings_plan_commitment_fields(s)
+                    if fields is None:
+                        continue   # SageMaker/Database Savings Plan type - no bucket in this app's UI, see pricing/aws_commitment_mapping.py.
+                    fields["commitment_id"] = _aws_savings_plan_commitment_id(s)
+                    savings_plan_commitments.append(fields)
 
             with Session(engine) as session:
                 # Replace this tenant's prior snapshot so removed/renamed Azure
@@ -185,15 +234,17 @@ def run_ingestion_pipeline(provider: str = "Azure", creds=None, force_mock: bool
                     ).delete(synchronize_session=False)
                     # Only replace the RI/SP snapshot when THIS run's fetch
                     # actually succeeded (ri_sp_error is None) - if it failed
-                    # (e.g. the tenant-level permission gap above), any
-                    # previously-synced RI/SP data for this tenant is left
-                    # alone rather than wiped out by an unrelated failure.
+                    # (e.g. a permission gap), any previously-synced RI/SP
+                    # data for this tenant is left alone rather than wiped
+                    # out by an unrelated failure.
                     if ri_sp_error is None:
-                        session.query(ReservationPurchase).filter(
-                            ReservationPurchase.tenant_id == tenant_db_id
+                        purchase_model = ReservationPurchase if is_azure else AWSReservationPurchase
+                        sp_purchase_model = SavingsPlanPurchase if is_azure else AWSSavingsPlanPurchase
+                        session.query(purchase_model).filter(
+                            purchase_model.tenant_id == tenant_db_id
                         ).delete(synchronize_session=False)
-                        session.query(SavingsPlanPurchase).filter(
-                            SavingsPlanPurchase.tenant_id == tenant_db_id
+                        session.query(sp_purchase_model).filter(
+                            sp_purchase_model.tenant_id == tenant_db_id
                         ).delete(synchronize_session=False)
                         session.query(Commitment).filter(
                             Commitment.tenant_id == tenant_db_id
@@ -219,30 +270,45 @@ def run_ingestion_pipeline(provider: str = "Azure", creds=None, force_mock: bool
                     ))
                 synced_count = len(records)
 
-                for r in reservation_records:
-                    session.add(ReservationPurchase(**r, tenant_id=tenant_db_id))
-                for s in savings_plan_records:
-                    session.add(SavingsPlanPurchase(**s, tenant_id=tenant_db_id))
+                if is_azure:
+                    for r in reservation_records:
+                        session.add(ReservationPurchase(**r, tenant_id=tenant_db_id))
+                    for s in savings_plan_records:
+                        session.add(SavingsPlanPurchase(**s, tenant_id=tenant_db_id))
+                else:
+                    for r in reservation_records:
+                        session.add(AWSReservationPurchase(**r, tenant_id=tenant_db_id))
+                    for s in savings_plan_records:
+                        session.add(AWSSavingsPlanPurchase(**s, tenant_id=tenant_db_id))
 
-                # Real 1yr/3yr Reservation rates, looked up from the cache
-                # refresh_commitment_prices() just populated above - keyed
-                # identically to CommitmentPriceCache's own columns.
-                ri_cache = {
-                    (row.resource_type, row.region, row.sku, row.os, row.redundancy, row.term): row.effective_hourly_rate_usd
-                    for row in session.query(CommitmentPriceCache).filter(
-                        CommitmentPriceCache.provider == "Azure", CommitmentPriceCache.instrument == "ReservedInstance",
-                    ).all()
-                }
                 ri_written = 0
-                for fields, lookup in reservation_commitments:
-                    rate = ri_cache.get((lookup["resource_type"], lookup["region"], lookup["sku"], lookup["os"], lookup["redundancy"], lookup["term_key"]))
-                    if rate is None:
-                        continue   # no real rate found for this SKU/region/term - don't fabricate one.
-                    session.add(Commitment(**fields, hourly_usd_commitment=rate, provider="Azure", tenant_id=tenant_db_id))
-                    ri_written += 1
+                if is_azure:
+                    # Real 1yr/3yr Reservation rates, looked up from the
+                    # cache refresh_commitment_prices() just populated above
+                    # - keyed identically to CommitmentPriceCache's own
+                    # columns. AWS needs no equivalent lookup - its
+                    # reservation_commitments entries already carry a real
+                    # hourly_usd_commitment, computed directly from the
+                    # purchase record itself (see pricing/aws_commitment_mapping.py).
+                    ri_cache = {
+                        (row.resource_type, row.region, row.sku, row.os, row.redundancy, row.term): row.effective_hourly_rate_usd
+                        for row in session.query(CommitmentPriceCache).filter(
+                            CommitmentPriceCache.provider == "Azure", CommitmentPriceCache.instrument == "ReservedInstance",
+                        ).all()
+                    }
+                    for fields, lookup in reservation_commitments:
+                        rate = ri_cache.get((lookup["resource_type"], lookup["region"], lookup["sku"], lookup["os"], lookup["redundancy"], lookup["term_key"]))
+                        if rate is None:
+                            continue   # no real rate found for this SKU/region/term - don't fabricate one.
+                        session.add(Commitment(**fields, hourly_usd_commitment=rate, provider="Azure", tenant_id=tenant_db_id))
+                        ri_written += 1
+                else:
+                    for fields in reservation_commitments:
+                        session.add(Commitment(**fields, provider="AWS", tenant_id=tenant_db_id))
+                        ri_written += 1
 
                 for fields in savings_plan_commitments:
-                    session.add(Commitment(**fields, provider="Azure", tenant_id=tenant_db_id))
+                    session.add(Commitment(**fields, provider=provider, tenant_id=tenant_db_id))
 
                 # PARTIAL (not FAILED) when inventory synced fine but RI/SP
                 # fetch hit its own error - the inventory portion is real,

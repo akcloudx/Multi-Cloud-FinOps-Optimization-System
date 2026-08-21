@@ -546,6 +546,90 @@ class ReservationPurchase(Base):
     tenant_id                       = Column(Integer, nullable=True)
 
 
+class AWSReservationPurchase(Base):
+    """
+    A purchased AWS Reserved Instance record - kept SEPARATE from
+    ReservationPurchase (schema-matched to Azure's real API) rather than
+    reused, since AWS's reservation model shares no real structure with
+    Azure's: no "reservation order"/scope hierarchy, Duration is raw
+    SECONDS not an ISO-8601 period, and the purchase record itself already
+    carries FixedPrice/UsagePrice (Azure's carries no $ at all). Forcing
+    AWS data into Azure-named fields would be actively misleading, not a
+    simplification - same reasoning as AWSCredentials vs AzureCredentials.
+
+    EC2 and RDS reservations come from two entirely separate AWS APIs
+    (ec2:DescribeReservedInstances / rds:DescribeReservedDBInstances) with
+    materially different fields - confirmed via boto3's own service model,
+    not guessed. Unioned into one table via a `service` discriminator
+    ("EC2"|"RDS"), the same simplification Azure's own ReservationPurchase
+    already makes across ITS several resource types. Fields only one
+    service populates are nullable.
+    Reference: https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeReservedInstances.html
+               https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_DescribeReservedDBInstances.html
+    """
+    __tablename__ = "aws_reservation_purchases"
+
+    id                     = Column(Integer, primary_key=True, autoincrement=True)
+    service                = Column(String(10), nullable=False)    # "EC2" | "RDS"
+    reserved_instance_id   = Column(String(255), nullable=False)   # ReservedInstancesId (EC2) or ReservedDBInstanceId (RDS)
+    instance_type          = Column(String(100), nullable=False)   # InstanceType (EC2) or DBInstanceClass (RDS)
+    region                 = Column(String(100), nullable=False)   # the region this purchase was found in during the all-region scan - not on the raw API response itself.
+    availability_zone      = Column(String(100), nullable=True)    # EC2 only
+    product_description    = Column(String(255), nullable=True)    # EC2: platform (e.g. "Linux/UNIX"); RDS: engine (e.g. "mysql") - confirmed same lowercase convention as DescribeDBInstances's Engine field, via a real example in AWS's own docs.
+    instance_count         = Column(Integer, nullable=False)       # InstanceCount (EC2) or DBInstanceCount (RDS)
+    duration_seconds       = Column(Integer, nullable=False)       # raw AWS Duration - confirmed valid values are exactly 31536000 (1yr) or 94608000 (3yr), not calendar-based.
+    fixed_price            = Column(Float, nullable=True)
+    usage_price             = Column(Float, nullable=True)         # $/hr while running, on top of amortized fixed_price - together these fully determine the effective hourly rate with NO separate pricing lookup needed (unlike Azure Reservations, which carry no $ at all).
+    currency_code            = Column(String(10), nullable=True)
+    offering_type             = Column(String(50), nullable=True)  # "All Upfront" | "Partial Upfront" | "No Upfront"
+    offering_class             = Column(String(50), nullable=True) # EC2 only: "standard" | "convertible"
+    instance_tenancy            = Column(String(20), nullable=True)  # EC2 only
+    scope                        = Column(String(20), nullable=True) # EC2 only: "Availability Zone" | "Region"
+    multi_az                     = Column(Boolean, nullable=True)    # RDS only
+    state                         = Column(String(50), nullable=False)
+    start_time                    = Column(String(50), nullable=True)
+    recurring_charge_hourly       = Column(Float, nullable=True)   # pre-summed from RecurringCharges[] where Frequency == "Hourly" - same shape on both EC2 and RDS.
+    provider                      = Column(String(50), default="AWS")
+    # NULL = demo/seed data. Non-NULL = live-ingested, scoped to that cloud_tenants.id.
+    tenant_id                     = Column(Integer, nullable=True)
+
+
+class AWSSavingsPlanPurchase(Base):
+    """
+    A purchased AWS Savings Plan record, schema-matched field-for-field to
+    savingsplans:DescribeSavingsPlans - kept separate from
+    SavingsPlanPurchase (Azure-shaped) for the same reason as
+    AWSReservationPurchase above. Unlike Azure (whose sku_name requires
+    guessing the plan type - see pricing/commitment_mapping.py), AWS's API
+    states savingsPlanType directly - confirmed via boto3's own service
+    model enum: "Compute" | "EC2Instance" | "SageMaker" | "Database" - no
+    inference needed for the type itself.
+    Reference: https://docs.aws.amazon.com/savingsplans/latest/APIReference/API_SavingsPlan.html
+    """
+    __tablename__ = "aws_savings_plan_purchases"
+
+    id                          = Column(Integer, primary_key=True, autoincrement=True)
+    savings_plan_id             = Column(String(100), nullable=False)
+    savings_plan_arn            = Column(String(255), nullable=True)
+    description                 = Column(String(255), nullable=True)
+    start                       = Column(String(50), nullable=True)
+    end                         = Column(String(50), nullable=True)
+    state                       = Column(String(50), nullable=False)
+    region                      = Column(String(100), nullable=True)   # "" for a Compute Savings Plan (region-agnostic by design); real region for an EC2 Instance Savings Plan (region-locked).
+    ec2_instance_family         = Column(String(50), nullable=True)
+    savings_plan_type           = Column(String(50), nullable=False)   # "Compute" | "EC2Instance" | "SageMaker" | "Database"
+    payment_option               = Column(String(50), nullable=False)  # "No Upfront" | "Partial Upfront" | "All Upfront"
+    product_types                 = Column(String(255), nullable=True) # comma-joined
+    currency                      = Column(String(10), nullable=True)
+    commitment_hourly_usd          = Column(Float, nullable=False)     # 'commitment' field - already a real $/hr rate, no lookup needed (same as Azure's Savings Plans).
+    upfront_payment_amount          = Column(Float, nullable=True)
+    recurring_payment_amount        = Column(Float, nullable=True)
+    term_duration_seconds            = Column(Integer, nullable=False)
+    provider                          = Column(String(50), default="AWS")
+    # NULL = demo/seed data. Non-NULL = live-ingested, scoped to that cloud_tenants.id.
+    tenant_id                         = Column(Integer, nullable=True)
+
+
 class SavingsPlanPurchase(Base):
     """
     A purchased Savings Plan record, schema-matched field-for-field to

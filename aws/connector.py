@@ -402,7 +402,7 @@ def _map_rds_state(status: str) -> str:
     return "Running"
 
 
-def _map_ec2_platform(platform_details: str) -> str:
+def map_ec2_platform(platform_details: str) -> str:
     """EC2's platformDetails is a free-text billing field (e.g. "Windows",
     "Windows with SQL Server Standard", "Linux/UNIX", "Red Hat Enterprise
     Linux", "SUSE Linux"). Collapsed to exactly the 4 values AWS's own
@@ -445,7 +445,7 @@ _RDS_ENGINE_LABELS = {
 }
 
 
-def _map_rds_engine(engine: str) -> str:
+def map_rds_engine(engine: str) -> str:
     """RDS's `Engine` field (e.g. "mysql", "aurora-postgresql") - confirmed
     valid values via https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_CreateDBInstance.html's
     Engine parameter enum. Falls back to the raw engine string (rather than
@@ -508,7 +508,7 @@ def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
                             "Resource Type":           "Compute",
                             "Resource State":          _map_ec2_state(state),
                             "Region":                  region,
-                            "OS":                      _map_ec2_platform(inst.get("PlatformDetails", "")),
+                            "OS":                      map_ec2_platform(inst.get("PlatformDetails", "")),
                             "SKU":                     inst.get("InstanceType", "N/A"),
                             "Redundancy":              "N/A",
                             "HA Replicas":             0,
@@ -529,7 +529,7 @@ def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
                     records.append({
                         "Resource ID":             db.get("DBInstanceArn") or db.get("DBInstanceIdentifier", ""),
                         "Resource Name":           db.get("DBInstanceIdentifier", ""),
-                        "Resource Type":           _map_rds_engine(db.get("Engine", "")),
+                        "Resource Type":           map_rds_engine(db.get("Engine", "")),
                         "Resource State":          _map_rds_state(db.get("DBInstanceStatus", "")),
                         "Region":                  region,
                         "OS":                      "N/A",
@@ -544,5 +544,183 @@ def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
                     })
         except (ClientError, BotoCoreError):
             pass
+
+    return pd.DataFrame(records)
+
+
+# ── Live Reservation / Savings Plan Fetch ────────────────────────────────────
+# Facts confirmed this session (2026-08-22) via boto3's own service model
+# and AWS's official API docs, not guessed:
+#   - EC2 RIs (ec2:DescribeReservedInstances) and RDS RIs
+#     (rds:DescribeReservedDBInstances) are genuinely region/AZ-scoped
+#     purchases - like inventory, these need the same all-region scan, not
+#     one call.
+#   - Savings Plans (savingsplans:DescribeSavingsPlans) are the opposite:
+#     confirmed via botocore's own endpoints.json that this service is
+#     NOT regionalized ("isRegionalized": false, single "aws-global"
+#     endpoint) - one call from any region returns every Savings Plan on
+#     the account, no per-region loop needed.
+#   - Unlike Azure Reservations (which carry no $ amount at all and need a
+#     separate Retail Prices lookup - see azure_conn/connector.py), an AWS
+#     Reserved Instance purchase record ALREADY carries UsagePrice and
+#     FixedPrice - together with Duration these fully determine the real
+#     effective hourly rate with no external pricing lookup at all
+#     (pricing/aws_commitment_mapping.py does this arithmetic directly).
+#   - Duration is raw seconds, confirmed exact valid values (not
+#     calendar-based): 31536000 (1yr, defined by AWS as exactly 365 days)
+#     or 94608000 (3yr, exactly 1095 days) - same constants across EC2 RIs,
+#     RDS RIs, and Savings Plans (confirmed in AWS's own Savings Plans docs).
+#   - RDS's ProductDescription uses the SAME lowercase engine-identifier
+#     convention as DescribeDBInstances's Engine field (confirmed via a
+#     real "mysql" example in AWS's own DescribeReservedDBInstances docs) -
+#     so aws.connector.map_rds_engine() (already built for inventory) is
+#     reused directly rather than a second, possibly-drifting mapping.
+_RESERVATION_DURATION_SECONDS = {"1yr": 31536000, "3yr": 94608000}
+
+
+def _recurring_hourly_charge(charges: list) -> Optional[float]:
+    """Sums RecurringCharges[] entries where Frequency == "Hourly" - same
+    list shape on both EC2 and RDS reservation responses (confirmed via
+    boto3's service model). Returns None (not 0.0) when there are no
+    recurring charges at all, so callers can tell "genuinely zero
+    recurring cost" apart from "field wasn't populated" if that ever
+    matters - in practice this just becomes 0.0 either way once combined
+    with usage_price."""
+    total = 0.0
+    found = False
+    for c in charges or []:
+        if c.get("Frequency") == "Hourly" and c.get("Amount") is not None:
+            total += float(c["Amount"])
+            found = True
+    return total if found else None
+
+
+def fetch_live_reservations(creds: AWSCredentials) -> pd.DataFrame:
+    """
+    Fetches every active EC2 + RDS Reserved Instance across every AWS
+    region enabled for this account. Returns a DataFrame shaped for
+    AWSReservationPurchase (db/schema.py) - NOT the Azure-shaped
+    ReservationPurchase table; see that class's docstring for why they're
+    kept separate.
+    """
+    if not HAS_BOTO3:
+        raise ImportError("boto3 library is not installed. Run: pip install boto3")
+    if not creds.is_complete:
+        raise ValueError("AWS Access Key ID and Secret Access Key are required.")
+
+    session = boto3.Session(
+        aws_access_key_id=creds.access_key_id,
+        aws_secret_access_key=creds.secret_access_key,
+        region_name=creds.region,
+    )
+    regions = _discover_regions(session)
+    records = []
+
+    for region in regions:
+        try:
+            ec2 = session.client("ec2", region_name=region)
+            for ri in ec2.describe_reserved_instances().get("ReservedInstances", []):
+                if ri.get("State") != "active":
+                    continue   # expired/retired/pending purchases aren't real current coverage - matches how the inventory scan skips "terminated" instances.
+                records.append({
+                    "service":               "EC2",
+                    "reserved_instance_id":  ri.get("ReservedInstancesId", ""),
+                    "instance_type":         ri.get("InstanceType", ""),
+                    "region":                region,
+                    "availability_zone":     ri.get("AvailabilityZone"),
+                    "product_description":   ri.get("ProductDescription"),
+                    "instance_count":        ri.get("InstanceCount", 0),
+                    "duration_seconds":      ri.get("Duration", 0),
+                    "fixed_price":           ri.get("FixedPrice"),
+                    "usage_price":           ri.get("UsagePrice"),
+                    "currency_code":         ri.get("CurrencyCode"),
+                    "offering_type":         ri.get("OfferingType"),
+                    "offering_class":        ri.get("OfferingClass"),
+                    "instance_tenancy":      ri.get("InstanceTenancy"),
+                    "scope":                 ri.get("Scope"),
+                    "multi_az":              None,
+                    "state":                 ri.get("State", ""),
+                    "start_time":            str(ri.get("Start")) if ri.get("Start") else None,
+                    "recurring_charge_hourly": _recurring_hourly_charge(ri.get("RecurringCharges")),
+                })
+        except (ClientError, BotoCoreError):
+            pass
+
+        try:
+            rds = session.client("rds", region_name=region)
+            for ri in rds.describe_reserved_db_instances().get("ReservedDBInstances", []):
+                if ri.get("State") != "active":
+                    continue
+                records.append({
+                    "service":               "RDS",
+                    "reserved_instance_id":  ri.get("ReservedDBInstanceId", ""),
+                    "instance_type":         ri.get("DBInstanceClass", ""),
+                    "region":                region,
+                    "availability_zone":     None,
+                    "product_description":   ri.get("ProductDescription"),
+                    "instance_count":        ri.get("DBInstanceCount", 0),
+                    "duration_seconds":      ri.get("Duration", 0),
+                    "fixed_price":           ri.get("FixedPrice"),
+                    "usage_price":           ri.get("UsagePrice"),
+                    "currency_code":         ri.get("CurrencyCode"),
+                    "offering_type":         ri.get("OfferingType"),
+                    "offering_class":        None,
+                    "instance_tenancy":      None,
+                    "scope":                 None,
+                    "multi_az":              ri.get("MultiAZ"),
+                    "state":                 ri.get("State", ""),
+                    "start_time":            str(ri.get("StartTime")) if ri.get("StartTime") else None,
+                    "recurring_charge_hourly": _recurring_hourly_charge(ri.get("RecurringCharges")),
+                })
+        except (ClientError, BotoCoreError):
+            pass
+
+    return pd.DataFrame(records)
+
+
+def fetch_live_savings_plans(creds: AWSCredentials) -> pd.DataFrame:
+    """
+    Fetches every active Savings Plan on this account - a single call, not
+    an all-region scan, since the Savings Plans service is account-wide
+    (confirmed via botocore's own endpoints.json - see module comment
+    above). Returns a DataFrame shaped for AWSSavingsPlanPurchase
+    (db/schema.py).
+    """
+    if not HAS_BOTO3:
+        raise ImportError("boto3 library is not installed. Run: pip install boto3")
+    if not creds.is_complete:
+        raise ValueError("AWS Access Key ID and Secret Access Key are required.")
+
+    session = boto3.Session(
+        aws_access_key_id=creds.access_key_id,
+        aws_secret_access_key=creds.secret_access_key,
+        region_name=creds.region,
+    )
+    records = []
+    try:
+        sp_client = session.client("savingsplans", region_name="us-east-1")
+        for sp in sp_client.describe_savings_plans().get("savingsPlans", []):
+            if sp.get("state") != "active":
+                continue
+            records.append({
+                "savings_plan_id":         sp.get("savingsPlanId", ""),
+                "savings_plan_arn":        sp.get("savingsPlanArn"),
+                "description":             sp.get("description"),
+                "start":                   sp.get("start"),
+                "end":                     sp.get("end"),
+                "state":                   sp.get("state", ""),
+                "region":                  sp.get("region"),
+                "ec2_instance_family":     sp.get("ec2InstanceFamily"),
+                "savings_plan_type":       sp.get("savingsPlanType", ""),
+                "payment_option":          sp.get("paymentOption", ""),
+                "product_types":           ",".join(sp.get("productTypes", []) or []),
+                "currency":                sp.get("currency"),
+                "commitment_hourly_usd":   float(sp["commitment"]) if sp.get("commitment") is not None else 0.0,
+                "upfront_payment_amount":  float(sp["upfrontPaymentAmount"]) if sp.get("upfrontPaymentAmount") is not None else None,
+                "recurring_payment_amount": float(sp["recurringPaymentAmount"]) if sp.get("recurringPaymentAmount") is not None else None,
+                "term_duration_seconds":   sp.get("termDurationInSeconds", 0),
+            })
+    except (ClientError, BotoCoreError):
+        pass
 
     return pd.DataFrame(records)
