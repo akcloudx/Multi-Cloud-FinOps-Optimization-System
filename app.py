@@ -393,8 +393,22 @@ def _render_aws_connect_form(key_prefix: str, mode: str = "live"):
             conn_check = test_aws_connection(new_aws)
             if conn_check["success"]:
                 update_aws_account_id("AWS", mode, tenant_db_id, conn_check["account_id"])
-            st.success("✅ AWS credentials saved to the tenant registry.")
-            st.info("ℹ️ Live AWS inventory fetch (EC2/RDS via boto3) isn't implemented yet — this account is registered, but Live mode will show no resources until that's built.")
+            # Connecting a tenant IS a sync, same as Azure's "Connect, Save &
+            # Ingest Live Tenant Data" button - this used to only save
+            # credentials and leave "Last synced" at "Never" until someone
+            # separately found and clicked "Run sync now" (real gap caught
+            # live 2026-08-21, right after the underlying AWS fetch itself
+            # was verified working). The old message here ("Live AWS
+            # inventory fetch isn't implemented yet") was also stale by this
+            # point - that fetch was built two rounds earlier and just never
+            # got wired into this button.
+            with st.spinner(f"Ingesting live EC2/RDS inventory from AWS ({aws_reg})..."):
+                res = run_ingestion_pipeline("AWS", creds=new_aws, tenant_db_id=tenant_db_id)
+            record_sync_result("AWS", mode, tenant_db_id, res["status"], res["message"])
+            if res["status"] == "SUCCESS":
+                st.success(f"🎉 **Live Tenant Ingestion Complete!** {res['message']}")
+            else:
+                st.error(f"❌ Credentials saved, but ingestion failed: {res['message']}")
             return True
         else:
             st.error("Please fill in Access Key ID and Secret Access Key.")
