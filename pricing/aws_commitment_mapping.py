@@ -116,15 +116,23 @@ def derive_aws_savings_plan_commitment_fields(purchase: dict) -> Optional[dict]:
     see module docstring.
 
     Database Savings Plans are a REAL AWS product - confirmed via AWS's
-    own FAQ (https://aws.amazon.com/savingsplans/faqs/): "AWS offers four
-    types of Savings Plans - Compute Savings Plans, EC2 Instance Savings
-    Plans, Database Savings Plans, and SageMaker Savings Plans," covering
-    "Amazon Aurora, Amazon RDS, Amazon DynamoDB, Amazon ElastiCache,
-    Amazon DocumentDB." Same page also confirms Database Savings Plans are
-    1-year term ONLY - striking parallel to this app's own existing
-    Azure-side docstring (commitments/existing_commitments.py) already
-    describing "Savings Plan for Databases: 1-year ONLY" - genuinely
-    analogous products across providers, not just similarly-named ones.
+    own FAQ (https://aws.amazon.com/savingsplans/faqs/) and, more
+    authoritatively, the full AWS Savings Plans User Guide (checked
+    2026-08-22): "Database Savings Plans provide flexibility to use AWS
+    database services while reducing costs by up to 35% on Aurora, RDS,
+    DynamoDB, ElastiCache, DocumentDB, Timestream, Neptune, Keyspaces,
+    DMS, and Amazon OpenSearch Service" - a wider list than the FAQ page
+    alone implied (the FAQ's shorter list omits Timestream/Neptune/
+    Keyspaces/DMS/OpenSearch; see db/aws_seed.py's AWS_DATABASE_SP_TYPES
+    for where this mattered in practice - OpenSearch has real tracked
+    inventory in this app and was wrongly excluded in an earlier pass of
+    this fix before the full guide was checked). Redshift is confirmed
+    NOT covered by either source. The guide also confirms Database
+    Savings Plans are 1-year term ONLY - striking parallel to this app's
+    own existing Azure-side docstring (commitments/existing_commitments.py)
+    already describing "Savings Plan for Databases: 1-year ONLY" -
+    genuinely analogous products across providers, not just
+    similarly-named ones.
     An earlier round of this app (before this fetch existed) used
     "EC2 Instance Savings Plan" as a placeholder in the "database" SP
     bucket, not knowing Database Savings Plans were real - corrected

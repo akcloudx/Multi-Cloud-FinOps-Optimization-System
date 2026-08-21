@@ -1382,8 +1382,8 @@ def _render_savings_plan_tab():
                 },
                 {
                     "Savings Plan Type": "Database Savings Plans (1-yr ONLY)",
-                    "What Is Covered": "Amazon Aurora, Amazon RDS, Amazon DynamoDB, Amazon ElastiCache, Amazon DocumentDB - confirmed via AWS's own Savings Plans FAQ (aws.amazon.com/savingsplans/faqs)",
-                    "What Is NOT Covered": "EC2/Fargate/Lambda compute, 3-year term (1-yr only per AWS policy - same restriction Azure's Savings Plan for Databases has)"
+                    "What Is Covered": "Aurora, RDS, DynamoDB, ElastiCache, DocumentDB, Timestream, Neptune, Keyspaces, DMS, and Amazon OpenSearch Service - confirmed via the full AWS Savings Plans User Guide, up to 35% off",
+                    "What Is NOT Covered": "Amazon Redshift, EC2/Fargate/Lambda compute, 3-year term (1-yr only per AWS policy - same restriction Azure's Savings Plan for Databases has)"
                 }
             ]
         st.dataframe(pd.DataFrame(sp_coverage_rows), hide_index=True, width="stretch")

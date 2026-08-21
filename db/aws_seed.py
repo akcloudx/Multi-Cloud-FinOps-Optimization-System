@@ -214,27 +214,35 @@ AWS_COMMITMENTS = [
 
 AWS_COMPUTE_SP_TYPES = {"Compute", "AWS Lambda", "AWS Fargate"}
 # CORRECTED 2026-08-22: AWS genuinely DOES have a Database Savings Plan -
-# confirmed via AWS's own FAQ (https://aws.amazon.com/savingsplans/faqs/):
-# "AWS offers four types of Savings Plans - Compute Savings Plans, EC2
-# Instance Savings Plans, Database Savings Plans, and SageMaker Savings
-# Plans," covering "Amazon Aurora, Amazon RDS, Amazon DynamoDB, Amazon
-# ElastiCache, Amazon DocumentDB" specifically - NOT Redshift or
-# OpenSearch (both tracked elsewhere in this file/AWS_RI_COVERAGE_NOTES,
-# but not part of Database Savings Plans' confirmed coverage, so
-# deliberately excluded here rather than assumed included).
+# confirmed via AWS's own FAQ (https://aws.amazon.com/savingsplans/faqs/)
+# and, more authoritatively, the full AWS Savings Plans User Guide (PDF,
+# checked 2026-08-22): "Database Savings Plans provide flexibility to use
+# AWS database services while reducing costs by up to 35% on Aurora, RDS,
+# DynamoDB, ElastiCache, DocumentDB, Timestream, Neptune, Keyspaces, DMS,
+# and Amazon OpenSearch Service." This is a WIDER list than the FAQ page
+# alone implied - the FAQ's shorter list (Aurora/RDS/DynamoDB/ElastiCache/
+# DocumentDB only) had led to OpenSearch being wrongly excluded in an
+# earlier pass of this fix; corrected here after reading the full guide.
+# Redshift is still NOT covered by either source - confirmed absent from
+# both lists, not an oversight.
 # Previously this set was {"Compute"} (i.e. EC2) on the theory that AWS
 # had no database-specific plan and EC2 Instance Savings Plans were the
 # closest analog - that theory is now confirmed wrong, and
 # pricing/aws_commitment_mapping.py / commitments/existing_commitments.py
 # were corrected in the same round to stop bucketing EC2 Instance Savings
 # Plans as "database" commitments.
-# Both real API resource_type conventions are listed since demo seed data
-# (this file, below) and the real live fetch (aws/connector.py's
-# _RDS_ENGINE_LABELS) use different naming ("AWS RDS MySQL" vs "Amazon RDS
-# for MySQL") - a separate, pre-existing demo/live naming inconsistency
-# also affecting AWS_RI_COVERAGE_NOTES below, not fully resolved here.
+# Timestream/Neptune/Keyspaces/DMS aren't listed below - this app doesn't
+# track any inventory resource type for them yet (not a Describe* call
+# this app makes anywhere), so there's no real resource_type string they'd
+# ever need to match; nothing to add until that inventory support exists.
+# Both real API resource_type conventions ARE listed for the services this
+# app does track, since demo seed data (this file, below) and the real
+# live fetch (aws/connector.py's _RDS_ENGINE_LABELS) use different naming
+# ("AWS RDS MySQL" vs "Amazon RDS for MySQL") - a separate, pre-existing
+# demo/live naming inconsistency also affecting AWS_RI_COVERAGE_NOTES
+# below, not fully resolved here.
 AWS_DATABASE_SP_TYPES = {
-    "AWS RDS PostgreSQL", "AWS RDS MySQL", "Amazon Aurora", "Amazon DynamoDB", "Amazon ElastiCache",   # demo seed naming
+    "AWS RDS PostgreSQL", "AWS RDS MySQL", "Amazon Aurora", "Amazon DynamoDB", "Amazon ElastiCache", "Amazon OpenSearch",   # demo seed naming
     "Amazon RDS for MySQL", "Amazon RDS for PostgreSQL", "Amazon RDS for MariaDB",                      # live fetch naming
     "Amazon RDS for Oracle", "Amazon RDS for SQL Server", "Amazon Aurora (MySQL)", "Amazon Aurora (PostgreSQL)",
 }
