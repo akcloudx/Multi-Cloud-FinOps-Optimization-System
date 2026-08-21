@@ -69,11 +69,12 @@ def get_all_commitments(provider: str = "Azure", mode: str = "demo", tenant_id=N
             "provider":              r.provider,
             "is_inferred_mapping":   bool(r.is_inferred_mapping),
             "mapping_note":          r.mapping_note,
+            "offering_class":        r.offering_class,
         }
         for r in rows
     ]
     columns = ["commitment_id", "commitment_type", "scope_sku", "scope_resource_type", "scope_region", "scope_os", "scope_redundancy",
-               "hourly_usd_commitment", "reserved_qty", "term", "expiry_date", "provider", "is_inferred_mapping", "mapping_note"]
+               "hourly_usd_commitment", "reserved_qty", "term", "expiry_date", "provider", "is_inferred_mapping", "mapping_note", "offering_class"]
     return pd.DataFrame(data, columns=columns)
 
 

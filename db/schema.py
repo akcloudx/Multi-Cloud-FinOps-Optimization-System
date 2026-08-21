@@ -295,6 +295,7 @@ def init_db(provider: str = "Azure", mode: str = "demo"):
     _widen_column(engine, schema_name, "cloud_tenants", "tenant_missing_roles", 1000)
     _widen_column(engine, schema_name, "tenant_subscriptions", "missing_role", 1000)
     _ensure_column(engine, schema_name, "cloud_tenants", "aws_account_id", "VARCHAR(50)")
+    _ensure_column(engine, schema_name, "commitments", "offering_class", "VARCHAR(50)")
     # Same collision risk CommitmentPriceCache's resource_type/redundancy
     # columns were added for (see that class's comments): without these,
     # an RDS Multi-AZ and Single-AZ instance of the identical instanceType/
@@ -396,6 +397,14 @@ class Commitment(Base):
     # demo/seed rows and every unambiguous real mapping.
     is_inferred_mapping     = Column(Boolean, default=False)
     mapping_note            = Column(String(500), nullable=True)
+    # "standard" | "convertible" | None. EC2 Reserved Instances only - AWS's
+    # own docs confirm RDS/ElastiCache/Redshift Reservations have no such
+    # offering-class split, and Azure Reservations don't either. Doesn't
+    # affect coverage matching (AWS's own docs: "The offering class ... does
+    # not affect how the billing discount is applied") - display-only, so a
+    # user can see which of their EC2 RIs are exchangeable (Convertible) vs
+    # not (Standard) without needing to affect any pricing/matching logic.
+    offering_class          = Column(String(50), nullable=True)
 
 
 class ReconciliationLog(Base):

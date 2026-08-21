@@ -1501,6 +1501,16 @@ def _render_ri_coverage_tab():
     st.caption("Compares what's running against what you've already reserved, resource by resource, and flags real gaps to fix.")
     _finops_tag("Optimize Usage & Cost", "Rate Optimization")
 
+    if not is_azure:
+        st.info(
+            "**Simplified view:** this table matches reservations to running resources by exact instance type. "
+            "In reality, most EC2 Regional RIs and most RDS RIs (all engines except SQL Server and Oracle "
+            "License-Included) are **size-flexible** - one RI can partially or fully cover *different-sized* "
+            "instances in the same family, so a mixed-size fleet's real AWS bill may be better covered than the "
+            "gaps shown here suggest. Zonal EC2 RIs are not size-flexible and are matched correctly as-is.",
+            icon="ℹ️",
+        )
+
     with st.expander(f"📋 {selected_provider} Reservation Coverage Rules", expanded=False):
         if is_azure:
             from db.seed import RI_COVERAGE_NOTES
@@ -1526,8 +1536,14 @@ def _render_ri_coverage_tab():
 
     with st.expander("📄 Active Reservation Contracts", expanded=False):
         if not ri_df.empty:
-            ri_disp = ri_df[["commitment_id", "commitment_type", "scope_sku", "scope_region", "scope_os", "reserved_qty", "hourly_usd_commitment", "term", "expiry_date"]].copy()
+            ri_disp = ri_df[["commitment_id", "commitment_type", "scope_sku", "scope_region", "scope_os", "reserved_qty", "hourly_usd_commitment", "term", "expiry_date", "offering_class"]].copy()
             ri_disp["hourly_usd_commitment"] = ri_disp["hourly_usd_commitment"].apply(lambda x: fmt(x, 4) + "/hr each")
+            # EC2-only (AWS): "standard"/"convertible" from AWS's own OfferingClass
+            # field. N/A for Azure and for AWS RDS/ElastiCache/Redshift, which
+            # have no such split - not a display gap, those services genuinely
+            # don't have this concept per AWS's own docs.
+            ri_disp["offering_class"] = ri_disp["offering_class"].fillna("N/A").apply(lambda v: v.title() if v != "N/A" else v)
+            ri_disp = ri_disp.rename(columns={"offering_class": "Offering Class"})
             st.dataframe(_with_mapping_caveat(ri_df, ri_disp), hide_index=True, width="stretch")
         else:
             st.info("No active Reserved Instance contracts found.")

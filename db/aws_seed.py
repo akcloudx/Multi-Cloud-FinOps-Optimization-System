@@ -157,13 +157,15 @@ AWS_COMMITMENTS = [
      "commitment_type": "Reserved Instance",
      "scope_sku": "m5.large", "scope_region": "us-east-1", "scope_os": "Linux",
      "hourly_usd_commitment": 0.060, "reserved_qty": 2,
-     "term": "1-year", "expiry_date": "2026-12-01", "provider": "AWS"},
+     "term": "1-year", "expiry_date": "2026-12-01", "provider": "AWS",
+     "offering_class": "standard"},
 
     {"commitment_id": "RI-EC2-C5-XLARGE-USE1-LIN",
      "commitment_type": "Reserved Instance",
      "scope_sku": "c5.xlarge", "scope_region": "us-east-1", "scope_os": "Linux",
      "hourly_usd_commitment": 0.110, "reserved_qty": 3,
-     "term": "1-year", "expiry_date": "2026-10-15", "provider": "AWS"},
+     "term": "1-year", "expiry_date": "2026-10-15", "provider": "AWS",
+     "offering_class": "convertible"},
 
     # ── Reserved Instance — RDS Database ────────────────────────────────────────
     {"commitment_id": "RI-RDS-M5-LARGE-USE1",

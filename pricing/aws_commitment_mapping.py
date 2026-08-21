@@ -128,6 +128,7 @@ def derive_aws_reservation_commitment_fields(purchase: dict) -> Optional[dict]:
         "expiry_date":           None,   # AWS's response carries Start + Duration, not an explicit expiry timestamp - left for a future round to derive if the UI needs it.
         "is_inferred_mapping":   False,
         "mapping_note":          None,
+        "offering_class":        purchase.get("offering_class"),   # EC2 only ("standard"/"convertible"); already None for RDS/ElastiCache/Redshift at the fetch layer (aws/connector.py) since those services have no such split.
     }
 
 
