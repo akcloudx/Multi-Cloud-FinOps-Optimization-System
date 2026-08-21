@@ -19,17 +19,17 @@ reasons:
     - no sku_name-based guessing needed the way Azure's mapping has to do.
 
 commitment_type strings ("Reserved Instance", "Compute Savings Plan",
-"EC2 Instance Savings Plan") are NOT arbitrary - they match exactly what
-commitments/existing_commitments.py already expects (that bucketing logic
-predates this module, written in anticipation of this exact naming).
-"SageMaker"/"Database" Savings Plan purchases are still stored in the raw
-AWSSavingsPlanPurchase table (for completeness) but deliberately produce NO
-Commitment row - this app has no SageMaker inventory model at all, and
-"Database" Savings Plans aren't a category commitments/existing_commitments.py
-or analysis/engine.py's coverage matching understands; fabricating a
-category for them would be worse than omitting the row, same "don't
-fabricate what can't be priced/modeled" discipline the Azure mapping
-module already follows for unmodeled reserved_resource_type values.
+"EC2 Instance Savings Plan", "Database Savings Plan") match exactly what
+commitments/existing_commitments.py's bucketing expects. "SageMaker" is
+the one Savings Plan type still deliberately dropped (raw purchase still
+stored in AWSSavingsPlanPurchase for completeness, no Commitment row) -
+this app has no SageMaker inventory model at all to match coverage
+against, same "don't fabricate what can't be priced/modeled" discipline
+the Azure mapping module already follows for unmodeled
+reserved_resource_type values. Database Savings Plans are NOT dropped -
+confirmed as a real AWS product via AWS's own FAQ, see
+derive_aws_savings_plan_commitment_fields()'s docstring below for the
+full verification.
 """
 
 from typing import Optional
@@ -111,13 +111,30 @@ def derive_aws_reservation_commitment_fields(purchase: dict) -> Optional[dict]:
 
 def derive_aws_savings_plan_commitment_fields(purchase: dict) -> Optional[dict]:
     """Maps one AWSSavingsPlanPurchase-shaped dict into a full
-    Commitment-shaped dict. Returns None for savingsPlanType values this
-    app's UI has no bucket for (SageMaker, Database) - see module
-    docstring for why that's a deliberate omission, not a gap to silently
-    guess around."""
+    Commitment-shaped dict. Returns None only for SageMaker (this app has
+    no SageMaker inventory model at all, no coverage to match against) -
+    see module docstring.
+
+    Database Savings Plans are a REAL AWS product - confirmed via AWS's
+    own FAQ (https://aws.amazon.com/savingsplans/faqs/): "AWS offers four
+    types of Savings Plans - Compute Savings Plans, EC2 Instance Savings
+    Plans, Database Savings Plans, and SageMaker Savings Plans," covering
+    "Amazon Aurora, Amazon RDS, Amazon DynamoDB, Amazon ElastiCache,
+    Amazon DocumentDB." Same page also confirms Database Savings Plans are
+    1-year term ONLY - striking parallel to this app's own existing
+    Azure-side docstring (commitments/existing_commitments.py) already
+    describing "Savings Plan for Databases: 1-year ONLY" - genuinely
+    analogous products across providers, not just similarly-named ones.
+    An earlier round of this app (before this fetch existed) used
+    "EC2 Instance Savings Plan" as a placeholder in the "database" SP
+    bucket, not knowing Database Savings Plans were real - corrected
+    alongside this change (see commitments/existing_commitments.py):
+    EC2 Instance Savings Plans are purely EC2/compute (never covered
+    databases) and now bucket as Compute; "Database Savings Plan" is the
+    new, actually-correct Database bucket entry."""
     sp_type = purchase.get("savings_plan_type")
     duration = purchase.get("term_duration_seconds") or 0
-    term = _DURATION_SECONDS_TO_TERM.get(duration, "1-year")   # Savings Plans are always exactly 1yr or 3yr by AWS's own definition; default kept only as a last-resort guard, not expected to trigger.
+    term = _DURATION_SECONDS_TO_TERM.get(duration, "1-year")   # Savings Plans are always exactly 1yr or 3yr by AWS's own definition (Database SP is 1yr-only); default kept only as a last-resort guard, not expected to trigger.
 
     if sp_type == "Compute":
         commitment_type = "Compute Savings Plan"
@@ -128,8 +145,12 @@ def derive_aws_savings_plan_commitment_fields(purchase: dict) -> Optional[dict]:
         family = purchase.get("ec2_instance_family") or "Unknown"
         scope_sku = f"{family} Family"
         scope_region = purchase.get("region") or "Unknown"   # EC2 Instance Savings Plans ARE region + instance-family locked (deeper discount than Compute SP in exchange for less flexibility) - confirmed via AWS's own Savings Plans docs.
+    elif sp_type == "Database":
+        commitment_type = "Database Savings Plan"
+        scope_sku = "Any Database"   # covers Aurora/RDS/DynamoDB/ElastiCache/DocumentDB collectively per AWS's FAQ - no finer per-engine scope is exposed by the API, matching Azure's own "Any Database" convention for the same reason.
+        scope_region = "Global"
     else:
-        return None   # SageMaker / Database - no bucket in this app's UI, see module docstring.
+        return None   # SageMaker - no inventory model in this app at all, see module docstring.
 
     return {
         "commitment_type":       commitment_type,

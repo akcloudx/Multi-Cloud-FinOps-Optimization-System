@@ -24,6 +24,19 @@ from db.schema import init_db, get_engine, Commitment
 _COMPUTE_SP_TYPE  = "Savings Plan for Compute"
 _DATABASE_SP_TYPE = "Savings Plan for Databases"
 
+# AWS side (pricing/aws_commitment_mapping.py). "EC2 Instance Savings Plan"
+# used to sit in the DATABASE bucket below as a placeholder, written before
+# anyone confirmed real AWS "Database Savings Plans" existed - corrected
+# 2026-08-22 after AWS's own FAQ (https://aws.amazon.com/savingsplans/faqs/)
+# confirmed Database Savings Plans are a real product covering Aurora/RDS/
+# DynamoDB/ElastiCache/DocumentDB, and share the same "1-year term ONLY"
+# constraint this file's own docstring above already describes for Azure's
+# Savings Plan for Databases - genuinely analogous products, not just
+# similarly named. EC2 Instance Savings Plans are purely EC2/compute (never
+# covered databases at any point) and now correctly bucket as Compute.
+_AWS_COMPUTE_SP_TYPES  = ["Compute Savings Plan", "EC2 Instance Savings Plan"]
+_AWS_DATABASE_SP_TYPES = ["Database Savings Plan"]
+
 
 def get_all_commitments(provider: str = "Azure", mode: str = "demo", tenant_id=None) -> pd.DataFrame:
     """Returns active commitment contracts (RI + Savings Plans) for the given
@@ -67,7 +80,7 @@ def get_all_commitments(provider: str = "Azure", mode: str = "demo", tenant_id=N
 def get_existing_savings_plans(provider: str = "Azure", mode: str = "demo", tenant_id=None) -> pd.DataFrame:
     """Returns ALL Savings Plan commitments."""
     df = get_all_commitments(provider, mode, tenant_id)
-    sp_types = [_COMPUTE_SP_TYPE, _DATABASE_SP_TYPE, "Compute Savings Plan", "EC2 Instance Savings Plan"]
+    sp_types = [_COMPUTE_SP_TYPE, _DATABASE_SP_TYPE] + _AWS_COMPUTE_SP_TYPES + _AWS_DATABASE_SP_TYPES
     mask = df["commitment_type"].isin(sp_types)
     return df[mask].reset_index(drop=True)
 
@@ -75,14 +88,14 @@ def get_existing_savings_plans(provider: str = "Azure", mode: str = "demo", tena
 def get_compute_savings_plans(provider: str = "Azure", mode: str = "demo", tenant_id=None) -> pd.DataFrame:
     """Returns Compute Savings Plan commitments."""
     df = get_all_commitments(provider, mode, tenant_id)
-    mask = df["commitment_type"].isin([_COMPUTE_SP_TYPE, "Compute Savings Plan"])
+    mask = df["commitment_type"].isin([_COMPUTE_SP_TYPE] + _AWS_COMPUTE_SP_TYPES)
     return df[mask].reset_index(drop=True)
 
 
 def get_database_savings_plans(provider: str = "Azure", mode: str = "demo", tenant_id=None) -> pd.DataFrame:
-    """Returns Database / EC2 Instance Savings Plan commitments."""
+    """Returns Database Savings Plan commitments."""
     df = get_all_commitments(provider, mode, tenant_id)
-    mask = df["commitment_type"].isin([_DATABASE_SP_TYPE, "EC2 Instance Savings Plan"])
+    mask = df["commitment_type"].isin([_DATABASE_SP_TYPE] + _AWS_DATABASE_SP_TYPES)
     return df[mask].reset_index(drop=True)
 
 

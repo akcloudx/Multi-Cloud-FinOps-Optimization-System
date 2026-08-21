@@ -1301,7 +1301,12 @@ def _render_sp_pool_economics(pool_label: str, pool_df: pd.DataFrame, existing_c
         term_key = "1yr" if term_choice == "1-Year" else "3yr"
     else:
         term_key = available_terms[0]
-        st.caption(f"{pool_label} Savings Plans only support a {TERM_LABELS[term_key]} term (Azure policy).")
+        # "(Azure policy)" used to be accurate since this branch only ever
+        # fired for Azure's Savings Plan for Databases - now also fires for
+        # AWS's Database Savings Plan (also 1-year-only, confirmed via
+        # AWS's own FAQ - see db_available_terms's comment above), so the
+        # wording needs to name whichever provider is actually active.
+        st.caption(f"{pool_label} Savings Plans only support a {TERM_LABELS[term_key]} term ({selected_provider} policy).")
     st.session_state[f"{key_prefix}_term_widget"] = term_key
 
     cmp_df = savings_plan_term_comparison(pool_df, prices_df) if (is_azure and prices_df is not None and not prices_df.empty) else None
@@ -1374,17 +1379,14 @@ def _render_savings_plan_tab():
                     "Savings Plan Type": "EC2 Instance Savings Plans (1-yr / 3-yr)",
                     "What Is Covered": "EC2 instance usage within a specific family in a designated Region (e.g., m5 in us-east-1, up to 72% discount)",
                     "What Is NOT Covered": "Amazon RDS databases, ElastiCache, Redshift, S3 storage, or instances outside the specified family/region"
+                },
+                {
+                    "Savings Plan Type": "Database Savings Plans (1-yr ONLY)",
+                    "What Is Covered": "Amazon Aurora, Amazon RDS, Amazon DynamoDB, Amazon ElastiCache, Amazon DocumentDB - confirmed via AWS's own Savings Plans FAQ (aws.amazon.com/savingsplans/faqs)",
+                    "What Is NOT Covered": "EC2/Fargate/Lambda compute, 3-year term (1-yr only per AWS policy - same restriction Azure's Savings Plan for Databases has)"
                 }
             ]
         st.dataframe(pd.DataFrame(sp_coverage_rows), hide_index=True, width="stretch")
-
-    if not is_azure:
-        st.info(
-            "ℹ️ **AWS Commitment Policy Note:** AWS Savings Plans apply to **Compute (EC2, Fargate, Lambda)** "
-            "and **EC2 Instance Families**. AWS database services (RDS, Aurora, DynamoDB) are covered under "
-            "**RDS Reserved Instances** on the RI Coverage tab.",
-            icon="ℹ️"
-        )
 
     safety_buffer_pct_local = st.slider(
         "Safety Buffer % — how much of the steady-state footprint to commit",
@@ -1438,10 +1440,15 @@ def _render_savings_plan_tab():
     st.markdown(f"### B — {db_sp_title} Pool")
     st.caption("Resources below run continuously, so committing against them is safe. Resources that aren't currently running are excluded and stay on pay-as-you-go.")
 
-    # Azure's Savings Plan for Databases is a real, 1-year-only product (see
-    # the Coverage Policy expander above) - AWS's EC2 Instance Savings Plans
-    # genuinely do offer both terms, so the restriction is Azure-specific.
-    db_available_terms = ("1yr",) if is_azure else ("1yr", "3yr")
+    # Both providers' Database Savings Plan is 1-year ONLY - confirmed via
+    # AWS's own FAQ for the AWS side (aws.amazon.com/savingsplans/faqs),
+    # same restriction Azure's Savings Plan for Databases already has. This
+    # used to be AWS-conditional ("EC2 Instance Savings Plans genuinely do
+    # offer both terms") because the database pool's AWS bucket used to be
+    # EC2 Instance Savings Plan as a placeholder before Database Savings
+    # Plans were confirmed real - corrected 2026-08-22 alongside db_sp_title
+    # below and commitments/existing_commitments.py's bucketing.
+    db_available_terms = ("1yr",)
     _render_sp_pool_economics(db_label, db_running, db_sp_commit, "sp_db", safety_buffer, available_terms=db_available_terms)
 
     if is_live_mode and is_live_configured:
@@ -1966,7 +1973,7 @@ is_azure = (selected_provider == "Azure")
 provider_icon = "☁️ Azure" if is_azure else "🟧 AWS"
 compute_label = "Virtual Machines" if is_azure else "EC2 Instances"
 db_label = "Database Services" if is_azure else "RDS Databases"
-db_sp_title = "Savings Plan for Databases" if is_azure else "EC2 Instance Savings Plan"
+db_sp_title = "Savings Plan for Databases" if is_azure else "Database Savings Plan"
 db_eligible_types = DATABASE_SP_ELIGIBLE_TYPES if is_azure else AWS_DATABASE_SP_TYPES
 compute_sp_eligible_types = COMPUTE_SP_ELIGIBLE_TYPES if is_azure else AWS_COMPUTE_SP_TYPES
 

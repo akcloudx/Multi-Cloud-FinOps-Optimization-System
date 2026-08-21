@@ -194,15 +194,50 @@ AWS_COMMITMENTS = [
      "scope_sku": "m5 family", "scope_region": "us-east-1", "scope_os": "Linux",
      "hourly_usd_commitment": 0.15,
      "reserved_qty": 0, "term": "1-year", "expiry_date": "2027-04-01", "provider": "AWS"},
+
+    # ── AWS Database Savings Plan (Aurora/RDS/DynamoDB/ElastiCache/DocumentDB) ─
+    # Added 2026-08-22 after confirming Database Savings Plans are a real AWS
+    # product (see AWS_DATABASE_SP_TYPES's comment above) - previously the
+    # demo "database" SP pool only ever showed EC2 Instance Savings Plan
+    # (SP-AWS-EC2-INSTANCE-001, now correctly moved to the Compute bucket),
+    # which isn't a database commitment at all and left this pool
+    # misleadingly non-empty with the wrong content.
+    {"commitment_id": "SP-AWS-DATABASE-001",
+     "commitment_type": "Database Savings Plan",
+     "scope_sku": "Any Database", "scope_region": "Global", "scope_os": "N/A",
+     "hourly_usd_commitment": 0.20,
+     "reserved_qty": 0, "term": "1-year", "expiry_date": "2027-03-15", "provider": "AWS"},
 ]
 
 
 # ── AWS Eligibility & Coverage Notes ──────────────────────────────────────────
 
 AWS_COMPUTE_SP_TYPES = {"Compute", "AWS Lambda", "AWS Fargate"}
-# Note: AWS does NOT have a Database Savings Plan. RDS uses RDS Reserved Instances.
-# EC2 Instance Savings Plans cover specific EC2 families within a region.
-AWS_DATABASE_SP_TYPES = {"Compute"}  # Used for EC2 Instance Savings Plans pool
+# CORRECTED 2026-08-22: AWS genuinely DOES have a Database Savings Plan -
+# confirmed via AWS's own FAQ (https://aws.amazon.com/savingsplans/faqs/):
+# "AWS offers four types of Savings Plans - Compute Savings Plans, EC2
+# Instance Savings Plans, Database Savings Plans, and SageMaker Savings
+# Plans," covering "Amazon Aurora, Amazon RDS, Amazon DynamoDB, Amazon
+# ElastiCache, Amazon DocumentDB" specifically - NOT Redshift or
+# OpenSearch (both tracked elsewhere in this file/AWS_RI_COVERAGE_NOTES,
+# but not part of Database Savings Plans' confirmed coverage, so
+# deliberately excluded here rather than assumed included).
+# Previously this set was {"Compute"} (i.e. EC2) on the theory that AWS
+# had no database-specific plan and EC2 Instance Savings Plans were the
+# closest analog - that theory is now confirmed wrong, and
+# pricing/aws_commitment_mapping.py / commitments/existing_commitments.py
+# were corrected in the same round to stop bucketing EC2 Instance Savings
+# Plans as "database" commitments.
+# Both real API resource_type conventions are listed since demo seed data
+# (this file, below) and the real live fetch (aws/connector.py's
+# _RDS_ENGINE_LABELS) use different naming ("AWS RDS MySQL" vs "Amazon RDS
+# for MySQL") - a separate, pre-existing demo/live naming inconsistency
+# also affecting AWS_RI_COVERAGE_NOTES below, not fully resolved here.
+AWS_DATABASE_SP_TYPES = {
+    "AWS RDS PostgreSQL", "AWS RDS MySQL", "Amazon Aurora", "Amazon DynamoDB", "Amazon ElastiCache",   # demo seed naming
+    "Amazon RDS for MySQL", "Amazon RDS for PostgreSQL", "Amazon RDS for MariaDB",                      # live fetch naming
+    "Amazon RDS for Oracle", "Amazon RDS for SQL Server", "Amazon Aurora (MySQL)", "Amazon Aurora (PostgreSQL)",
+}
 
 AWS_RI_COVERAGE_NOTES = {
     "Compute":              ("EC2 On-Demand hourly compute rate (Standard: fixed family; Convertible: exchangeable family)", "EBS volumes, data transfer, OS licensing surcharges"),
