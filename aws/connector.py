@@ -118,6 +118,39 @@ REQUIRED_AWS_POLICIES = [
         "Required":        "Yes — For Cost Explorer",
         "Purpose":         "Query AWS Cost Explorer for real historical spend and usage (not rates - see pricing:GetProducts for that)",
     },
+    # 2026-08-22 additions - closing the Database/Compute Savings Plan
+    # coverage gap: DocumentDB/Neptune deliberately have NO entry here at
+    # all - confirmed via AmazonDocDBReadOnlyAccess's own policy JSON
+    # ("this policy also grants access to Amazon RDS and Amazon Neptune
+    # resources") that both use plain rds:DescribeDBInstances under the
+    # hood despite having their own boto3 clients/API endpoints - already
+    # covered by the AmazonRDSReadOnlyAccess requirement above, so adding a
+    # second checklist row for the same real IAM action would be redundant
+    # and misleadingly imply a second permission is needed.
+    {
+        "Policy / Action": "dynamodb:ListTables / dynamodb:DescribeTable",
+        "AWS Managed Policy": "AmazonDynamoDBReadOnlyAccess",
+        "Required":        "Yes — For DynamoDB inventory",
+        "Purpose":         "Scan provisioned-capacity DynamoDB tables (on-demand/pay-per-request tables have no hourly rate to track, see aws/connector.py)",
+    },
+    {
+        "Policy / Action": "cassandra:Select",
+        "AWS Managed Policy": "AmazonKeyspacesReadOnlyAccess",
+        "Required":        "Yes — For Keyspaces inventory",
+        "Purpose":         "List keyspaces/tables (Keyspaces' own IAM actions use the historical cassandra: prefix, not keyspaces: - confirmed via AWS's Service Authorization Reference)",
+    },
+    {
+        "Policy / Action": "dms:DescribeReplicationInstances",
+        "AWS Managed Policy": "(no dedicated managed policy - attach a custom inline policy, or the broad ReadOnlyAccess policy)",
+        "Required":        "Yes — For DMS inventory",
+        "Purpose":         "Scan DMS replication instances - confirmed no AWS-managed read-only policy exists specifically for DMS user access (its managed policies are all internal service-linked-role policies)",
+    },
+    {
+        "Policy / Action": "ecs:ListClusters / ecs:ListTasks / ecs:DescribeTasks",
+        "AWS Managed Policy": "(no dedicated managed policy - attach a custom inline policy, or the broad ReadOnlyAccess policy)",
+        "Required":        "Yes — For Fargate inventory",
+        "Purpose":         "Scan running Fargate tasks for Compute Savings Plan coverage - confirmed no AWS-managed read-only policy exists specifically for ECS user access either",
+    },
 ]
 
 # Fast lookup for the checklist renderer (app.py) - keeps the exact same
@@ -309,6 +342,22 @@ def check_aws_permissions(creds: AWSCredentials) -> dict:
     _probe(
         "pricing:GetProducts",
         lambda: session.client("pricing", region_name="us-east-1").get_products(ServiceCode="AmazonEC2", MaxResults=1),
+    )
+    _probe(
+        "dynamodb:ListTables / dynamodb:DescribeTable",
+        lambda: session.client("dynamodb").list_tables(Limit=20),
+    )
+    _probe(
+        "cassandra:Select",
+        lambda: session.client("keyspaces").list_keyspaces(maxResults=20),
+    )
+    _probe(
+        "dms:DescribeReplicationInstances",
+        lambda: session.client("dms").describe_replication_instances(MaxRecords=20),
+    )
+    _probe(
+        "ecs:ListClusters / ecs:ListTasks / ecs:DescribeTasks",
+        lambda: session.client("ecs").list_clusters(maxResults=20),
     )
 
     for action in ["ce:GetCostAndUsage"]:
@@ -567,6 +616,229 @@ def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
                         "Provider":                "AWS",
                         "Is Orphaned":             False,
                     })
+        except (ClientError, BotoCoreError):
+            pass
+
+        # DocumentDB and Neptune - same DescribeDBInstances shape as RDS
+        # (DBInstanceClass/DBInstanceStatus/AvailabilityZone), confirmed via
+        # boto3's real service model 2026-08-22 - both share RDS's
+        # underlying control plane so closely that their own official
+        # read-only IAM policies grant plain rds:DescribeDBInstances, not a
+        # docdb:/neptune:-prefixed action (confirmed via
+        # AmazonDocDBReadOnlyAccess's own policy JSON) - no new IAM
+        # permission needed beyond what RDS inventory already requires.
+        # Neither service has a Reserved Instance API at all (confirmed: no
+        # Describe*Reserved* operation exists on either boto3 client), so
+        # they're Database-Savings-Plan-eligible only, never RI-eligible -
+        # correctly absent from AWS_RI_COVERAGE_NOTES.
+        try:
+            docdb = session.client("docdb", region_name=region)
+            paginator = docdb.get_paginator("describe_db_instances")
+            for page in paginator.paginate():
+                for db in page.get("DBInstances", []):
+                    records.append({
+                        "Resource ID":             db.get("DBInstanceArn") or db.get("DBInstanceIdentifier", ""),
+                        "Resource Name":           db.get("DBInstanceIdentifier", ""),
+                        "Resource Type":           "Amazon DocumentDB",
+                        "Resource State":          _map_rds_state(db.get("DBInstanceStatus", "")),
+                        "Region":                  region,
+                        "OS":                      "N/A",
+                        "SKU":                     db.get("DBInstanceClass", "N/A"),
+                        "Redundancy":              "N/A",   # DocumentDB HA is achieved via separate replica instances, not a Multi-AZ flag on one instance - confirmed no such price-differentiating attribute exists on real DocumentDB price list entries (unlike RDS).
+                        "HA Replicas":             0,
+                        "PAYG Hourly Cost USD":    0.0,
+                        "Avg Daily Running Hours": 24,
+                        "Subscription":            account_id,
+                        "Provider":                "AWS",
+                        "Is Orphaned":             False,
+                    })
+        except (ClientError, BotoCoreError):
+            pass
+
+        try:
+            neptune = session.client("neptune", region_name=region)
+            paginator = neptune.get_paginator("describe_db_instances")
+            for page in paginator.paginate():
+                for db in page.get("DBInstances", []):
+                    records.append({
+                        "Resource ID":             db.get("DBInstanceArn") or db.get("DBInstanceIdentifier", ""),
+                        "Resource Name":           db.get("DBInstanceIdentifier", ""),
+                        "Resource Type":           "Amazon Neptune",
+                        "Resource State":          _map_rds_state(db.get("DBInstanceStatus", "")),
+                        "Region":                  region,
+                        "OS":                      "N/A",
+                        "SKU":                     db.get("DBInstanceClass", "N/A"),
+                        "Redundancy":              "N/A",   # Confirmed via real Neptune price list data: every Database Instance entry carries the same single "Multi-AZ" deploymentOption value regardless of actual replica topology - not a real Single-AZ/Multi-AZ price split the way RDS has, so not modeled as one here either.
+                        "HA Replicas":             0,
+                        "PAYG Hourly Cost USD":    0.0,
+                        "Avg Daily Running Hours": 24,
+                        "Subscription":            account_id,
+                        "Provider":                "AWS",
+                        "Is Orphaned":             False,
+                    })
+        except (ClientError, BotoCoreError):
+            pass
+
+        # DMS replication instances - genuinely instance-class-based
+        # (ReplicationInstanceClass, e.g. "dms.t3.medium") with a real
+        # Single/Multi-AZ price split (confirmed via real AWSDatabaseMigrationSvc
+        # price list data), unlike DocumentDB/Neptune above. No Reserved
+        # Instance API exists for DMS either - Database-SP-eligible only.
+        try:
+            dms = session.client("dms", region_name=region)
+            paginator = dms.get_paginator("describe_replication_instances")
+            for page in paginator.paginate():
+                for ri in page.get("ReplicationInstances", []):
+                    records.append({
+                        "Resource ID":             ri.get("ReplicationInstanceArn") or ri.get("ReplicationInstanceIdentifier", ""),
+                        "Resource Name":           ri.get("ReplicationInstanceIdentifier", ""),
+                        "Resource Type":           "AWS DMS Replication Instance",
+                        "Resource State":          _map_rds_state(ri.get("ReplicationInstanceStatus", "")),
+                        "Region":                  region,
+                        "OS":                      "N/A",
+                        "SKU":                     ri.get("ReplicationInstanceClass", "N/A"),
+                        "Redundancy":              "Zone Redundant" if ri.get("MultiAZ") else "Locally Redundant",
+                        "HA Replicas":             0,
+                        "PAYG Hourly Cost USD":    0.0,
+                        "Avg Daily Running Hours": 24,
+                        "Subscription":            account_id,
+                        "Provider":                "AWS",
+                        "Is Orphaned":             False,
+                    })
+        except (ClientError, BotoCoreError):
+            pass
+
+        # DynamoDB and Keyspaces - both serverless/table-based (no instance
+        # class at all), billed by provisioned Read/Write Capacity Units at
+        # a flat $/unit-hour rate (confirmed identical shape via real price
+        # list data for both AmazonDynamoDB and AmazonMCS - Keyspaces
+        # intentionally price-matches DynamoDB). Only PROVISIONED-mode
+        # tables get a resource row: on-demand/pay-per-request tables have
+        # no capacity commitment concept at all (billed per actual request,
+        # like Lambda) - same "don't fabricate what can't be priced"
+        # discipline used for SageMaker/Lambda/Timestream elsewhere in this
+        # app, just at the table level instead of the whole service level.
+        # SKU encodes the provisioned RCU/WCU pair (e.g. "5RCU-5WCU") so
+        # pricing/aws_price_list.py can parse it back out and compute
+        # rcu*rate + wcu*rate - there's no literal AWS "SKU" for this the
+        # way EC2/RDS have.
+        try:
+            ddb = session.client("dynamodb", region_name=region)
+            paginator = ddb.get_paginator("list_tables")
+            table_names = [name for page in paginator.paginate() for name in page.get("TableNames", [])]
+            for name in table_names:
+                desc = ddb.describe_table(TableName=name).get("Table", {})
+                throughput = desc.get("ProvisionedThroughput", {})
+                rcu = throughput.get("ReadCapacityUnits") or 0
+                wcu = throughput.get("WriteCapacityUnits") or 0
+                if not rcu and not wcu:
+                    continue   # on-demand table - no provisioned capacity to price.
+                records.append({
+                    "Resource ID":             desc.get("TableArn") or name,
+                    "Resource Name":           name,
+                    "Resource Type":           "Amazon DynamoDB",
+                    "Resource State":          "Running" if desc.get("TableStatus") == "ACTIVE" else "Stopped (deallocated)",
+                    "Region":                  region,
+                    "OS":                      "N/A",
+                    "SKU":                     f"{rcu}RCU-{wcu}WCU",
+                    "Redundancy":              "N/A",
+                    "HA Replicas":             0,
+                    "PAYG Hourly Cost USD":    0.0,
+                    "Avg Daily Running Hours": 24,
+                    "Subscription":            account_id,
+                    "Provider":                "AWS",
+                    "Is Orphaned":             False,
+                })
+        except (ClientError, BotoCoreError):
+            pass
+
+        try:
+            ks = session.client("keyspaces", region_name=region)
+            for kp in ks.list_keyspaces().get("keyspaces", []):
+                keyspace_name = kp.get("keyspaceName", "")
+                try:
+                    for tp in ks.list_tables(keyspaceName=keyspace_name).get("tables", []):
+                        table_name = tp.get("tableName", "")
+                        table = ks.get_table(keyspaceName=keyspace_name, tableName=table_name)
+                        cap = table.get("capacitySpecification", {})
+                        if cap.get("throughputMode") != "PROVISIONED":
+                            continue   # pay-per-request table - no provisioned capacity to price, same as DynamoDB on-demand above.
+                        rcu = cap.get("readCapacityUnits") or 0
+                        wcu = cap.get("writeCapacityUnits") or 0
+                        records.append({
+                            "Resource ID":             table.get("resourceArn") or f"{keyspace_name}.{table_name}",
+                            "Resource Name":           f"{keyspace_name}.{table_name}",
+                            "Resource Type":           "Amazon Keyspaces",
+                            "Resource State":          "Running" if table.get("status") == "ACTIVE" else "Stopped (deallocated)",
+                            "Region":                  region,
+                            "OS":                      "N/A",
+                            "SKU":                     f"{rcu}RCU-{wcu}WCU",
+                            "Redundancy":              "N/A",
+                            "HA Replicas":             0,
+                            "PAYG Hourly Cost USD":    0.0,
+                            "Avg Daily Running Hours": 24,
+                            "Subscription":            account_id,
+                            "Provider":                "AWS",
+                            "Is Orphaned":             False,
+                        })
+                except (ClientError, BotoCoreError):
+                    pass   # one keyspace's tables failing to list shouldn't drop every other keyspace in the region.
+        except (ClientError, BotoCoreError):
+            pass
+
+        # Fargate (ECS launch type) - genuinely no instance class either;
+        # billed per-vCPU-hour + per-GB-hour of the task's own configured
+        # cpu/memory (confirmed via real AmazonECS price list data: separate
+        # Linux/Windows and x86/ARM rate tiers). SKU encodes vCPU/memory so
+        # pricing/aws_price_list.py can parse it back and apply the right
+        # rate tier by (region, arch, OS). EC2-launch-type ECS tasks are
+        # deliberately NOT included here - those already show up as regular
+        # EC2 instances via the EC2 block above (the cluster's underlying
+        # EC2 capacity), counting them again here would double-count the
+        # same compute. Compute-Savings-Plan-eligible only (confirmed via
+        # AWS's own Savings Plans docs) - Fargate has no Reserved Instance
+        # concept at all.
+        try:
+            ecs = session.client("ecs", region_name=region)
+            cluster_arns = [a for page in ecs.get_paginator("list_clusters").paginate() for a in page.get("clusterArns", [])]
+            for cluster_arn in cluster_arns:
+                try:
+                    task_arns = [
+                        a for page in ecs.get_paginator("list_tasks").paginate(cluster=cluster_arn, desiredStatus="RUNNING")
+                        for a in page.get("taskArns", [])
+                    ]
+                    for i in range(0, len(task_arns), 100):   # describe_tasks accepts at most 100 ARNs per call - confirmed via boto3's service model.
+                        batch = task_arns[i:i + 100]
+                        for task in ecs.describe_tasks(cluster=cluster_arn, tasks=batch).get("tasks", []):
+                            if task.get("launchType") != "FARGATE":
+                                continue   # EC2-launch-type tasks already counted as regular EC2 instances above.
+                            cpu_units = int(task.get("cpu") or 0)
+                            memory_mb = int(task.get("memory") or 0)
+                            if not cpu_units or not memory_mb:
+                                continue
+                            vcpu = cpu_units / 1024.0
+                            memory_gb = memory_mb / 1024.0
+                            platform_family = (task.get("platformFamily") or "").upper()
+                            os_ = "Windows" if "WINDOWS" in platform_family else "Linux"
+                            task_id = (task.get("taskArn") or "").rsplit("/", 1)[-1]
+                            records.append({
+                                "Resource ID":             task.get("taskArn") or task_id,
+                                "Resource Name":           task_id,
+                                "Resource Type":           "AWS Fargate",
+                                "Resource State":          "Running" if task.get("lastStatus") == "RUNNING" else "Stopped (deallocated)",
+                                "Region":                  region,
+                                "OS":                      os_,
+                                "SKU":                     f"{vcpu:g}vCPU-{memory_gb:g}GB",
+                                "Redundancy":              "N/A",
+                                "HA Replicas":             0,
+                                "PAYG Hourly Cost USD":    0.0,
+                                "Avg Daily Running Hours": 24,
+                                "Subscription":            account_id,
+                                "Provider":                "AWS",
+                                "Is Orphaned":             False,
+                            })
+                except (ClientError, BotoCoreError):
+                    pass   # one cluster failing to list tasks shouldn't drop every other cluster in the region.
         except (ClientError, BotoCoreError):
             pass
 

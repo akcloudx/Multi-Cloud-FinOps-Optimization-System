@@ -1,16 +1,21 @@
 """
 analysis/ri_eligibility.py
-Real Azure Reserved Instance / Reserved Capacity eligibility rules, per service.
+Real Reserved Instance / Reserved Capacity eligibility rules, per resource
+type - mostly Azure (sourced from official Microsoft Learn documentation,
+linked inline), plus a handful of AWS entries (sourced from boto3's own
+service models - see the "AWS additions" block in _RULES below) for AWS
+resource types that turned out to have no Reserved Instance product at all.
 
-Every rule below is sourced from official Microsoft Learn documentation (linked
-inline). This exists because the waterfall/RI-coverage engine used to treat
-every running resource as if it *could* be covered by a Reserved Instance and
-flagged a "gap" the moment reserved_qty fell short of running_count - which is
-wrong for services/tiers that Azure simply does not sell reservations for at
-all (e.g. a Basic App Service plan, or a Serverless Azure SQL Database). This
-module distinguishes "not yet covered" (a real gap, worth recommending a
-purchase for) from "can never be covered" (wrong tier/SKU for this service -
-recommending a purchase would be nonsensical).
+This exists because the waterfall/RI-coverage engine (shared by both
+providers) used to treat every running resource as if it *could* be covered
+by a Reserved Instance and flagged a "gap" the moment reserved_qty fell short
+of running_count - which is wrong for services/tiers that don't sell
+reservations for at all (e.g. a Basic App Service plan or a Serverless Azure
+SQL Database on the Azure side; Amazon DocumentDB or AWS Fargate on the AWS
+side). This module distinguishes "not yet covered" (a real gap, worth
+recommending a purchase for) from "can never be covered" (wrong tier/SKU, or
+no RI product exists for this service at all - recommending a purchase would
+be nonsensical).
 
 Used by analysis.engine.reservation_analysis.
 """
@@ -254,6 +259,25 @@ _RULES = {
     "Azure Backup Storage": lambda sku: (True, "Eligible for Reserved Capacity for the vault-standard tier only (not vault-archive, not Protected Instance cost) - verified live, sold ONLY in 100 TiB/1 PiB blocks, applied subscription/resource-group-wide, not tied to any specific Recovery Services Vault."),
     "Azure NetApp Files": lambda sku: (True, "Eligible for Reserved Capacity for Standard/Premium/Ultra service levels (not the Flexible service level) - verified live, sold ONLY in 100 TiB/1 PiB blocks per service-level+region, not tied to a specific capacity pool. Cool-access capacity pools only get the reservation benefit on 'hot' tier consumption; cross-region replication and backup add-ons aren't covered."),
     "Microsoft Fabric": lambda sku: (True, "Eligible for Reserved Capacity - verified live, real per-CU pricing exists (1yr and 3yr both give the same ~$0.1249/CU-hr effective rate, a real finding not a bug). Not eligible for any Savings Plan - see sp_eligibility.py."),
+
+    # AWS additions, 2026-08-22 - added alongside the new live inventory
+    # fetch for these 5 resource types (aws/connector.py). Without an
+    # explicit rule here, check_eligibility()'s default (True, "no rule
+    # encoded yet") would have wrongly counted every running one of these
+    # as an RI "gap" - a real regression caught in browser verification
+    # (RI Coverage's "Needs More RI" count jumped from 7 to 12 the moment
+    # this inventory started flowing through, before this fix). Confirmed
+    # via boto3's own service model for each client (docdb/neptune/dms/
+    # keyspaces/ecs): none expose any DescribeReserved*-style operation at
+    # all - genuinely no Reserved Instance product exists for any of them,
+    # not just an unresearched gap. All are Savings-Plan-eligible instead
+    # (Database SP for the first four, Compute SP for Fargate - see
+    # db/aws_seed.py's AWS_DATABASE_SP_TYPES/AWS_COMPUTE_SP_TYPES).
+    "Amazon DocumentDB":              lambda sku: (False, "Amazon DocumentDB has no Reserved Instance offering - confirmed via boto3's docdb service model (no DescribeReservedDBInstances-equivalent operation exists). Eligible for Database Savings Plans instead."),
+    "Amazon Neptune":                 lambda sku: (False, "Amazon Neptune has no Reserved Instance offering - confirmed via boto3's neptune service model (no Reserved*-style operation exists). Eligible for Database Savings Plans instead."),
+    "AWS DMS Replication Instance":   lambda sku: (False, "AWS DMS has no Reserved Instance offering for replication instances - confirmed via boto3's dms service model (no Reserved*-style operation exists). Eligible for Database Savings Plans instead."),
+    "Amazon Keyspaces":               lambda sku: (False, "Amazon Keyspaces is fully serverless (provisioned Read/Write Capacity Units, no instance to reserve) - confirmed via boto3's keyspaces service model, no Reserved*-style operation exists at all. Eligible for Database Savings Plans instead."),
+    "AWS Fargate":                    lambda sku: (False, "AWS Fargate has no Reserved Instance concept - you bill your own chosen vCPU/memory directly, not a purchasable instance type. Confirmed via boto3's ecs service model. Eligible for Compute Savings Plans instead."),
 }
 
 

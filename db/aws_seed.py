@@ -115,6 +115,70 @@ AWS_DATABASE_INVENTORY = [
      "region": "us-east-1", "os": "N/A", "sku": "100_WCU_100_RCU",
      "payg_hourly_usd": 0.065, "avg_daily_running_hours": 24,
      "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
+
+    # Amazon DocumentDB — db.r5.large. Added 2026-08-22 alongside the live
+    # fetch (aws/connector.py) built for it - real IAM action confirmed as
+    # plain rds:DescribeDBInstances (shared control plane with RDS), no
+    # Reserved Instance API exists, Database-SP-eligible only.
+    {"resource_id": "docdb-prod-cluster-01", "resource_name": "prod-catalog-docdb",
+     "resource_type": "Amazon DocumentDB",
+     "resource_state": "Running",
+     "region": "us-east-1", "os": "N/A", "sku": "db.r5.large",
+     "payg_hourly_usd": 0.277, "avg_daily_running_hours": 24,
+     "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
+
+    # Amazon Neptune — db.r5.large. Same real-IAM/no-RI facts as DocumentDB above.
+    {"resource_id": "neptune-prod-cluster-01", "resource_name": "prod-graph-neptune",
+     "resource_type": "Amazon Neptune",
+     "resource_state": "Running",
+     "region": "us-east-1", "os": "N/A", "sku": "db.r5.large",
+     "payg_hourly_usd": 0.348, "avg_daily_running_hours": 24,
+     "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
+
+    # AWS DMS Replication Instance — dms.t3.medium. Unlike DocumentDB/Neptune,
+    # DMS genuinely has its own Single-AZ/Multi-AZ price split (confirmed
+    # via real AWSDatabaseMigrationSvc price list data) and its own
+    # dms:DescribeReplicationInstances IAM action (no dedicated AWS-managed
+    # read-only policy exists for it - see REQUIRED_AWS_POLICIES). No
+    # Reserved Instance API either - Database-SP-eligible only.
+    {"resource_id": "dms-prod-repl-01", "resource_name": "prod-migration-replica",
+     "resource_type": "AWS DMS Replication Instance",
+     "resource_state": "Running",
+     "region": "us-east-1", "os": "N/A", "sku": "dms.t3.medium",
+     "payg_hourly_usd": 0.0745, "avg_daily_running_hours": 24,
+     "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
+
+    # Amazon Keyspaces — provisioned-throughput table (mirrors DynamoDB's
+    # own SKU convention: this app's live fetch encodes provisioned RCU/WCU
+    # into the SKU string since neither service has a literal AWS "SKU" the
+    # way EC2/RDS do - see aws/connector.py). Real IAM action is
+    # cassandra:Select (confirmed via AWS's Service Authorization Reference -
+    # Keyspaces' own IAM actions still use the historical "cassandra:"
+    # prefix, not "keyspaces:"), granted via AmazonKeyspacesReadOnlyAccess.
+    {"resource_id": "keyspaces-prod-table-01", "resource_name": "prod-events-keyspaces",
+     "resource_type": "Amazon Keyspaces",
+     "resource_state": "Running",
+     "region": "us-east-1", "os": "N/A", "sku": "50RCU-50WCU",
+     "payg_hourly_usd": 0.039, "avg_daily_running_hours": 24,
+     "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
+]
+
+# ── AWS Fargate (Compute Savings Plan eligible, not RI-eligible) ──────────────
+# Modeled separately from AWS_COMPUTE_INVENTORY (which is EC2-only) since
+# Fargate tasks are billed per-vCPU-hour + per-GB-hour of the task's own
+# configured cpu/memory, not a named instance type - SKU encodes that
+# directly (e.g. "0.5vCPU-1GB"), matching aws/connector.py's live fetch
+# convention. Confirmed via AWS's own Savings Plans docs that Fargate is
+# Compute-Savings-Plan-eligible, and via boto3/ECS's API that it has no
+# Reserved Instance concept at all.
+AWS_FARGATE_INVENTORY = [
+    {"resource_id": "arn:aws:ecs:us-east-1:111122223333:task/prod-cluster/fargate-api-01",
+     "resource_name": "prod-api-fargate-01",
+     "resource_type": "AWS Fargate",
+     "resource_state": "Running",
+     "region": "us-east-1", "os": "Linux", "sku": "0.5vCPU-1GB",
+     "payg_hourly_usd": 0.024685, "avg_daily_running_hours": 24,
+     "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
 ]
 
 
@@ -146,7 +210,7 @@ AWS_RI_ONLY_INVENTORY = [
      "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
 ]
 
-AWS_INVENTORY = AWS_COMPUTE_INVENTORY + AWS_DATABASE_INVENTORY + AWS_RI_ONLY_INVENTORY
+AWS_INVENTORY = AWS_COMPUTE_INVENTORY + AWS_DATABASE_INVENTORY + AWS_RI_ONLY_INVENTORY + AWS_FARGATE_INVENTORY
 
 
 # ── AWS Commitments ────────────────────────────────────────────────────────────
@@ -233,10 +297,15 @@ AWS_COMPUTE_SP_TYPES = {"Compute", "AWS Lambda", "AWS Fargate"}
 # pricing/aws_commitment_mapping.py / commitments/existing_commitments.py
 # were corrected in the same round to stop bucketing EC2 Instance Savings
 # Plans as "database" commitments.
-# Timestream/Neptune/Keyspaces/DMS aren't listed below - this app doesn't
-# track any inventory resource type for them yet (not a Describe* call
-# this app makes anywhere), so there's no real resource_type string they'd
-# ever need to match; nothing to add until that inventory support exists.
+# Timestream aren't listed below - this app still tracks no inventory
+# resource type for it (fully usage-based billing per byte ingested/
+# stored/scanned, confirmed via boto3's timestream-write service model to
+# have no instance class or capacity-unit concept at all, unlike
+# DocumentDB/Neptune/DMS/Keyspaces below - structurally incompatible with
+# this app's resource model, not just unbuilt yet).
+# DocumentDB/Neptune/DMS/Keyspaces ADDED 2026-08-22 alongside their new live
+# fetch (aws/connector.py) and pricing lookups (pricing/aws_price_list.py) -
+# confirmed real inventory resource types now exist for all four.
 # Both real API resource_type conventions ARE listed for the services this
 # app does track, since demo seed data (this file, below) and the real
 # live fetch (aws/connector.py's _RDS_ENGINE_LABELS) use different naming
@@ -247,6 +316,7 @@ AWS_DATABASE_SP_TYPES = {
     "AWS RDS PostgreSQL", "AWS RDS MySQL", "Amazon Aurora", "Amazon DynamoDB", "Amazon ElastiCache", "Amazon OpenSearch",   # demo seed naming
     "Amazon RDS for MySQL", "Amazon RDS for PostgreSQL", "Amazon RDS for MariaDB",                      # live fetch naming
     "Amazon RDS for Oracle", "Amazon RDS for SQL Server", "Amazon Aurora (MySQL)", "Amazon Aurora (PostgreSQL)",
+    "Amazon DocumentDB", "Amazon Neptune", "AWS DMS Replication Instance", "Amazon Keyspaces",
 }
 
 AWS_RI_COVERAGE_NOTES = {

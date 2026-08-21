@@ -346,12 +346,16 @@ def _render_aws_connect_form(key_prefix: str, mode: str = "live"):
             else:
                 st.markdown(f"   - `{action}` → attach **`{managed_policy}`**")
         st.caption(
-            "Only 7 managed policies to attach in total, despite 9 actions above - EC2 and RDS "
+            "Only 9 managed policies to attach in total, despite 13 actions above - EC2 and RDS "
             "each cover both the inventory scan and the Reserved Instances read (`Describe*` "
             "family), so nothing extra is needed for RI data beyond what's already required for "
             "inventory. `AWSPriceListServiceFullAccess` is safe despite the name - the Pricing "
             "service has no mutating actions at all, so \"full access\" just means every "
-            "read-only pricing action."
+            "read-only pricing action. DocumentDB and Neptune inventory need no extra policy "
+            "either - both are authorized via plain `rds:DescribeDBInstances`, already required "
+            "above. DMS and Fargate genuinely have no dedicated AWS-managed read-only policy at "
+            "all (confirmed against AWS's own docs) - attach a small custom inline policy for "
+            "those two actions, or the broad `ReadOnlyAccess` policy."
         )
     env_aws = load_aws_credentials_from_env()
     with st.form(f"{key_prefix}_aws_form"):

@@ -65,6 +65,221 @@ _RDS_RESOURCE_TYPE_TO_DB_ENGINE = {
     "Amazon Aurora (PostgreSQL)":   "Aurora PostgreSQL",
 }
 
+# resource_type -> real AWS Price List service code, for the 3 new
+# instance-class-based services added 2026-08-22 (confirmed via AWS's own
+# public bulk price list index at
+# https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/index.json, not
+# guessed). Each has its own "Database Instance" (DocDB/Neptune) or
+# "Replication Server" (DMS) productFamily, verified against real
+# downloaded price list data for each service.
+_INSTANCE_CLASS_SERVICE_CODES = {
+    "Amazon DocumentDB":              ("AmazonDocDB", "Database Instance"),
+    "Amazon Neptune":                 ("AmazonNeptune", "Database Instance"),
+    "AWS DMS Replication Instance":   ("AWSDatabaseMigrationSvc", "Replication Server"),
+}
+
+# resource_type -> AWS Price List service code, for the 2 provisioned-
+# capacity (RCU/WCU-based) services - confirmed via real downloaded price
+# list data that both AmazonDynamoDB and AmazonMCS (Amazon Keyspaces' real
+# service code - it predates the "Keyspaces" rename) expose a flat
+# $/unit-hour rate for "ReadCapacityUnit-Hrs"/"WriteCapacityUnit-Hrs",
+# identical shape for both (Keyspaces intentionally price-matches
+# DynamoDB), with no region/instance-type variation beyond regionCode.
+_CAPACITY_UNIT_SERVICE_CODES = {
+    "Amazon DynamoDB":  "AmazonDynamoDB",
+    "Amazon Keyspaces": "AmazonMCS",
+}
+
+
+def _get_products(client, service_code: str, filters: list) -> list:
+    """Shared GetProducts pagination helper - factored out of the original
+    EC2/RDS-only _fetch_from_api so the 3 new lookup paths below (instance-
+    class, capacity-unit, Fargate) can reuse the exact same pagination/
+    parsing behavior instead of a second copy."""
+    price_list = []
+    next_token = None
+    for _ in range(3):
+        kwargs = {"ServiceCode": service_code, "Filters": filters, "MaxResults": 100}
+        if next_token:
+            kwargs["NextToken"] = next_token
+        resp = client.get_products(**kwargs)
+        price_list.extend(json.loads(p) for p in resp.get("PriceList", []))
+        next_token = resp.get("NextToken")
+        if not next_token:
+            break
+    return price_list
+
+
+def _fetch_instance_class_price(resource_type: str, sku: str, region: str, redundancy: str, creds) -> Optional[float]:
+    """DocumentDB / Neptune / DMS - same 'instance class, On-Demand hourly
+    rate' shape as EC2/RDS, but each needs its own productFamily filter
+    (confirmed necessary: DocDB/Neptune both also expose a same-instanceType
+    'CPU Credits' product family that would otherwise be indistinguishable
+    from the real hourly compute rate using only regionCode+instanceType).
+    DocumentDB/Neptune have no Single-AZ/Multi-AZ price split at all
+    (confirmed via real price list data - every entry carries one fixed
+    deploymentOption value, not a real redundancy choice); DMS genuinely
+    does (its own 'availabilityZone': 'Single'/'Multiple' attribute)."""
+    service_code, product_family = _INSTANCE_CLASS_SERVICE_CODES[resource_type]
+    lookup_sku = sku[4:] if resource_type == "AWS DMS Replication Instance" and sku.startswith("dms.") else sku   # DMS price list instanceType is stored WITHOUT the "dms." prefix that ReplicationInstanceClass carries (confirmed against real price list data) - SKU keeps the prefix for display/cache-key purposes, stripped only for the actual API filter.
+
+    try:
+        session = boto3.Session(aws_access_key_id=creds.access_key_id, aws_secret_access_key=creds.secret_access_key)
+        client = session.client("pricing", region_name=_PRICING_API_REGION)
+        filters = [
+            {"Type": "TERM_MATCH", "Field": "regionCode", "Value": region},
+            {"Type": "TERM_MATCH", "Field": "instanceType", "Value": lookup_sku},
+            {"Type": "TERM_MATCH", "Field": "productFamily", "Value": product_family},
+        ]
+        price_list = _get_products(client, service_code, filters)
+    except Exception:
+        return None
+    if not price_list:
+        return None
+
+    candidates = []
+    for item in price_list:
+        prices = _extract_ondemand_prices(item)
+        if not prices:
+            continue
+        price, attrs = prices[0]
+        if resource_type == "AWS DMS Replication Instance":
+            expected_az = "Multiple" if redundancy == "Zone Redundant" else "Single"
+            if attrs.get("availabilityZone") != expected_az:
+                continue
+        candidates.append(price)
+    return min(candidates) if candidates else None
+
+
+def _fetch_capacity_unit_price(resource_type: str, sku: str, region: str, creds) -> Optional[float]:
+    """DynamoDB / Keyspaces - sku is the "{rcu}RCU-{wcu}WCU" string built by
+    aws/connector.py's fetch (there's no literal AWS SKU for a provisioned-
+    throughput table). Looks up the flat $/RCU-hour and $/WCU-hour rates for
+    this (service, region) - the SAME 2 rates apply to every table in that
+    region regardless of its individual RCU/WCU numbers, confirmed via real
+    price list data - then combines them with this specific table's
+    provisioned units. Deliberately picks the plain "ReadCapacityUnit-Hrs"/
+    "WriteCapacityUnit-Hrs" usagetype under the "CommittedThroughput"
+    operation (standard table class, non-replicated, provisioned) over the
+    also-present "IA-"-prefixed (Infrequent Access table class),
+    "Repl"-prefixed (global tables), and "PayPerRequestThroughput"-operation
+    (on-demand, priced per-request not per-capacity-unit-hour - a orders-
+    of-magnitude smaller number that silently corrupted an earlier version
+    of this filter, which matched on the "group" attribute alone; multiple
+    of these share the same group label) variants - this app's inventory
+    fetch doesn't currently distinguish IA/global-table cases, so the
+    standard rate is the correct default rather than an arbitrary pick."""
+    try:
+        rcu_str, wcu_str = sku.split("-")
+        rcu = float(rcu_str.replace("RCU", ""))
+        wcu = float(wcu_str.replace("WCU", ""))
+    except (ValueError, AttributeError):
+        return None   # not our synthetic SKU shape - don't guess.
+
+    service_code = _CAPACITY_UNIT_SERVICE_CODES[resource_type]
+    try:
+        session = boto3.Session(aws_access_key_id=creds.access_key_id, aws_secret_access_key=creds.secret_access_key)
+        client = session.client("pricing", region_name=_PRICING_API_REGION)
+        price_list = _get_products(client, service_code, [
+            {"Type": "TERM_MATCH", "Field": "regionCode", "Value": region},
+        ])
+    except Exception:
+        return None
+    if not price_list:
+        return None
+
+    rcu_rate = wcu_rate = None
+    for item in price_list:
+        attrs = item.get("product", {}).get("attributes", {})
+        # "group" alone isn't a fine enough discriminator - confirmed
+        # against real price list data that the on-demand (pay-per-request)
+        # per-REQUEST price ("ReadRequestUnits"/PayPerRequestThroughput,
+        # priced per million requests, several orders of magnitude smaller)
+        # shares the exact same "DDB-ReadUnits"/"DDB-WriteUnits" group label
+        # as the provisioned per-CAPACITY-UNIT-HOUR price this function
+        # needs - an earlier version of this filter picked up whichever one
+        # happened to iterate last and silently returned a price ~1000x too
+        # small. usagetype must match exactly (not "IA-"/"Repl"-prefixed
+        # variants either - see this function's docstring).
+        usagetype = attrs.get("usagetype", "")
+        if usagetype not in ("ReadCapacityUnit-Hrs", "WriteCapacityUnit-Hrs"):
+            continue
+        if attrs.get("operation") != "CommittedThroughput":
+            continue
+        prices = _extract_ondemand_prices(item)
+        if not prices:
+            continue
+        price = prices[0][0]
+        if usagetype == "ReadCapacityUnit-Hrs":
+            rcu_rate = price
+        else:
+            wcu_rate = price
+
+    if rcu_rate is None or wcu_rate is None:
+        return None
+    return rcu * rcu_rate + wcu * wcu_rate
+
+
+def _fetch_fargate_price(sku: str, region: str, os_: str, creds) -> Optional[float]:
+    """Fargate - sku is the "{vcpu}vCPU-{memory_gb}GB" string built by
+    aws/connector.py's fetch. Looks up the flat $/vCPU-hour and $/GB-hour
+    rates for this (region, architecture, OS) - confirmed via real
+    AmazonECS price list data that Fargate has separate x86/ARM (Graviton)
+    and Linux/Windows rate tiers, but no per-instance-type variation at all
+    (unlike EC2) since you're billing your own chosen cpu/memory directly,
+    not a named instance type. Architecture isn't tracked by this app's
+    inventory fetch yet (ECS tasks can be either) - defaults to x86 rates,
+    the more common/conservative choice (ARM/Graviton is cheaper, so
+    defaulting to x86 never UNDERstates a real Graviton task's cost)."""
+    try:
+        vcpu_str, mem_str = sku.split("-")
+        vcpu = float(vcpu_str.replace("vCPU", ""))
+        memory_gb = float(mem_str.replace("GB", ""))
+    except (ValueError, AttributeError):
+        return None
+
+    is_windows = (os_ == "Windows")
+    vcpu_usagetype_suffix = "Windows-vCPU-Hours" if is_windows else "Fargate-vCPU-Hours"
+    gb_usagetype_suffix = "Windows-GB-Hours" if is_windows else "Fargate-GB-Hours"
+
+    try:
+        session = boto3.Session(aws_access_key_id=creds.access_key_id, aws_secret_access_key=creds.secret_access_key)
+        client = session.client("pricing", region_name=_PRICING_API_REGION)
+        price_list = _get_products(client, "AmazonECS", [
+            {"Type": "TERM_MATCH", "Field": "regionCode", "Value": region},
+        ])
+    except Exception:
+        return None
+    if not price_list:
+        return None
+
+    vcpu_rate = gb_rate = None
+    for item in price_list:
+        attrs = item.get("product", {}).get("attributes", {})
+        usagetype = attrs.get("usagetype", "")
+        # Exact suffix match (not substring) so the plain Linux/x86 suffix
+        # doesn't also match the Windows or ARM (Graviton) variants, e.g.
+        # "...Fargate-Windows-vCPU-Hours" and "...Fargate-ARM-vCPU-Hours"
+        # both contain "vCPU-Hours" but don't END with "Fargate-vCPU-Hours"
+        # - confirmed against real usagetype strings, which are colon-
+        # suffixed for the vCPU dimension (e.g. "...Fargate-vCPU-Hours:perCPU")
+        # but not for the GB dimension, hence splitting on ":" first.
+        base = usagetype.split(":")[0]
+        if not base.endswith(vcpu_usagetype_suffix) and not base.endswith(gb_usagetype_suffix):
+            continue
+        prices = _extract_ondemand_prices(item)
+        if not prices:
+            continue
+        price = prices[0][0]
+        if base.endswith(vcpu_usagetype_suffix):
+            vcpu_rate = price
+        elif base.endswith(gb_usagetype_suffix):
+            gb_rate = price
+
+    if vcpu_rate is None or gb_rate is None:
+        return None
+    return vcpu * vcpu_rate + memory_gb * gb_rate
+
 
 def _extract_ondemand_prices(price_list_item: dict) -> list:
     """Returns every (price_usd, attributes) pair found under this product's
@@ -97,6 +312,13 @@ def _fetch_from_api(resource_type: str, sku: str, region: str, os_: str, redunda
     azure_retail_api.py's _fetch_from_api already follows."""
     if not HAS_BOTO3 or not sku or sku == "N/A" or not region:
         return None
+
+    if resource_type in _INSTANCE_CLASS_SERVICE_CODES:
+        return _fetch_instance_class_price(resource_type, sku, region, redundancy, creds)
+    if resource_type in _CAPACITY_UNIT_SERVICE_CODES:
+        return _fetch_capacity_unit_price(resource_type, sku, region, creds)
+    if resource_type == "AWS Fargate":
+        return _fetch_fargate_price(sku, region, os_, creds)
 
     is_ec2 = (resource_type == "Compute")
     if is_ec2:
