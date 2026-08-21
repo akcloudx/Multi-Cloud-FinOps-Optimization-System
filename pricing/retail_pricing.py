@@ -63,13 +63,28 @@ SKU_HOURLY_PAYG: dict[tuple[str, str], float] = {
 def get_inr_rate() -> float:
     """Fetch live USD → INR exchange rate from frankfurter.app (free, no auth).
     Falls back to a hardcoded rate if the API is unavailable.
+
+    Real bug found live 2026-08-21: this was silently falling back to
+    _FALLBACK_RATE on every single call (not just when the API was
+    genuinely down) because frankfurter.app returns 403 Forbidden for
+    requests with no User-Agent header - urllib.request.urlopen() sends
+    none by default. Confirmed directly: the exact same URL succeeds
+    instantly with a User-Agent header set, fails every time without one.
+    Every INR-displayed cost app-wide (Azure and AWS both, not specific to
+    either) had been silently using the stale 84.0 fallback instead of the
+    real live rate (~95.7 at the time this was caught) for however long
+    this function has existed - caught only because the AWS pricing round
+    happened to produce a number precise enough for the user to notice the
+    conversion didn't match a real exchange rate lookup.
     """
     _FALLBACK_RATE = 84.0
     try:
         import urllib.request, json
-        with urllib.request.urlopen(
-            "https://api.frankfurter.app/latest?from=USD&to=INR", timeout=4
-        ) as resp:
+        req = urllib.request.Request(
+            "https://api.frankfurter.app/latest?from=USD&to=INR",
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        with urllib.request.urlopen(req, timeout=4) as resp:
             data = json.loads(resp.read())
             return float(data["rates"]["INR"])
     except Exception:

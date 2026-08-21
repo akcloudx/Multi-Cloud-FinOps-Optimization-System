@@ -35,6 +35,7 @@ from typing import Optional
 
 from analysis.ri_eligibility import check_eligibility, get_coverage_model
 from analysis.sp_eligibility import check_sp_eligibility
+from pricing.commitment_pricing import MONTH_HOURS
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 DEFAULT_SAFETY_BUFFER   = 0.80   # 80% — conservative buffer to avoid over-purchasing
@@ -326,7 +327,12 @@ def run_waterfall(
             return float(match["hourly_usd_commitment"].sum()) if not match.empty else 0.0
         orphaned["RI Drain per Hour (USD)"] = orphaned.apply(_calc_orphan_drain, axis=1)
         orphaned["RI Drain per Day (USD)"]  = orphaned["RI Drain per Hour (USD)"] * 24
-        orphaned["RI Drain per Month (USD)"] = orphaned["RI Drain per Day (USD)"] * 30
+        # MONTH_HOURS (730), not a flat "* 30" (720hrs) - an RI bills
+        # continuously regardless of the underlying resource's uptime, so
+        # this should use the same monthly-hours convention the RI/SP
+        # engines annualize with everywhere else, not the 30-day
+        # simplification (real inconsistency caught live 2026-08-21).
+        orphaned["RI Drain per Month (USD)"] = orphaned["RI Drain per Hour (USD)"] * MONTH_HOURS
 
     return WaterfallResult(
         billing_snapshot=pd.DataFrame(billing_records),
@@ -566,7 +572,7 @@ def reservation_analysis(
                         "Matching RI":            ri["commitment_id"],
                         "RI Rate/hr (USD)":       ri["hourly_usd_commitment"],
                         "Daily RI Drain (USD)":   round(ri["hourly_usd_commitment"] * 24, 4),
-                        "Monthly RI Drain (USD)": round(ri["hourly_usd_commitment"] * 24 * 30, 2),
+                        "Monthly RI Drain (USD)": round(ri["hourly_usd_commitment"] * MONTH_HOURS, 2),
                         "Recommendation":         "CANCEL / EXCHANGE this RI or restart the resource",
                     })
 

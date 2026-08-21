@@ -32,6 +32,8 @@ from __future__ import annotations
 
 import pandas as pd
 
+from pricing.commitment_pricing import MONTH_HOURS
+
 FOCUS_SPEC_VERSION = "1.2"
 FOCUS_SPEC_URL = "https://focus.finops.org/focus-specification/"
 
@@ -82,7 +84,7 @@ FOCUS_COLUMN_DEFINITIONS = [
     ("RegionId", "Provider-assigned identifier for the region/location of the resource.", "Direct 1:1 mapping."),
     ("PricingUnit", "The unit a resource is priced in.", "Always 'Hour' - every tracked resource here is hourly PAYG-priced."),
     ("ListUnitPrice", "The list (undiscounted) price per PricingUnit.", "PAYG hourly rate."),
-    ("ListCost", "Cost before any discounts, at list price.", "PAYG hourly rate x avg. daily running hours x 30 (monthly estimate)."),
+    ("ListCost", "Cost before any discounts, at list price.", "PAYG hourly rate x (avg. daily running hours / 24) x 730 (monthly estimate, same MONTH_HOURS convention the RI/Savings Plan engines already use)."),
     ("BilledCost", "The actual invoiced cost, net of discounts, excluding amortization.", "Shown equal to ListCost at this per-resource view - real RI/Savings-Plan discount economics are computed separately (pooled, not per-resource) in the RI Coverage and Savings Plan Analysis tabs."),
 ]
 
@@ -101,7 +103,11 @@ def to_focus_view(df: pd.DataFrame, provider: str) -> pd.DataFrame:
         return pd.DataFrame(columns=[c for c, _, _ in FOCUS_COLUMN_DEFINITIONS])
 
     provider_name = _PROVIDER_NAMES.get(provider, provider)
-    list_cost = df["PAYG Hourly Cost USD"] * df["Avg Daily Running Hours"] * 30
+    # MONTH_HOURS (730) matches the same constant the RI/Savings Plan
+    # engines already annualize with (pricing/commitment_pricing.py) -
+    # previously a flat "* 30" (720hrs), silently inconsistent with that
+    # and with AWS's own pricing calculator (real gap caught live 2026-08-21).
+    list_cost = df["PAYG Hourly Cost USD"] * (df["Avg Daily Running Hours"] / 24.0) * MONTH_HOURS
 
     return pd.DataFrame({
         "ProviderName": provider_name,

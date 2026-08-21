@@ -127,7 +127,7 @@ inject_global_css()
 from data.inventory_loader import get_compute_inventory
 from data.sync_pipeline import run_ingestion_pipeline
 from pricing.retail_pricing import price_inventory, usd, fmt_currency, get_inr_rate
-from pricing.commitment_pricing import get_commitment_prices
+from pricing.commitment_pricing import get_commitment_prices, MONTH_HOURS
 from ui.charts import get_cost_distribution_chart, get_waterfall_savings_chart, get_recommendation_opportunity_chart
 from commitments.existing_commitments import (
     get_existing_savings_plans,
@@ -1099,8 +1099,17 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str, show_type_col: 
         return (reason[:87] + "...") if len(reason) > 90 else reason
 
     disp["PAYG Cost/hr"] = disp.apply(_payg_cell, axis=1)
+    # MONTH_HOURS (730, pricing/commitment_pricing.py) is the same constant
+    # RI/Savings Plan annualization already uses - previously this used a
+    # flat "* 30" (24hr/day x 30-day month = 720hrs), silently
+    # INCONSISTENT with the commitment-pricing side of the same app, and a
+    # small but real mismatch against AWS's own pricing calculator (which
+    # uses 730, the true yearly average) - caught live 2026-08-21 when a
+    # user compared this exact figure against AWS's calculator by hand.
+    # Scaled by (Avg Daily Running Hours / 24) so a resource that isn't
+    # running the full day still gets a proportional monthly estimate.
     disp["Est. Monthly PAYG Cost"] = (
-        disp["PAYG Hourly Cost USD"] * disp["Avg Daily Running Hours"] * 30
+        disp["PAYG Hourly Cost USD"] * (disp["Avg Daily Running Hours"] / 24.0) * MONTH_HOURS
     ).apply(lambda x: fmt(x, 2) if x else "—")
 
     # Live mode: show which tenant a subscription ID belongs to, not just the raw GUID.
