@@ -206,7 +206,7 @@ AWS_RI_ONLY_INVENTORY = [
      "resource_type": "Amazon OpenSearch",
      "resource_state": "Running",
      "region": "us-east-1", "os": "N/A", "sku": "r5.large.search",
-     "payg_hourly_usd": 0.180, "avg_daily_running_hours": 24,
+     "payg_hourly_usd": 0.186, "avg_daily_running_hours": 24,   # exact real AmazonES On-Demand rate for r5.large.search in us-east-1, confirmed 2026-08-22 - was a rounded $0.180 estimate before OpenSearch's live pricing lookup existed.
      "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
 ]
 
@@ -246,6 +246,18 @@ AWS_COMMITMENTS = [
      "hourly_usd_commitment": 0.088,
      "reserved_qty": 1,
      "term": "1-year", "expiry_date": "2026-11-20", "provider": "AWS"},
+
+    # ── Reserved Instance — OpenSearch Node ──────────────────────────────────
+    # Added 2026-08-22 alongside OpenSearch's new live RI fetch
+    # (aws/connector.py) - previously OpenSearch had demo inventory and was
+    # listed as RI-eligible, but no demo commitment existed to show what
+    # "Fully Covered" looks like for it.
+    {"commitment_id": "RI-OPENSEARCH-R5-LARGE-USE1",
+     "commitment_type": "Reserved Capacity",
+     "scope_sku": "r5.large.search", "scope_region": "us-east-1", "scope_os": "N/A",
+     "hourly_usd_commitment": 0.121,   # ~35% off the $0.186/hr On-Demand rate, in line with OpenSearch's real 1yr No-Upfront RI discount range - illustrative, not a live-fetched rate.
+     "reserved_qty": 1,
+     "term": "1-year", "expiry_date": "2027-01-10", "provider": "AWS"},
 
     # ── AWS Compute Savings Plan (flexible $/hr across EC2, Fargate, Lambda) ───
     {"commitment_id": "SP-AWS-COMPUTE-001",
@@ -324,7 +336,16 @@ AWS_RI_COVERAGE_NOTES = {
     "AWS RDS PostgreSQL":   ("RDS DB instance hourly compute capacity (Single-AZ or Multi-AZ)", "Storage (GB-month), provisioned IOPS, automated backups"),
     "AWS RDS MySQL":        ("RDS DB instance hourly compute capacity (size-flexible within family)", "Storage, IOPS, automated backup storage"),
     "Amazon Aurora":        ("Aurora DB cluster instance compute capacity", "Storage per GB-month, I/O rate charges"),
-    "Amazon DynamoDB":      ("Provisioned WCU & RCU throughput capacity", "Data storage per GB, backup/restore, data transfer"),
+    # Reserved Capacity is a real, current DynamoDB product (confirmed via
+    # AWS's own docs - up to 54%/77% off) - genuinely eligible, NOT
+    # excluded. But it's purchased and viewed Console-only: dynamodb:
+    # DescribeReservedCapacity is a real IAM action with no SDK/CLI/API
+    # binding at all, confirmed via multiple AWS SDKs' own tracked GitHub
+    # issues since 2020. This app has no way to fetch what a tenant already
+    # owns, so any gap shown for DynamoDB should be treated as unverified,
+    # not a literal purchase recommendation - see the caveat in
+    # _render_ri_coverage_tab().
+    "Amazon DynamoDB":      ("Provisioned WCU & RCU throughput capacity", "Data storage per GB, backup/restore, data transfer, AND the reservation itself - purchase data isn't fetchable via any API (Console-only)"),
     "Amazon ElastiCache":   ("Cache node hourly compute capacity (Redis / Memcached)", "Data storage overhead, snapshot backups"),
     "Amazon Redshift":      ("Redshift data warehouse node compute capacity", "Storage exceeding node capacity, concurrency scaling"),
     "Amazon OpenSearch":    ("Search cluster node instance compute capacity", "EBS volume storage, snapshot storage"),

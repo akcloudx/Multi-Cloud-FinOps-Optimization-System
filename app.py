@@ -1571,6 +1571,16 @@ def _render_ri_coverage_tab():
 
     cov["Status"] = cov.apply(_status, axis=1)
 
+    if not is_azure and "Amazon DynamoDB" in cov["Resource Type"].values:
+        st.warning(
+            "**DynamoDB Reserved Capacity can't be verified:** it's a real, current AWS product (up to 54%/77% off), "
+            "but AWS never exposed purchasing or viewing it through any API, CLI, or SDK - confirmed across multiple "
+            "AWS SDKs' own issue trackers, going back to 2020. Management is Console-only. This app can't fetch what "
+            "Reserved Capacity a tenant already owns, so the gap shown below for DynamoDB may recommend a purchase "
+            "you already have - verify directly in the AWS Console before buying.",
+            icon="⚠️",
+        )
+
     elig = cov[cov["is_eligible"]]
     ineligible = cov[~cov["is_eligible"]]
     instance_cov = elig[elig["coverage_model"] == "instance"]

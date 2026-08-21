@@ -112,6 +112,17 @@ def derive_aws_reservation_commitment_fields(purchase: dict) -> Optional[dict]:
         scope_resource_type = "Amazon Redshift"
         scope_os = "N/A"
         scope_redundancy = "N/A"
+    elif service == "OpenSearch":
+        # Single engine (like Redshift), no product_description or
+        # Multi-AZ/scope/tenancy field on the purchase record (confirmed
+        # via boto3's opensearch service model) - matches this app's flat
+        # "Amazon OpenSearch" inventory resource_type. No per-instance
+        # redundancy price differentiator either (see aws/connector.py's
+        # fetch_live_inventory - real price list data confirms Zone
+        # Awareness doesn't change the per-node rate).
+        scope_resource_type = "Amazon OpenSearch"
+        scope_os = "N/A"
+        scope_redundancy = "N/A"
     else:
         return None   # unrecognized service - don't guess a category.
 

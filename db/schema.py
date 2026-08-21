@@ -294,6 +294,7 @@ def init_db(provider: str = "Azure", mode: str = "demo"):
     _ensure_column(engine, schema_name, "tenant_subscriptions", "assigned_roles", "VARCHAR(255)")
     _widen_column(engine, schema_name, "cloud_tenants", "tenant_missing_roles", 1000)
     _widen_column(engine, schema_name, "tenant_subscriptions", "missing_role", 1000)
+    _widen_column(engine, schema_name, "aws_reservation_purchases", "service", 20)
     _ensure_column(engine, schema_name, "cloud_tenants", "aws_account_id", "VARCHAR(50)")
     _ensure_column(engine, schema_name, "commitments", "offering_class", "VARCHAR(50)")
     # Same collision risk CommitmentPriceCache's resource_type/redundancy
@@ -579,7 +580,7 @@ class AWSReservationPurchase(Base):
     __tablename__ = "aws_reservation_purchases"
 
     id                     = Column(Integer, primary_key=True, autoincrement=True)
-    service                = Column(String(10), nullable=False)    # "EC2" | "RDS"
+    service                = Column(String(20), nullable=False)    # "EC2" | "RDS" | "ElastiCache" | "Redshift" | "OpenSearch" - originally String(10), too narrow for "ElastiCache" (11 chars) - SQLite never enforced it (silently fine locally) but would have broken on first write to production Azure SQL. Widened here and via _widen_column below for tables that already exist in the wild.
     reserved_instance_id   = Column(String(255), nullable=False)   # ReservedInstancesId (EC2) or ReservedDBInstanceId (RDS)
     instance_type          = Column(String(100), nullable=False)   # InstanceType (EC2) or DBInstanceClass (RDS)
     region                 = Column(String(100), nullable=False)   # the region this purchase was found in during the all-region scan - not on the raw API response itself.

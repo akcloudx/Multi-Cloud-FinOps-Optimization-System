@@ -76,6 +76,15 @@ _INSTANCE_CLASS_SERVICE_CODES = {
     "Amazon DocumentDB":              ("AmazonDocDB", "Database Instance"),
     "Amazon Neptune":                 ("AmazonNeptune", "Database Instance"),
     "AWS DMS Replication Instance":   ("AWSDatabaseMigrationSvc", "Replication Server"),
+    # OpenSearch's real Price List service code is "AmazonES" (confirmed
+    # via AWS's own public bulk price list index - a historical-naming
+    # holdover from before the "Elasticsearch Service" rename, same as its
+    # es: IAM action prefix - see aws/connector.py). Only one productFamily
+    # ("Amazon OpenSearch Service Instance") carries an instanceType
+    # attribute at all (confirmed against real downloaded price list data -
+    # no DocumentDB/Neptune-style "CPU Credits" ambiguity to filter out
+    # here), but the explicit filter is kept anyway for consistency/safety.
+    "Amazon OpenSearch":              ("AmazonES", "Amazon OpenSearch Service Instance"),
 }
 
 # resource_type -> AWS Price List service code, for the 2 provisioned-

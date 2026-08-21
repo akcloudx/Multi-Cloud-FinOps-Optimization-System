@@ -151,6 +151,23 @@ REQUIRED_AWS_POLICIES = [
         "Required":        "Yes — For Fargate inventory",
         "Purpose":         "Scan running Fargate tasks for Compute Savings Plan coverage - confirmed no AWS-managed read-only policy exists specifically for ECS user access either",
     },
+    # OpenSearch was already demo-tracked and listed as RI-eligible (see
+    # db/aws_seed.py's AWS_RI_COVERAGE_NOTES) but had NO live fetch at all
+    # until now - not even inventory. Real IAM action is "es:Describe*" -
+    # yet another historical-naming holdover (OpenSearch Service was
+    # renamed from "Elasticsearch Service", but its IAM action prefix and
+    # boto3's legacy "es" client both still use the old name; the newer
+    # "opensearch" boto3 client is a thin wrapper over the identical API,
+    # confirmed via boto3's own service model comparison). One policy
+    # covers both inventory (DescribeDomains) and Reserved Instances
+    # (DescribeReservedInstances) - same "Describe* wildcard already covers
+    # RI too" pattern as EC2/RDS above.
+    {
+        "Policy / Action": "es:DescribeDomains / es:DescribeReservedInstances",
+        "AWS Managed Policy": "AmazonOpenSearchServiceReadOnlyAccess",
+        "Required":        "Yes — For OpenSearch inventory + RI data",
+        "Purpose":         "Scan OpenSearch domains and read active Reserved Instances you own (real IAM action is es:Describe* despite the newer 'opensearch' boto3 client name)",
+    },
 ]
 
 # Fast lookup for the checklist renderer (app.py) - keeps the exact same
@@ -358,6 +375,10 @@ def check_aws_permissions(creds: AWSCredentials) -> dict:
     _probe(
         "ecs:ListClusters / ecs:ListTasks / ecs:DescribeTasks",
         lambda: session.client("ecs").list_clusters(maxResults=20),
+    )
+    _probe(
+        "es:DescribeDomains / es:DescribeReservedInstances",
+        lambda: session.client("opensearch").list_domain_names(),
     )
 
     for action in ["ce:GetCostAndUsage"]:
@@ -842,6 +863,61 @@ def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
         except (ClientError, BotoCoreError):
             pass
 
+        # OpenSearch - already demo-tracked and RI-eligible (see
+        # db/aws_seed.py's AWS_RI_COVERAGE_NOTES) but had no live fetch of
+        # any kind until now. Real IAM action is "es:Describe*" (confirmed
+        # via AmazonOpenSearchServiceReadOnlyAccess's own policy JSON -
+        # another historical-naming holdover from before the "Elasticsearch
+        # Service" rename). DescribeDomains accepts at most 5 domain names
+        # per call - confirmed via AWS's own API docs - hence the batching.
+        # No running/stopped lifecycle exists for OpenSearch domains
+        # (confirmed via boto3's DescribeDomains output shape - no state
+        # field beyond Processing/Deleted, which DescribeDomains itself
+        # never returns for a deleted domain) - always "Running", same
+        # always-on convention as ElastiCache/Redshift/DocumentDB/Neptune.
+        try:
+            aos = session.client("opensearch", region_name=region)
+            domain_names = [d["DomainName"] for d in aos.list_domain_names().get("DomainNames", [])]
+            for i in range(0, len(domain_names), 5):
+                batch = domain_names[i:i + 5]
+                for dom in aos.describe_domains(DomainNames=batch).get("DomainStatusList", []):
+                    cluster = dom.get("ClusterConfig", {})
+                    instance_type = cluster.get("InstanceType", "N/A")
+                    instance_count = cluster.get("InstanceCount") or 1
+                    domain_name = dom.get("DomainName", "")
+                    domain_arn = dom.get("ARN") or domain_name
+                    # One row PER NODE, not per domain - unlike RDS's
+                    # Multi-AZ (where the standby is invisible via the API
+                    # and AWS bills it through a separate, already-doubled
+                    # price meter on the single visible instance),
+                    # OpenSearch's InstanceCount nodes are real, homogeneous,
+                    # identically-priced instances with no special primary/
+                    # standby price differentiation (confirmed via real
+                    # AmazonES price list data) - modeling each as its own
+                    # resource row is the mechanically accurate match, not a
+                    # workaround, and reuses the existing per-instance
+                    # pricing lookup unchanged rather than needing a new
+                    # count-aware variant.
+                    for node_idx in range(instance_count):
+                        records.append({
+                            "Resource ID":             f"{domain_arn}#node{node_idx}",
+                            "Resource Name":           f"{domain_name}-node-{node_idx}" if instance_count > 1 else domain_name,
+                            "Resource Type":           "Amazon OpenSearch",
+                            "Resource State":          "Running",
+                            "Region":                  region,
+                            "OS":                      "N/A",
+                            "SKU":                     instance_type,
+                            "Redundancy":              "N/A",   # No per-instance price differentiator for zone awareness - confirmed via real AmazonES price list data.
+                            "HA Replicas":             0,
+                            "PAYG Hourly Cost USD":    0.0,
+                            "Avg Daily Running Hours": 24,
+                            "Subscription":            account_id,
+                            "Provider":                "AWS",
+                            "Is Orphaned":             False,
+                        })
+        except (ClientError, BotoCoreError):
+            pass
+
     return pd.DataFrame(records)
 
 
@@ -1038,6 +1114,42 @@ def fetch_live_reservations(creds: AWSCredentials) -> pd.DataFrame:
                     "usage_price":           ri.get("UsagePrice"),
                     "currency_code":         ri.get("CurrencyCode"),
                     "offering_type":         ri.get("OfferingType"),
+                    "offering_class":        None,
+                    "instance_tenancy":      None,
+                    "scope":                 None,
+                    "multi_az":              None,
+                    "state":                 ri.get("State", ""),
+                    "start_time":            str(ri.get("StartTime")) if ri.get("StartTime") else None,
+                    "recurring_charge_hourly": _recurring_hourly_charge(ri.get("RecurringCharges")),
+                })
+        except (ClientError, BotoCoreError):
+            pass
+
+        # OpenSearch Reserved Instances - same real field shape as EC2/RDS/
+        # ElastiCache/Redshift (InstanceType/Duration/FixedPrice/UsagePrice/
+        # InstanceCount/RecurringCharges/State), confirmed via boto3's
+        # opensearch service model. No ProductDescription field (single
+        # engine, like Redshift) and no scope/tenancy/multi_az concept
+        # either (confirmed via the same service model - OpenSearch RIs
+        # aren't Regional/Zonal or Standard/Convertible the way EC2's are).
+        try:
+            aos_ri = session.client("opensearch", region_name=region)
+            for ri in aos_ri.describe_reserved_instances().get("ReservedInstances", []):
+                if ri.get("State") != "active":
+                    continue
+                records.append({
+                    "service":               "OpenSearch",
+                    "reserved_instance_id":  ri.get("ReservedInstanceId", ""),
+                    "instance_type":         ri.get("InstanceType", ""),
+                    "region":                region,
+                    "availability_zone":     None,
+                    "product_description":   None,
+                    "instance_count":        ri.get("InstanceCount", 0),
+                    "duration_seconds":      ri.get("Duration", 0),
+                    "fixed_price":           ri.get("FixedPrice"),
+                    "usage_price":           ri.get("UsagePrice"),
+                    "currency_code":         ri.get("CurrencyCode"),
+                    "offering_type":         ri.get("PaymentOption"),
                     "offering_class":        None,
                     "instance_tenancy":      None,
                     "scope":                 None,
