@@ -14,6 +14,7 @@ REQUIRED AWS IAM POLICY PERMISSIONS:
   - rds:DescribeDBInstances
   - rds:DescribeReservedDBInstances
   - savingsplans:DescribeSavingsPlans
+  - pricing:GetProducts
   - ce:GetCostAndUsage
 """
 
@@ -92,10 +93,16 @@ REQUIRED_AWS_POLICIES = [
         "Purpose":         "Fetch active AWS Compute & EC2 Savings Plans",
     },
     {
+        "Policy / Action": "pricing:GetProducts",
+        "AWS Managed Policy": "AWSPriceListServiceFullAccess",
+        "Required":        "Yes — For PAYG rates",
+        "Purpose":         "Look up real On-Demand hourly rates for EC2/RDS inventory (free API despite the policy's name - Pricing has no mutating actions at all)",
+    },
+    {
         "Policy / Action": "ce:GetCostAndUsage",
         "AWS Managed Policy": "AWSBillingReadOnlyAccess",
         "Required":        "Yes — For Cost Explorer",
-        "Purpose":         "Query AWS Cost Explorer for un-discounted PAYG rates and usage",
+        "Purpose":         "Query AWS Cost Explorer for real historical spend and usage (not rates - see pricing:GetProducts for that)",
     },
 ]
 
@@ -184,10 +191,12 @@ def check_aws_permissions(creds: AWSCredentials) -> dict:
       data pulled, no cost. Confirmed via boto3 docs that DescribeReservedInstances
       supports DryRun just like DescribeInstances.
     - rds:DescribeDBInstances / rds:DescribeReservedDBInstances /
-      savingsplans:DescribeSavingsPlans - EC2's DryRun convention isn't
-      universal (RDS/Savings Plans don't support it), so these are checked
-      with a real, minimal, genuinely free read-only call (MaxRecords=20 is
-      RDS's own required minimum, not a chosen value).
+      savingsplans:DescribeSavingsPlans / pricing:GetProducts - EC2's
+      DryRun convention isn't universal (RDS/Savings Plans/Pricing don't
+      support it), so these are checked with a real, minimal, genuinely
+      free read-only call (MaxRecords=20 is RDS's own required minimum,
+      not a chosen value; pricing:GetProducts is confirmed free via AWS's
+      own launch announcement, unlike ce:GetCostAndUsage below).
     - ce:GetCostAndUsage - deliberately NOT probed live. AWS's own Cost
       Explorer docs are explicit: "Each paginated API request incurs a
       charge of $0.01" (https://docs.aws.amazon.com/cost-management/latest/userguide/ce-what-is.html)
@@ -262,6 +271,19 @@ def check_aws_permissions(creds: AWSCredentials) -> dict:
     _probe(
         "savingsplans:DescribeSavingsPlans",
         lambda: session.client("savingsplans").describe_savings_plans(maxResults=1),
+    )
+    # The Pricing service (unlike every other client above) only exists in
+    # 3 regions - confirmed via botocore's own installed endpoints.json,
+    # not a doc page: us-east-1, eu-central-1, ap-south-1. Pinned to
+    # us-east-1 here regardless of creds.region/the tenant's own region -
+    # this client always talks to that single endpoint no matter which
+    # AWS region's prices are being looked up (that's controlled by a
+    # regionCode filter in the request itself, not by which endpoint you
+    # connect to - see pricing/aws_price_list.py). Free to call - confirmed
+    # via AWS's own launch announcement ("available... at no charge").
+    _probe(
+        "pricing:GetProducts",
+        lambda: session.client("pricing", region_name="us-east-1").get_products(ServiceCode="AmazonEC2", MaxResults=1),
     )
 
     for action in ["ce:GetCostAndUsage"]:
@@ -383,12 +405,27 @@ def _map_rds_state(status: str) -> str:
 def _map_ec2_platform(platform_details: str) -> str:
     """EC2's platformDetails is a free-text billing field (e.g. "Windows",
     "Windows with SQL Server Standard", "Linux/UNIX", "Red Hat Enterprise
-    Linux") - collapsed to the same "Windows"/"Linux" categories the Azure
-    side already displays, since no AWS pricing engine exists yet to
-    consume anything more granular (see check_aws_permissions() module
-    docstring / project memory - AWS pricing is a separate, not-yet-built
-    round)."""
-    return "Windows" if "windows" in (platform_details or "").lower() else "Linux"
+    Linux", "SUSE Linux"). Collapsed to exactly the 4 values AWS's own
+    On-Demand pricing distinguishes by price - confirmed against real
+    downloaded price list data (pricing/aws_price_list.py): the
+    `operatingSystem` attribute on EC2 price list entries only ever takes
+    "Windows"/"RHEL"/"SUSE"/"Linux" (anything else - Ubuntu, Amazon Linux,
+    Debian, plain "Linux/UNIX" - is priced under the generic "Linux"
+    bucket). Originally this collapsed straight to "Windows"/"Linux" only,
+    losing RHEL/SUSE - harmless while no AWS pricing engine existed, but
+    would have silently mispriced every RHEL/SUSE instance as generic
+    Linux once one did (RHEL/SUSE carry real licensing surcharges over
+    base Linux, the same kind of real $ difference the Windows-surcharge
+    bug on the Azure side turned out to be) - fixed as part of building
+    that pricing engine, not left as a latent trap."""
+    p = (platform_details or "").lower()
+    if "windows" in p:
+        return "Windows"
+    if "red hat" in p or "rhel" in p:
+        return "RHEL"
+    if "suse" in p:
+        return "SUSE"
+    return "Linux"
 
 
 _RDS_ENGINE_LABELS = {

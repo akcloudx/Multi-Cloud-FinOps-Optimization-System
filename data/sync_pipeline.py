@@ -43,6 +43,7 @@ from azure_conn.connector import (
 )
 from aws.connector import load_aws_credentials_from_env, test_aws_connection, fetch_live_inventory as fetch_live_aws_inventory
 from pricing.azure_retail_api import refresh_retail_prices
+from pricing.aws_price_list import refresh_aws_prices
 from pricing.commitment_pricing import refresh_commitment_prices
 from pricing.commitment_mapping import derive_reservation_commitment_fields, derive_savings_plan_commitment_fields
 from db.tenants import upsert_subscription
@@ -114,19 +115,30 @@ def run_ingestion_pipeline(provider: str = "Azure", creds=None, force_mock: bool
                     ri_sp_error = str(e)[:300]
                     reservation_records, savings_plan_records = [], []
 
-            # Azure-only: both of these call Azure's real Retail Prices API,
-            # which has no AWS pricing equivalent wired up yet (AWS's
-            # required-permissions list already includes ce:GetCostAndUsage
-            # for this exact future purpose - see aws/connector.py - but
-            # nothing calls it yet). Gating on is_azure avoids wastefully
-            # querying Azure's API with AWS SKU strings (e.g. "t3.medium")
-            # that could never match anything there; AWS rows keep the
-            # honest 0.0 placeholder fetch_live_inventory() already sets.
-            rates = refresh_retail_prices(engine, records, provider=provider) if (is_azure and records) else {}
-            for r in records:
-                key = (r.get("SKU"), r.get("Region"), r.get("OS"))
-                if key in rates:
-                    r["PAYG Hourly Cost USD"] = rates[key]
+            # PAYG rate lookup - Azure's Retail Prices API needs no
+            # credentials (public endpoint), AWS's Price List Query API
+            # needs the tenant's own real AWS credentials (pricing:GetProducts,
+            # see aws/connector.py's REQUIRED_AWS_POLICIES and
+            # pricing/aws_price_list.py's module docstring for the full
+            # research trail). The two rate dicts use different key shapes
+            # - Azure's is a plain (sku, region, os) triple; AWS's also
+            # carries resource_type/redundancy since RDS Multi-AZ vs
+            # Single-AZ genuinely have different rates for the same
+            # instanceType/region/OS (see db/schema.py's RetailPrice
+            # comment) - so each provider builds its own per-record lookup
+            # key to match.
+            if is_azure:
+                rates = refresh_retail_prices(engine, records, provider=provider) if records else {}
+                for r in records:
+                    key = (r.get("SKU"), r.get("Region"), r.get("OS"))
+                    if key in rates:
+                        r["PAYG Hourly Cost USD"] = rates[key]
+            else:
+                rates = refresh_aws_prices(engine, records, live_creds) if records else {}
+                for r in records:
+                    key = (r.get("Resource Type"), r.get("SKU"), r.get("Region"), r.get("OS"), r.get("Redundancy") or "N/A")
+                    if key in rates:
+                        r["PAYG Hourly Cost USD"] = rates[key]
 
             # Real 1yr/3yr Savings Plan + Reserved Instance rates for every
             # SKU/region/OS just synced - what savings_plan_analysis() and

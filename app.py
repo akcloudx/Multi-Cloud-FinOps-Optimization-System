@@ -346,9 +346,12 @@ def _render_aws_connect_form(key_prefix: str, mode: str = "live"):
             else:
                 st.markdown(f"   - `{action}` → attach **`{managed_policy}`**")
         st.caption(
-            "Only 4 managed policies to attach in total - EC2 and RDS each cover both the "
-            "inventory scan and the Reserved Instances read (`Describe*` family), so nothing "
-            "extra is needed for RI data beyond what's already required for inventory."
+            "Only 5 managed policies to attach in total, despite 7 actions above - EC2 and RDS "
+            "each cover both the inventory scan and the Reserved Instances read (`Describe*` "
+            "family), so nothing extra is needed for RI data beyond what's already required for "
+            "inventory. `AWSPriceListServiceFullAccess` is safe despite the name - the Pricing "
+            "service has no mutating actions at all, so \"full access\" just means every "
+            "read-only pricing action."
         )
     env_aws = load_aws_credentials_from_env()
     with st.form(f"{key_prefix}_aws_form"):

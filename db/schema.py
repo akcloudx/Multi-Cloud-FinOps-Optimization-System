@@ -295,6 +295,16 @@ def init_db(provider: str = "Azure", mode: str = "demo"):
     _widen_column(engine, schema_name, "cloud_tenants", "tenant_missing_roles", 1000)
     _widen_column(engine, schema_name, "tenant_subscriptions", "missing_role", 1000)
     _ensure_column(engine, schema_name, "cloud_tenants", "aws_account_id", "VARCHAR(50)")
+    # Same collision risk CommitmentPriceCache's resource_type/redundancy
+    # columns were added for (see that class's comments): without these,
+    # an RDS Multi-AZ and Single-AZ instance of the identical instanceType/
+    # region/OS would share one PAYG cache row despite Multi-AZ genuinely
+    # costing roughly 2x - a real, well-known price difference, not a
+    # hypothetical edge case. NULL for every existing Azure row (unused
+    # there - VM PAYG pricing doesn't vary by redundancy the way RDS
+    # Multi-AZ does) and for AWS EC2 rows (redundancy is N/A there too).
+    _ensure_column(engine, schema_name, "retail_prices", "resource_type", "VARCHAR(255)")
+    _ensure_column(engine, schema_name, "retail_prices", "redundancy", "VARCHAR(255)")
     return engine
 
 
@@ -440,6 +450,10 @@ class RetailPrice(Base):
     payg_rate_usd = Column(Float, nullable=False)
     provider      = Column(String(255), nullable=False)
     fetched_at    = Column(String(255), nullable=False)
+    # Added for AWS RDS pricing (2026-08) - see the _ensure_column migration
+    # below for why. NULL/unused for Azure and for AWS EC2 rows.
+    resource_type = Column(String(255), nullable=True)
+    redundancy    = Column(String(255), nullable=True)
 
 
 class CommitmentPriceCache(Base):
