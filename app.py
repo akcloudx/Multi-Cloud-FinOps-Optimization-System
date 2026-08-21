@@ -346,7 +346,7 @@ def _render_aws_connect_form(key_prefix: str, mode: str = "live"):
             else:
                 st.markdown(f"   - `{action}` → attach **`{managed_policy}`**")
         st.caption(
-            "Only 5 managed policies to attach in total, despite 7 actions above - EC2 and RDS "
+            "Only 7 managed policies to attach in total, despite 9 actions above - EC2 and RDS "
             "each cover both the inventory scan and the Reserved Instances read (`Describe*` "
             "family), so nothing extra is needed for RI data beyond what's already required for "
             "inventory. `AWSPriceListServiceFullAccess` is safe despite the name - the Pricing "

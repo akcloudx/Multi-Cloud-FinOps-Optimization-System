@@ -13,6 +13,8 @@ REQUIRED AWS IAM POLICY PERMISSIONS:
   - ec2:DescribeReservedInstances
   - rds:DescribeDBInstances
   - rds:DescribeReservedDBInstances
+  - elasticache:DescribeReservedCacheNodes
+  - redshift:DescribeReservedNodes
   - savingsplans:DescribeSavingsPlans
   - pricing:GetProducts
   - ce:GetCostAndUsage
@@ -85,6 +87,18 @@ REQUIRED_AWS_POLICIES = [
         "AWS Managed Policy": "AmazonRDSReadOnlyAccess",
         "Required":        "Yes — For RI data",
         "Purpose":         "Read active RDS Reserved Instances you own",
+    },
+    {
+        "Policy / Action": "elasticache:DescribeReservedCacheNodes",
+        "AWS Managed Policy": "AmazonElastiCacheReadOnlyAccess",
+        "Required":        "Yes — For RI data",
+        "Purpose":         "Read active ElastiCache Reserved Nodes you own",
+    },
+    {
+        "Policy / Action": "redshift:DescribeReservedNodes",
+        "AWS Managed Policy": "AmazonRedshiftReadOnlyAccess",
+        "Required":        "Yes — For RI data",
+        "Purpose":         "Read active Redshift Reserved Nodes you own",
     },
     {
         "Policy / Action": "savingsplans:DescribeSavingsPlans",
@@ -191,12 +205,15 @@ def check_aws_permissions(creds: AWSCredentials) -> dict:
       data pulled, no cost. Confirmed via boto3 docs that DescribeReservedInstances
       supports DryRun just like DescribeInstances.
     - rds:DescribeDBInstances / rds:DescribeReservedDBInstances /
+      elasticache:DescribeReservedCacheNodes / redshift:DescribeReservedNodes /
       savingsplans:DescribeSavingsPlans / pricing:GetProducts - EC2's
-      DryRun convention isn't universal (RDS/Savings Plans/Pricing don't
-      support it), so these are checked with a real, minimal, genuinely
-      free read-only call (MaxRecords=20 is RDS's own required minimum,
-      not a chosen value; pricing:GetProducts is confirmed free via AWS's
-      own launch announcement, unlike ce:GetCostAndUsage below).
+      DryRun convention isn't universal (RDS/ElastiCache/Redshift/Savings
+      Plans/Pricing don't support it), so these are checked with a real,
+      minimal, genuinely free read-only call (MaxRecords=20 is RDS's own
+      required minimum, confirmed as the same minimum for ElastiCache and
+      Redshift too, not a chosen value; pricing:GetProducts is confirmed
+      free via AWS's own launch announcement, unlike ce:GetCostAndUsage
+      below).
     - ce:GetCostAndUsage - deliberately NOT probed live. AWS's own Cost
       Explorer docs are explicit: "Each paginated API request incurs a
       charge of $0.01" (https://docs.aws.amazon.com/cost-management/latest/userguide/ce-what-is.html)
@@ -267,6 +284,14 @@ def check_aws_permissions(creds: AWSCredentials) -> dict:
     _probe(
         "rds:DescribeReservedDBInstances",
         lambda: session.client("rds").describe_reserved_db_instances(MaxRecords=20),
+    )
+    _probe(
+        "elasticache:DescribeReservedCacheNodes",
+        lambda: session.client("elasticache").describe_reserved_cache_nodes(MaxRecords=20),
+    )
+    _probe(
+        "redshift:DescribeReservedNodes",
+        lambda: session.client("redshift").describe_reserved_nodes(MaxRecords=20),
     )
     _probe(
         "savingsplans:DescribeSavingsPlans",
@@ -597,11 +622,30 @@ def _recurring_hourly_charge(charges: list) -> Optional[float]:
 
 def fetch_live_reservations(creds: AWSCredentials) -> pd.DataFrame:
     """
-    Fetches every active EC2 + RDS Reserved Instance across every AWS
-    region enabled for this account. Returns a DataFrame shaped for
-    AWSReservationPurchase (db/schema.py) - NOT the Azure-shaped
-    ReservationPurchase table; see that class's docstring for why they're
-    kept separate.
+    Fetches every active EC2, RDS, ElastiCache, and Redshift Reserved
+    Instance/Node across every AWS region enabled for this account.
+    Returns a DataFrame shaped for AWSReservationPurchase (db/schema.py) -
+    NOT the Azure-shaped ReservationPurchase table; see that class's
+    docstring for why they're kept separate.
+
+    ElastiCache and Redshift added 2026-08-22 - each is a genuinely
+    separate reservation system from EC2/RDS's (elasticache:
+    DescribeReservedCacheNodes / redshift:DescribeReservedNodes, own IAM
+    permissions, own managed policies), not something EC2/RDS's fetch
+    happens to also cover. Confirmed their response shapes are close
+    enough to EC2/RDS's (FixedPrice/UsagePrice/Duration/RecurringCharges/
+    State) via boto3's own service model plus real examples in AWS's docs
+    that no new AWSReservationPurchase columns were needed - both are
+    added as new `service` values ("ElastiCache"/"Redshift") in the same
+    per-region loop, same active-only filter, same effective-hourly-rate
+    formula in pricing/aws_commitment_mapping.py. Both are standard
+    regionalized services (confirmed via botocore's own endpoints.json,
+    same as EC2/RDS - not global-only like Pricing/Savings Plans), so the
+    same all-region scan applies. Redshift's DescribeReservedNodes is
+    confirmed to be ONLY the classic provisioned-cluster reservation
+    system - Redshift Serverless uses a completely separate RPU-based
+    reservation concept with its own different API, not fetched here (no
+    Redshift Serverless inventory tracked by this app at all yet).
     """
     if not HAS_BOTO3:
         raise ImportError("boto3 library is not installed. Run: pip install boto3")
@@ -668,6 +712,64 @@ def fetch_live_reservations(creds: AWSCredentials) -> pd.DataFrame:
                     "instance_tenancy":      None,
                     "scope":                 None,
                     "multi_az":              ri.get("MultiAZ"),
+                    "state":                 ri.get("State", ""),
+                    "start_time":            str(ri.get("StartTime")) if ri.get("StartTime") else None,
+                    "recurring_charge_hourly": _recurring_hourly_charge(ri.get("RecurringCharges")),
+                })
+        except (ClientError, BotoCoreError):
+            pass
+
+        try:
+            ec = session.client("elasticache", region_name=region)
+            for ri in ec.describe_reserved_cache_nodes().get("ReservedCacheNodes", []):
+                if ri.get("State") != "active":
+                    continue
+                records.append({
+                    "service":               "ElastiCache",
+                    "reserved_instance_id":  ri.get("ReservedCacheNodeId", ""),
+                    "instance_type":         ri.get("CacheNodeType", ""),
+                    "region":                region,
+                    "availability_zone":     None,
+                    "product_description":   ri.get("ProductDescription"),   # "redis" | "memcached" | "valkey" - same engine-identifier convention as DescribeCacheClusters's Engine field, confirmed via a real "memcached" example in AWS's own docs.
+                    "instance_count":        ri.get("CacheNodeCount", 0),
+                    "duration_seconds":      ri.get("Duration", 0),
+                    "fixed_price":           ri.get("FixedPrice"),
+                    "usage_price":           ri.get("UsagePrice"),
+                    "currency_code":         None,   # ElastiCache's ReservedCacheNode has no CurrencyCode field (confirmed via boto3 service model) - unlike EC2/RDS/Redshift.
+                    "offering_type":         ri.get("OfferingType"),
+                    "offering_class":        None,
+                    "instance_tenancy":      None,
+                    "scope":                 None,
+                    "multi_az":              None,
+                    "state":                 ri.get("State", ""),
+                    "start_time":            str(ri.get("StartTime")) if ri.get("StartTime") else None,
+                    "recurring_charge_hourly": _recurring_hourly_charge(ri.get("RecurringCharges")),
+                })
+        except (ClientError, BotoCoreError):
+            pass
+
+        try:
+            rs = session.client("redshift", region_name=region)
+            for ri in rs.describe_reserved_nodes().get("ReservedNodes", []):
+                if ri.get("State") != "active":
+                    continue
+                records.append({
+                    "service":               "Redshift",
+                    "reserved_instance_id":  ri.get("ReservedNodeId", ""),
+                    "instance_type":         ri.get("NodeType", ""),
+                    "region":                region,
+                    "availability_zone":     None,
+                    "product_description":   None,   # Redshift has no ProductDescription field (confirmed via boto3 service model) - unlike EC2/RDS/ElastiCache, there's only one Redshift engine.
+                    "instance_count":        ri.get("NodeCount", 0),
+                    "duration_seconds":      ri.get("Duration", 0),
+                    "fixed_price":           ri.get("FixedPrice"),
+                    "usage_price":           ri.get("UsagePrice"),
+                    "currency_code":         ri.get("CurrencyCode"),
+                    "offering_type":         ri.get("OfferingType"),
+                    "offering_class":        None,
+                    "instance_tenancy":      None,
+                    "scope":                 None,
+                    "multi_az":              None,
                     "state":                 ri.get("State", ""),
                     "start_time":            str(ri.get("StartTime")) if ri.get("StartTime") else None,
                     "recurring_charge_hourly": _recurring_hourly_charge(ri.get("RecurringCharges")),

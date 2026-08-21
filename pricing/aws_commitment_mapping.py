@@ -90,6 +90,28 @@ def derive_aws_reservation_commitment_fields(purchase: dict) -> Optional[dict]:
         scope_resource_type = map_rds_engine(purchase.get("product_description") or "")
         scope_os = "N/A"
         scope_redundancy = "Zone Redundant" if purchase.get("multi_az") else "Locally Redundant"
+    elif service == "ElastiCache":
+        # This app's inventory taxonomy tracks ElastiCache as one flat
+        # "Amazon ElastiCache" resource_type regardless of engine (aws/
+        # connector.py's fetch_live_inventory doesn't split redis vs
+        # memcached vs valkey either) - matched here for consistency, not
+        # further split by product_description's real redis/memcached/
+        # valkey value even though that data is available on the purchase
+        # record. Redundancy: unlike RDS, the reservation record itself
+        # carries no Multi-AZ signal (confirmed via boto3's service model -
+        # no such field exists on ReservedCacheNode), so this is "N/A"
+        # rather than guessed - same reasoning Azure Reservations use when
+        # a purchase record doesn't carry a needed signal.
+        scope_resource_type = "Amazon ElastiCache"
+        scope_os = "N/A"
+        scope_redundancy = "N/A"
+    elif service == "Redshift":
+        # Single engine, no product_description field exists on the
+        # purchase record at all (confirmed via boto3's service model) -
+        # matches this app's flat "Amazon Redshift" inventory resource_type.
+        scope_resource_type = "Amazon Redshift"
+        scope_os = "N/A"
+        scope_redundancy = "N/A"
     else:
         return None   # unrecognized service - don't guess a category.
 
