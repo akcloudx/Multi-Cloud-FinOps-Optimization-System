@@ -274,6 +274,45 @@ def seed_aws_if_empty(engine=None):
         else:
             print("[INFO] AWS database already seeded -- skipping.")
 
+    seed_aws_demo_tenant_if_empty()
+
+
+def seed_aws_demo_tenant_if_empty():
+    """AWS counterpart to db/seed.py's seed_demo_tenant_if_empty() - without
+    this, list_tenants("AWS", "demo") returns empty and the Dashboard button
+    is unreachable in AWS Demo mode (Tenant Management shows "No demo tenant
+    seeded yet." with no way to proceed, since "Add a new tenant" is
+    Production-only). Confirmed real gap 2026-08-22: Azure demo has always
+    had this, AWS never did.
+
+    Deliberately simpler than the Azure version - no TenantSubscription rows
+    (AWS has no sub-account-scope concept the way Azure has subscriptions
+    under a tenant; one IAM credential set = one account) and no simulated
+    tenant_permission_status/tenant_assigned_roles (confirmed via app.py's
+    _manage_tenant_dialog: AWS's "Permissions" tab is hard-gated to "Not
+    applicable - a demo tenant has no real AWS credentials behind it." for
+    is_demo, and the AWS segmented-control tab icons only ever read
+    last_sync_status, never tenant_permission_status - unlike Azure's tenant
+    list row, which does read it. Setting those fields for AWS would be
+    simulating a check the UI never displays.
+
+    aws_account_id is set to AWS's own well-known placeholder account ID
+    (used throughout AWS's official docs/examples, e.g. IAM policy
+    examples) so the Tenant Management table's "Account ID" column shows
+    something realistic rather than "—". Independently guarded (checks its
+    own emptiness) so it's safe to call every startup."""
+    from db.tenants import list_tenants, upsert_tenant, update_aws_account_id
+    if list_tenants("AWS", "demo"):
+        return
+    tenant_db_id = upsert_tenant(
+        provider="AWS", mode="demo", tenant_name="Demo AWS Tenant",
+        tenant_id="us-east-1", subscription_id="us-east-1",
+        client_id="AKIADEMOHASNOREALCREDS0",
+        client_secret="demo-tenant-has-no-real-credentials",
+    )
+    update_aws_account_id("AWS", "demo", tenant_db_id, "123456789012")
+    print("[OK] Seeded demo tenant 'Demo AWS Tenant'.")
+
 
 if __name__ == "__main__":
     seed_aws_if_empty()
