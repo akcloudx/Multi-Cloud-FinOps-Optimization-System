@@ -1092,7 +1092,19 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str, show_type_col: 
         else ("Running" if r["Resource State"] == "Running" else "Stopped"),
         axis=1,
     )
+    # A Stopped (deallocated) resource genuinely isn't accruing compute
+    # charges - real gap caught live 2026-08-21: this table was showing
+    # the full running rate for stopped resources regardless of state,
+    # inconsistent with every OTHER cost figure in the app (the KPI
+    # header, Cost Analysis, Recommendations, and the waterfall chart all
+    # already sum only running_vms/running_dbs, filtered to
+    # Resource State == "Running", before computing spend - see line 2068
+    # below). Both columns now zero out for a stopped resource, matching
+    # that same "Running" filter exactly rather than introducing a
+    # different rule just for this table.
     def _payg_cell(r):
+        if r["Resource State"] != "Running":
+            return fmt(0, 4) + " (stopped)"
         if r["PAYG Hourly Cost USD"]:
             return fmt(r["PAYG Hourly Cost USD"], 4)
         reason = _payg_blank_reason(r["Resource Type"], r["SKU"])
@@ -1108,9 +1120,17 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str, show_type_col: 
     # user compared this exact figure against AWS's calculator by hand.
     # Scaled by (Avg Daily Running Hours / 24) so a resource that isn't
     # running the full day still gets a proportional monthly estimate.
-    disp["Est. Monthly PAYG Cost"] = (
-        disp["PAYG Hourly Cost USD"] * (disp["Avg Daily Running Hours"] / 24.0) * MONTH_HOURS
-    ).apply(lambda x: fmt(x, 2) if x else "—")
+    is_running = disp["Resource State"] == "Running"
+    est_monthly = disp["PAYG Hourly Cost USD"] * (disp["Avg Daily Running Hours"] / 24.0) * MONTH_HOURS
+
+    def _monthly_cell(running: bool, x: float) -> str:
+        if not running:
+            return fmt(0, 2) + " (stopped)"   # explicit, not the generic "—" used for "no pricing data" - a stopped resource's $0 is a known fact, not a missing lookup.
+        return fmt(x, 2) if x else "—"
+
+    disp["Est. Monthly PAYG Cost"] = [
+        _monthly_cell(r, x) for r, x in zip(is_running, est_monthly)
+    ]
 
     # Live mode: show which tenant a subscription ID belongs to, not just the raw GUID.
     if is_live_mode and is_live_configured and active_tenant is not None:
