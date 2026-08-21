@@ -1384,6 +1384,11 @@ def _render_savings_plan_tab():
                     "Savings Plan Type": "Database Savings Plans (1-yr ONLY)",
                     "What Is Covered": "Aurora, RDS, DynamoDB, ElastiCache, DocumentDB, Timestream, Neptune, Keyspaces, DMS, and Amazon OpenSearch Service - confirmed via the full AWS Savings Plans User Guide, up to 35% off",
                     "What Is NOT Covered": "Amazon Redshift, EC2/Fargate/Lambda compute, 3-year term (1-yr only per AWS policy - same restriction Azure's Savings Plan for Databases has)"
+                },
+                {
+                    "Savings Plan Type": "SageMaker AI Savings Plans (1-yr / 3-yr)",
+                    "What Is Covered": "Amazon SageMaker AI instance usage regardless of instance family, size, Region, or component (Notebook, Training, Inference, etc.) - up to 64% discount",
+                    "What Is NOT Covered": "EC2/Fargate/Lambda/database compute. Not tracked as a Pool below - this app has no SageMaker inventory model yet, so there's no baseline to recommend against; purchased plans are recorded but not shown here as a coverage pool."
                 }
             ]
         st.dataframe(pd.DataFrame(sp_coverage_rows), hide_index=True, width="stretch")
