@@ -1024,7 +1024,7 @@ def page_users():
 
 
 _TYPE_ICONS = {
-    "Compute": "🖥️", "Azure SQL Database": "🗄️", "Azure SQL Managed Instance": "🗄️",
+    "Compute": "🖥️", "Amazon EC2": "🖥️", "Azure SQL Database": "🗄️", "Azure SQL Managed Instance": "🗄️",
     "Azure Database for MySQL": "🐬", "Azure Database for PostgreSQL": "🐘",
     "Azure Cosmos DB": "🌐", "Azure Blob Storage": "📦", "Azure Files": "📁",
     "Azure Cache for Redis": "⚡", "Azure Cache for Redis Enterprise": "⚡",
@@ -2050,6 +2050,13 @@ def fmt(x: float, decimals: int = 2) -> str:
 is_azure = (selected_provider == "Azure")
 provider_icon = "☁️ Azure" if is_azure else "🟧 AWS"
 compute_label = "Virtual Machines" if is_azure else "EC2 Instances"
+# Renamed 2026-08-23: AWS's primary compute resource_type used to be the
+# same literal "Compute" string as Azure's - both providers shared one
+# flat resource_type namespace, so that one string was the sole accidental
+# collision point (every other resource type already has a distinct
+# "Amazon .../AWS ..." name). AWS now uses "Amazon EC2" - see
+# aws/connector.py's live-fetch comment for the full reasoning.
+compute_type = "Compute" if is_azure else "Amazon EC2"
 db_label = "Database Services" if is_azure else "RDS Databases"
 db_sp_title = "Savings Plan for Databases" if is_azure else "Database Savings Plan"
 db_eligible_types = DATABASE_SP_ELIGIBLE_TYPES if is_azure else AWS_DATABASE_SP_TYPES
@@ -2160,12 +2167,12 @@ prices_df = get_commitment_prices(get_engine(selected_provider, "live" if is_liv
 # DERIVED SLICES & METRICS
 # ─────────────────────────────────────────────────────────────────────────────
 if not inv_raw.empty:
-    vm_inventory = inv_raw[inv_raw["Resource Type"] == "Compute"].copy()
+    vm_inventory = inv_raw[inv_raw["Resource Type"] == compute_type].copy()
     db_inventory = inv_raw[inv_raw["Resource Type"].isin(db_eligible_types)].copy()
     # Everything else (Storage, Redis, Synapse, Databricks, ...) - previously
     # silently invisible in the Inventory tab since it matched neither bucket above.
     other_inventory = inv_raw[
-        (inv_raw["Resource Type"] != "Compute") & ~inv_raw["Resource Type"].isin(db_eligible_types)
+        (inv_raw["Resource Type"] != compute_type) & ~inv_raw["Resource Type"].isin(db_eligible_types)
     ].copy()
     # Broader than vm_inventory: everything the Compute Savings Plan pool
     # actually covers per Azure policy (VMs, App Service, Functions Premium,

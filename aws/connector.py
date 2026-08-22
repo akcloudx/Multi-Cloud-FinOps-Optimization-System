@@ -686,7 +686,25 @@ def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
                         records.append({
                             "Resource ID":             instance_id,
                             "Resource Name":           tags.get("Name") or instance_id,
-                            "Resource Type":           "Compute",
+                            # Renamed from the generic "Compute" to "Amazon EC2"
+                            # 2026-08-23 - "Compute" was ALSO Azure's own
+                            # resource_type for VMs, and both providers'
+                            # resource_type strings share one flat namespace
+                            # everywhere downstream (analysis/ri_eligibility.py's
+                            # _RULES dict, app.py's Inventory tab filters,
+                            # pricing/aws_price_list.py's dispatch, etc.) -
+                            # EC2 was the one accidental collision (every
+                            # other AWS type already has a distinct "Amazon
+                            # .../AWS ..." name), silently routing EC2 rows
+                            # through Azure's VM-family eligibility regex
+                            # (harmless by coincidence - no EC2 SKU ever
+                            # matches the Azure Basic_/Standard_ pattern - but
+                            # confusing and fragile). See db/aws_seed.py,
+                            # analysis/ri_eligibility.py, app.py,
+                            # pricing/aws_price_list.py, pricing/
+                            # aws_commitment_mapping.py, and analysis/
+                            # focus_mapping.py for the matching updates.
+                            "Resource Type":           "Amazon EC2",
                             "Resource State":          _map_ec2_state(state),
                             "Region":                  region,
                             "OS":                      map_ec2_platform(inst.get("PlatformDetails", "")),

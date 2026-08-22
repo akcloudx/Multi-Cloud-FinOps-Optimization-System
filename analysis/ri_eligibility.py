@@ -273,6 +273,24 @@ _RULES = {
     # not just an unresearched gap. All are Savings-Plan-eligible instead
     # (Database SP for the first four, Compute SP for Fargate - see
     # db/aws_seed.py's AWS_DATABASE_SP_TYPES/AWS_COMPUTE_SP_TYPES).
+    # Renamed from the generic "Compute" 2026-08-23 - that string was ALSO
+    # Azure's own resource_type for VMs (both providers share one flat
+    # resource_type namespace throughout this app), so AWS EC2 rows were
+    # silently routed through _vm_eligibility() above - Azure's VM-family
+    # regex/exclusion-list logic. Harmless by coincidence (no EC2 SKU, e.g.
+    # "m5.large", ever matches the Azure "Basic_"/"Standard_" family prefix
+    # pattern, so it always fell through to the generic True branch with an
+    # Azure-flavored reason string - confirmed that reason text is never
+    # actually shown to a user, app.py only renders eligibility_reason for
+    # INeligible resources), but fragile and confusing, not a real EC2
+    # rule. This is EC2's own, dedicated rule: EC2 Standard/Convertible
+    # Reserved Instances are broadly available across current-generation
+    # instance families (unlike Azure's VM lineup, no confirmed family-wide
+    # RI exclusions are known for EC2 - not a claim this has had the same
+    # full-catalog audit Azure's _VM_FAMILIES_NO_RI got, just that no
+    # exclusion is known, matching the "default eligible" precedent already
+    # used elsewhere in this file for services without a researched gap).
+    "Amazon EC2":                     lambda sku: (True, "EC2 Standard/Convertible Reserved Instances are broadly available across current-generation instance families."),
     "Amazon DocumentDB":              lambda sku: (False, "Amazon DocumentDB has no Reserved Instance offering - confirmed via boto3's docdb service model (no DescribeReservedDBInstances-equivalent operation exists). Eligible for Database Savings Plans instead."),
     # Added 2026-08-23 alongside DocumentDB Serverless's new live fetch
     # (aws/connector.py) - genuinely can't have an RI even in principle

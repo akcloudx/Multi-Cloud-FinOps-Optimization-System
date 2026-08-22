@@ -657,7 +657,7 @@ def _fetch_from_api(resource_type: str, sku: str, region: str, os_: str, redunda
     if resource_type == "AWS DMS Serverless":
         return _fetch_dms_serverless_price(sku, region, redundancy, creds)
 
-    is_ec2 = (resource_type == "Compute")
+    is_ec2 = (resource_type == "Amazon EC2")   # renamed from "Compute" 2026-08-23 - see aws/connector.py's live-fetch comment.
     if is_ec2:
         service_code = "AmazonEC2"
     else:

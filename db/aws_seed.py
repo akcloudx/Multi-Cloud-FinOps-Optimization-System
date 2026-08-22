@@ -36,45 +36,45 @@ from db.schema import init_db, get_engine, CloudInventory, Commitment
 AWS_COMPUTE_INVENTORY = [
     # Prod EC2 — 24x7 → Reserved Instance or SP candidates
     {"resource_id": "i-0123456789abcdef0", "resource_name": "aws-prod-web-01",
-     "resource_type": "Compute", "resource_state": "Running",
+     "resource_type": "Amazon EC2", "resource_state": "Running",
      "region": "us-east-1", "os": "Linux", "sku": "m5.large",
      "payg_hourly_usd": 0.096, "avg_daily_running_hours": 24,
      "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
 
     {"resource_id": "i-0123456789abcdef1", "resource_name": "aws-prod-web-02",
-     "resource_type": "Compute", "resource_state": "Running",
+     "resource_type": "Amazon EC2", "resource_state": "Running",
      "region": "us-east-1", "os": "Linux", "sku": "m5.large",
      "payg_hourly_usd": 0.096, "avg_daily_running_hours": 24,
      "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
 
     {"resource_id": "i-0123456789abcdef2", "resource_name": "aws-prod-app-01",
-     "resource_type": "Compute", "resource_state": "Running",
+     "resource_type": "Amazon EC2", "resource_state": "Running",
      "region": "us-east-1", "os": "Linux", "sku": "c5.xlarge",
      "payg_hourly_usd": 0.170, "avg_daily_running_hours": 24,
      "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
 
     {"resource_id": "i-0123456789abcdef3", "resource_name": "aws-prod-app-02",
-     "resource_type": "Compute", "resource_state": "Running",
+     "resource_type": "Amazon EC2", "resource_state": "Running",
      "region": "us-east-1", "os": "Linux", "sku": "c5.xlarge",
      "payg_hourly_usd": 0.170, "avg_daily_running_hours": 24,
      "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
 
     # Dev EC2 — 10 hrs/day → Compute Savings Plan candidates
     {"resource_id": "i-0dev123456789abc0", "resource_name": "aws-dev-sandbox-01",
-     "resource_type": "Compute", "resource_state": "Running",
+     "resource_type": "Amazon EC2", "resource_state": "Running",
      "region": "us-east-1", "os": "Linux", "sku": "t3.medium",
      "payg_hourly_usd": 0.0416, "avg_daily_running_hours": 10,
      "subscription": "acc-aws-99887766", "provider": "AWS", "is_orphaned": False},
 
     {"resource_id": "i-0dev123456789abc1", "resource_name": "aws-dev-test-01",
-     "resource_type": "Compute", "resource_state": "Running",
+     "resource_type": "Amazon EC2", "resource_state": "Running",
      "region": "us-west-2", "os": "Linux", "sku": "t3.micro",
      "payg_hourly_usd": 0.0104, "avg_daily_running_hours": 10,
      "subscription": "acc-aws-99887766", "provider": "AWS", "is_orphaned": False},
 
     # Stopped EC2 — Orphaned (RI active but instance is stopped)
     {"resource_id": "i-0legacy123456789a", "resource_name": "aws-legacy-batch",
-     "resource_type": "Compute", "resource_state": "Stopped (deallocated)",
+     "resource_type": "Amazon EC2", "resource_state": "Stopped (deallocated)",
      "region": "us-east-1", "os": "Linux", "sku": "c5.xlarge",
      "payg_hourly_usd": 0.170, "avg_daily_running_hours": 0,
      "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": True},
@@ -462,7 +462,10 @@ AWS_COMMITMENTS = [
 
 # ── AWS Eligibility & Coverage Notes ──────────────────────────────────────────
 
-AWS_COMPUTE_SP_TYPES = {"Compute", "AWS Lambda", "AWS Fargate"}
+# "Amazon EC2" (renamed from the generic "Compute" 2026-08-23 - see
+# aws/connector.py's comment on the live-fetch resource_type for the full
+# reasoning: "Compute" collided with Azure's own VM resource_type string).
+AWS_COMPUTE_SP_TYPES = {"Amazon EC2", "AWS Lambda", "AWS Fargate"}
 # CORRECTED 2026-08-22: AWS genuinely DOES have a Database Savings Plan -
 # confirmed via AWS's own FAQ (https://aws.amazon.com/savingsplans/faqs/)
 # and, more authoritatively, the full AWS Savings Plans User Guide (PDF,
@@ -526,7 +529,11 @@ AWS_DATABASE_SP_TYPES = {
 AWS_SAGEMAKER_SP_TYPES = {"Amazon SageMaker Endpoint", "Amazon SageMaker Notebook Instance"}
 
 AWS_RI_COVERAGE_NOTES = {
-    "Compute":              ("EC2 On-Demand hourly compute rate (Standard: fixed family; Convertible: exchangeable family)", "EBS volumes, data transfer, OS licensing surcharges"),
+    # Renamed from "Compute" 2026-08-23 - see aws/connector.py's live-fetch
+    # comment for why (accidental collision with Azure's own "Compute" VM
+    # resource_type, since both providers' resource_type strings share one
+    # flat namespace throughout the app).
+    "Amazon EC2":           ("EC2 On-Demand hourly compute rate (Standard: fixed family; Convertible: exchangeable family)", "EBS volumes, data transfer, OS licensing surcharges"),
     "AWS RDS PostgreSQL":   ("RDS DB instance hourly compute capacity (Single-AZ or Multi-AZ)", "Storage (GB-month), provisioned IOPS, automated backups"),
     "AWS RDS MySQL":        ("RDS DB instance hourly compute capacity (size-flexible within family)", "Storage, IOPS, automated backup storage"),
     "Amazon Aurora":        ("Aurora DB cluster instance compute capacity", "Storage per GB-month, I/O rate charges"),

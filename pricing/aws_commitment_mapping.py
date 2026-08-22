@@ -83,7 +83,7 @@ def derive_aws_reservation_commitment_fields(purchase: dict) -> Optional[dict]:
         return None
 
     if service == "EC2":
-        scope_resource_type = "Compute"
+        scope_resource_type = "Amazon EC2"   # renamed from "Compute" 2026-08-23 - must match aws/connector.py's live-fetch resource_type exactly, or real EC2 RI purchases would silently stop matching their inventory demand.
         scope_os = map_ec2_platform(purchase.get("product_description") or "")
         scope_redundancy = "N/A"
     elif service == "RDS":

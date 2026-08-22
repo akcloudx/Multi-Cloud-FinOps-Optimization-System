@@ -42,6 +42,15 @@ FOCUS_SPEC_URL = "https://focus.finops.org/focus-specification/"
 # resource types actually land in are used below.
 _SERVICE_CATEGORY_MAP = {
     "Compute": "Compute",
+    # AWS's EC2 resource_type was renamed from the shared "Compute" string
+    # to "Amazon EC2" 2026-08-23 (see aws/connector.py) - without this
+    # entry, EC2 rows would fall through to this map's "Other" default
+    # (unlike this file's Azure types, no other AWS resource_type is
+    # mapped here at all yet - a pre-existing, separate gap, not something
+    # this rename introduces - but EC2 specifically was already correctly
+    # categorized by coincidence before the rename, so this entry keeps it
+    # that way rather than silently regressing it to "Other").
+    "Amazon EC2": "Compute",
     "App Service": "Web and Mobile",
     "Azure SQL Database": "Databases",
     "Azure SQL Managed Instance": "Databases",
