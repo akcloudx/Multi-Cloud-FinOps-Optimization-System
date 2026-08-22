@@ -60,8 +60,25 @@ def get_cost_distribution_chart(df: pd.DataFrame, provider: str = "Azure",
 
     line_color = "#0F172A" if is_dark else "#FFFFFF"
     fig.update_traces(
-        textposition="inside",
-        textinfo="percent+label",
+        # No in-slice text at all - AWS now has ~20 resource types after
+        # this session's additions (SageMaker/DocumentDB/Neptune/DMS
+        # Serverless, Neptune Analytics, ...), and that's too many for a
+        # donut ring at any text size. Tried "percent+label" then
+        # "percent"-only first (both still overlapped, reported by the
+        # user after resizing the window): Plotly's per-slice text fitting
+        # (and even uniformtext_mode="hide") only checks whether text fits
+        # WITHIN its own slice, not whether it collides with the adjacent
+        # slice's text - with ~20 thin slices packed around a thin ring,
+        # neighboring labels visually overlap regardless of font size, so
+        # there's no text-sizing fix that scales to this many categories.
+        # Full label + percent + value is still available on hover, and
+        # every category is already listed in the legend below - dropping
+        # in-slice text is the standard, category-count-proof fix for a
+        # many-category pie/donut (matches Plotly's own guidance to prefer
+        # hover/legend over in-slice text once you're much past ~8-10
+        # slices).
+        textposition="none",
+        hovertemplate="<b>%{label}</b><br>%{percent}<br>$%{value:,.2f}/mo<extra></extra>",
         marker=dict(line=dict(color=line_color, width=1.5)),
     )
 
