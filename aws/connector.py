@@ -791,17 +791,44 @@ def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
 
         try:
             neptune = session.client("neptune", region_name=region)
+
+            # Neptune Serverless - added 2026-08-23, same shape/reasoning as
+            # DocumentDB Serverless above: bills per-NCU-hour (a continuously
+            # auto-scaling capacity metric, not a fixed instance class),
+            # confirmed real Database-Savings-Plan-eligible. The real live
+            # NCU usage is only a CloudWatch time-series metric, but
+            # describe_db_clusters()'s real ServerlessV2ScalingConfiguration.
+            # MinCapacity field (confirmed via botocore's own installed
+            # neptune service model - identical shape to DocumentDB's) is a
+            # static, describable floor, used as the steady-state baseline
+            # for the same reason: AWS's own Database Savings Plans guidance
+            # recommends committing against the minimum sustained spend.
+            serverless_min_capacity = {}
+            try:
+                for page in neptune.get_paginator("describe_db_clusters").paginate():
+                    for cluster in page.get("DBClusters", []):
+                        scaling = cluster.get("ServerlessV2ScalingConfiguration")
+                        if scaling and scaling.get("MinCapacity") is not None:
+                            serverless_min_capacity[cluster.get("DBClusterIdentifier", "")] = scaling["MinCapacity"]
+            except (ClientError, BotoCoreError):
+                pass   # if this fails, every instance below just falls through to the regular provisioned path - never silently mis-tag a resource as Serverless without confirming it.
+
             paginator = neptune.get_paginator("describe_db_instances")
             for page in paginator.paginate():
                 for db in page.get("DBInstances", []):
+                    min_capacity = serverless_min_capacity.get(db.get("DBClusterIdentifier", ""))
+                    is_serverless = min_capacity is not None
                     records.append({
                         "Resource ID":             db.get("DBInstanceArn") or db.get("DBInstanceIdentifier", ""),
                         "Resource Name":           db.get("DBInstanceIdentifier", ""),
-                        "Resource Type":           "Amazon Neptune",
+                        "Resource Type":           "Amazon Neptune Serverless" if is_serverless else "Amazon Neptune",
                         "Resource State":          _map_rds_state(db.get("DBInstanceStatus", "")),
                         "Region":                  region,
                         "OS":                      "N/A",
-                        "SKU":                     db.get("DBInstanceClass", "N/A"),
+                        # Synthetic "{NCU}NCU-min" SKU, same convention as
+                        # DocumentDB Serverless's "{DCU}DCU-min" - no real
+                        # AWS instance-class SKU exists for Serverless.
+                        "SKU":                     f"{min_capacity:g}NCU-min" if is_serverless else db.get("DBInstanceClass", "N/A"),
                         "Redundancy":              "N/A",   # Confirmed via real Neptune price list data: every Database Instance entry carries the same single "Multi-AZ" deploymentOption value regardless of actual replica topology - not a real Single-AZ/Multi-AZ price split the way RDS has, so not modeled as one here either.
                         "HA Replicas":             0,
                         "PAYG Hourly Cost USD":    0.0,

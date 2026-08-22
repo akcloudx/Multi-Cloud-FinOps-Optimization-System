@@ -151,6 +151,23 @@ AWS_DATABASE_INVENTORY = [
      "payg_hourly_usd": 0.348, "avg_daily_running_hours": 24,
      "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
 
+    # Amazon Neptune Serverless - a genuinely different resource type from
+    # provisioned Neptune above (billed per-NCU-hour, not by a named
+    # instance class). Added 2026-08-23 alongside its new live fetch
+    # (aws/connector.py) - same reasoning as DocumentDB Serverless: real
+    # rate is MinCapacity (2 NCU here) x the real $0.1608/NCU-hr Standard
+    # On-Demand rate, confirmed against real downloaded AmazonNeptune price
+    # list data (productFamily "Serverless"). No Reserved Instance concept
+    # exists (same as provisioned Neptune), Database-SP-eligible only -
+    # confirmed real via AWS's Database Savings Plans announcement, which
+    # explicitly calls out Neptune Serverless coverage.
+    {"resource_id": "neptune-serverless-prod-graph-01", "resource_name": "prod-recommendations-neptune-serverless",
+     "resource_type": "Amazon Neptune Serverless",
+     "resource_state": "Running",
+     "region": "us-east-1", "os": "N/A", "sku": "2NCU-min",
+     "payg_hourly_usd": 0.3216, "avg_daily_running_hours": 24,
+     "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
+
     # AWS DMS Replication Instance — dms.t3.medium. Unlike DocumentDB/Neptune,
     # DMS genuinely has its own Single-AZ/Multi-AZ price split (confirmed
     # via real AWSDatabaseMigrationSvc price list data) and its own
@@ -460,6 +477,7 @@ AWS_DATABASE_SP_TYPES = {
     "Amazon RDS for Oracle", "Amazon RDS for SQL Server", "Amazon Aurora (MySQL)", "Amazon Aurora (PostgreSQL)",
     "Amazon DocumentDB", "Amazon Neptune", "AWS DMS Replication Instance", "Amazon Keyspaces",
     "Amazon DocumentDB Serverless",   # added 2026-08-23 - confirmed real via AWS's Database Savings Plans announcement, which explicitly calls out Serverless coverage alongside provisioned.
+    "Amazon Neptune Serverless",      # added 2026-08-23 - same confirmation, AWS's Database Savings Plans announcement explicitly calls out Neptune Serverless coverage.
 }
 
 # SageMaker AI Savings Plans - a genuinely separate, first-class Savings Plan
@@ -513,6 +531,8 @@ AWS_RI_COVERAGE_NOTES = {
     # Savings Plans guidance recommends. NOT RI-eligible - no Reserved
     # Instance product exists for DocumentDB (Serverless or provisioned).
     "Amazon DocumentDB Serverless": ("DCU-hour capacity floor (MinCapacity, see mapping notes - not live variable usage)", "Storage per GB-month, I/O charges (Standard config), real-time DCU usage above the MinCapacity floor stays on-demand"),
+    # Added 2026-08-23, same reasoning/caveat as DocumentDB Serverless above.
+    "Amazon Neptune Serverless":    ("NCU-hour capacity floor (MinCapacity, see mapping notes - not live variable usage)", "Storage per GB-month, I/O charges (Standard config), real-time NCU usage above the MinCapacity floor stays on-demand"),
     # Added 2026-08-23. No Reserved Instance concept exists for SageMaker at
     # all (confirmed: no equivalent of DescribeReservedInstances anywhere in
     # the sagemaker boto3 service model) - SageMaker-SP-eligible only, never
