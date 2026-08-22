@@ -389,6 +389,60 @@ def _fetch_fargate_price(sku: str, region: str, os_: str, creds) -> Optional[flo
     return vcpu * vcpu_rate + memory_gb * gb_rate
 
 
+# resource_type -> the real "component" attribute value AWS's own
+# AmazonSageMaker price list data uses, confirmed 2026-08-23 against a real
+# downloaded price list file (not guessed). All SageMaker instance-hour
+# billing shares one flat productFamily ("ML Instance" - Notebook, Studio,
+# Training, Hosting, Processing, etc. all live under it, so unlike
+# DocDB/Neptune's productFamily filter, that alone isn't a disambiguator
+# here). The real instanceType attribute value also carries a matching
+# "-<Component>" suffix (e.g. "ml.m5.xlarge-Hosting") for most components,
+# but that suffix alone isn't reliably unique either - confirmed a real
+# case where "ml.t3.medium-Notebook" is shared by BOTH the classic Notebook
+# component AND the separate Studio-Notebook (JupyterLab kernel gateway)
+# component in the same region, each its own distinct SKU/price. The
+# explicit "component" TERM_MATCH filter below is what actually
+# disambiguates, not the instanceType suffix.
+_SAGEMAKER_RESOURCE_TYPE_TO_COMPONENT = {
+    "Amazon SageMaker Endpoint":          "Hosting",
+    "Amazon SageMaker Notebook Instance": "Notebook",
+}
+
+
+def _fetch_sagemaker_price(resource_type: str, sku: str, region: str, creds) -> Optional[float]:
+    """SageMaker Endpoint / Notebook Instance - real On-Demand hourly rate.
+    sku is the plain instance type (e.g. "ml.m5.xlarge") as returned by
+    aws/connector.py's live fetch; the "-Hosting"/"-Notebook" suffix AWS's
+    price list data appends to its own instanceType attribute is added here,
+    not carried in the stored SKU, so the SKU stays display-friendly and
+    matches what boto3's DescribeEndpointConfig/ListNotebookInstances
+    actually return."""
+    component = _SAGEMAKER_RESOURCE_TYPE_TO_COMPONENT.get(resource_type)
+    if component is None:
+        return None
+
+    try:
+        session = boto3.Session(aws_access_key_id=creds.access_key_id, aws_secret_access_key=creds.secret_access_key)
+        client = session.client("pricing", region_name=_PRICING_API_REGION)
+        filters = [
+            {"Type": "TERM_MATCH", "Field": "regionCode", "Value": region},
+            {"Type": "TERM_MATCH", "Field": "instanceType", "Value": f"{sku}-{component}"},
+            {"Type": "TERM_MATCH", "Field": "component", "Value": component},
+        ]
+        price_list = _get_products(client, "AmazonSageMaker", filters)
+    except Exception:
+        return None
+    if not price_list:
+        return None
+
+    candidates = []
+    for item in price_list:
+        prices = _extract_ondemand_prices(item)
+        if prices:
+            candidates.append(prices[0][0])
+    return min(candidates) if candidates else None
+
+
 def _extract_ondemand_prices(price_list_item: dict) -> list:
     """Returns every (price_usd, attributes) pair found under this product's
     terms.OnDemand section - deliberately NOT terms.Reserved, which lives
@@ -431,6 +485,8 @@ def _fetch_from_api(resource_type: str, sku: str, region: str, os_: str, redunda
         return _fetch_elasticache_price(resource_type, sku, region, creds)
     if resource_type == "Amazon MemoryDB":
         return _fetch_memorydb_price(sku, region, creds)
+    if resource_type in _SAGEMAKER_RESOURCE_TYPE_TO_COMPONENT:
+        return _fetch_sagemaker_price(resource_type, sku, region, creds)
 
     is_ec2 = (resource_type == "Compute")
     if is_ec2:

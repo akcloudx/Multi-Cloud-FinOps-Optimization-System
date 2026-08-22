@@ -90,7 +90,7 @@ is_dark_theme = (_theme_type == "dark")
 # Initialize Databases (Cached for instant reloads)
 from db.schema import init_db, get_engine
 from db.seed import seed_if_empty, COMPUTE_SP_ELIGIBLE_TYPES, DATABASE_SP_ELIGIBLE_TYPES
-from db.aws_seed import seed_aws_if_empty, AWS_COMPUTE_SP_TYPES, AWS_DATABASE_SP_TYPES
+from db.aws_seed import seed_aws_if_empty, AWS_COMPUTE_SP_TYPES, AWS_DATABASE_SP_TYPES, AWS_SAGEMAKER_SP_TYPES
 
 @st.cache_resource
 def init_all_databases():
@@ -134,6 +134,7 @@ from commitments.existing_commitments import (
     get_existing_reservations,
     get_compute_savings_plans,
     get_database_savings_plans,
+    get_sagemaker_savings_plans,
 )
 from analysis.engine import (
     run_waterfall,
@@ -1392,7 +1393,7 @@ def _render_savings_plan_tab():
                 {
                     "Savings Plan Type": "SageMaker AI Savings Plans (1-yr / 3-yr)",
                     "What Is Covered": "Amazon SageMaker AI instance usage regardless of instance family, size, Region, or component (Notebook, Training, Inference, etc.) - up to 64% discount",
-                    "What Is NOT Covered": "EC2/Fargate/Lambda/database compute. Not tracked as a Pool below - this app has no SageMaker inventory model yet, so there's no baseline to recommend against; purchased plans are recorded but not shown here as a coverage pool."
+                    "What Is NOT Covered": "EC2/Fargate/Lambda/database compute. Baseline below (Pool C) only covers Real-Time Inference Endpoints and Notebook Instances - Training/Processing/Data Wrangler/Batch Transform are one-shot ephemeral jobs with no persistent running/stopped identity, so they aren't modeled as inventory at all (same reasoning already applied to Lambda invocations)."
                 }
             ]
         st.dataframe(pd.DataFrame(sp_coverage_rows), hide_index=True, width="stretch")
@@ -1487,6 +1488,37 @@ def _render_savings_plan_tab():
         sp_d = db_sp_df[["commitment_id", "scope_sku", "scope_region", "hourly_usd_commitment", "term", "expiry_date"]].copy()
         sp_d["hourly_usd_commitment"] = sp_d["hourly_usd_commitment"].apply(lambda x: fmt(x, 4) + "/hr")
         st.dataframe(_with_mapping_caveat(db_sp_df, sp_d), hide_index=True, width="stretch")
+
+    # AWS-only - SageMaker Savings Plans have no Azure equivalent product.
+    if not is_azure:
+        st.divider()
+
+        st.markdown("### C — SageMaker AI Savings Plan Pool")
+        st.caption(
+            "Covers Real-Time Inference Endpoints and Notebook Instances only - Training, Processing, "
+            "Data Wrangler, and Batch Transform jobs are one-shot ephemeral executions with no persistent "
+            "running/stopped identity, so this app has no inventory row to baseline them against."
+        )
+
+        _render_sp_pool_economics("SageMaker AI", sagemaker_24x7, sagemaker_sp_commit, "sp_sagemaker", safety_buffer)
+
+        if is_live_mode and is_live_configured:
+            if sagemaker_sp_pool_inventory.empty:
+                st.info(
+                    "ℹ️ No SageMaker Endpoint/Notebook Instance resources found in this tenant - "
+                    "nothing to baseline yet.", icon="ℹ️",
+                )
+            elif sagemaker_24x7_candidates.empty:
+                st.info(
+                    f"ℹ️ {len(sagemaker_sp_pool_inventory)} SageMaker resource(s) found, but none are "
+                    "both **Running** and **24x7** (Avg Daily Running Hours = 24) - Savings Plans are only "
+                    "recommended against a steady-state 24x7 baseline to avoid over-committing.", icon="ℹ️",
+                )
+
+        if not sagemaker_sp_df.empty:
+            sp_sm = sagemaker_sp_df[["commitment_id", "scope_sku", "scope_region", "hourly_usd_commitment", "term", "expiry_date"]].copy()
+            sp_sm["hourly_usd_commitment"] = sp_sm["hourly_usd_commitment"].apply(lambda x: fmt(x, 4) + "/hr")
+            st.dataframe(_with_mapping_caveat(sagemaker_sp_df, sp_sm), hide_index=True, width="stretch")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2011,6 +2043,10 @@ db_label = "Database Services" if is_azure else "RDS Databases"
 db_sp_title = "Savings Plan for Databases" if is_azure else "Database Savings Plan"
 db_eligible_types = DATABASE_SP_ELIGIBLE_TYPES if is_azure else AWS_DATABASE_SP_TYPES
 compute_sp_eligible_types = COMPUTE_SP_ELIGIBLE_TYPES if is_azure else AWS_COMPUTE_SP_TYPES
+# SageMaker Savings Plans are an AWS-only product - no Azure equivalent, so
+# this stays an empty set for Azure (matching how the rest of this section
+# already keys everything off is_azure rather than a provider-name check).
+sagemaker_sp_eligible_types = set() if is_azure else AWS_SAGEMAKER_SP_TYPES
 
 # Analysis Window now lives inside the Cost Analysis tab (as a widget keyed
 # "analysis_window_widget") - read its persisted value here, before that
@@ -2036,16 +2072,17 @@ is_live_mode = (env_mode == "Live Cloud API")
 
 @st.cache_data(show_spinner=False)
 def load_benchmark_data(days: int, buffer: float, provider: str, sp_eligible_types: tuple):
-    inv_raw       = get_compute_inventory(provider=provider, mode="demo")
-    sp_df         = get_existing_savings_plans(provider=provider, mode="demo")
-    compute_sp_df = get_compute_savings_plans(provider=provider, mode="demo")
-    db_sp_df      = get_database_savings_plans(provider=provider, mode="demo")
-    ri_df         = get_existing_reservations(provider=provider, mode="demo")
+    inv_raw          = get_compute_inventory(provider=provider, mode="demo")
+    sp_df            = get_existing_savings_plans(provider=provider, mode="demo")
+    compute_sp_df    = get_compute_savings_plans(provider=provider, mode="demo")
+    db_sp_df         = get_database_savings_plans(provider=provider, mode="demo")
+    sagemaker_sp_df  = get_sagemaker_savings_plans(provider=provider, mode="demo")
+    ri_df            = get_existing_reservations(provider=provider, mode="demo")
     wf            = run_waterfall(inv_raw, ri_df, sp_df, simulate_days=days)
     sp_res        = savings_plan_analysis(inv_raw, sp_df, safety_buffer=buffer, eligible_types=list(sp_eligible_types))
     ri_res        = reservation_analysis(inv_raw, ri_df)
     recs          = generate_recommendations(sp_res, ri_res, wf, safety_buffer=buffer)
-    return inv_raw, sp_df, compute_sp_df, db_sp_df, ri_df, sp_res, ri_res, recs
+    return inv_raw, sp_df, compute_sp_df, db_sp_df, sagemaker_sp_df, ri_df, sp_res, ri_res, recs
 
 @st.cache_data(show_spinner=False)
 def load_live_data(provider: str, tenant_id: int, days: int, buffer: float, sp_eligible_types: tuple):
@@ -2053,16 +2090,17 @@ def load_live_data(provider: str, tenant_id: int, days: int, buffer: float, sp_e
     live-ingested rows (tenant_id FK) from SQL DB - never demo/seed rows, and
     never another tenant's rows. The app never calls cloud APIs directly here;
     everything was already fetched and cached in SQL DB by the ingestion pipeline."""
-    inv_raw       = get_compute_inventory(provider=provider, mode="live", tenant_id=tenant_id)
-    sp_df         = get_existing_savings_plans(provider=provider, mode="live", tenant_id=tenant_id)
-    compute_sp_df = get_compute_savings_plans(provider=provider, mode="live", tenant_id=tenant_id)
-    db_sp_df      = get_database_savings_plans(provider=provider, mode="live", tenant_id=tenant_id)
-    ri_df         = get_existing_reservations(provider=provider, mode="live", tenant_id=tenant_id)
+    inv_raw          = get_compute_inventory(provider=provider, mode="live", tenant_id=tenant_id)
+    sp_df            = get_existing_savings_plans(provider=provider, mode="live", tenant_id=tenant_id)
+    compute_sp_df    = get_compute_savings_plans(provider=provider, mode="live", tenant_id=tenant_id)
+    db_sp_df         = get_database_savings_plans(provider=provider, mode="live", tenant_id=tenant_id)
+    sagemaker_sp_df  = get_sagemaker_savings_plans(provider=provider, mode="live", tenant_id=tenant_id)
+    ri_df            = get_existing_reservations(provider=provider, mode="live", tenant_id=tenant_id)
     wf            = run_waterfall(inv_raw, ri_df, sp_df, simulate_days=days)
     sp_res        = savings_plan_analysis(inv_raw, sp_df, safety_buffer=buffer, eligible_types=list(sp_eligible_types))
     ri_res        = reservation_analysis(inv_raw, ri_df)
     recs          = generate_recommendations(sp_res, ri_res, wf, safety_buffer=buffer)
-    return inv_raw, sp_df, compute_sp_df, db_sp_df, ri_df, sp_res, ri_res, recs
+    return inv_raw, sp_df, compute_sp_df, db_sp_df, sagemaker_sp_df, ri_df, sp_res, ri_res, recs
 
 if is_live_mode and not is_live_configured:
     # Strict Live Mode with NO Connection: return empty data state
@@ -2071,6 +2109,7 @@ if is_live_mode and not is_live_configured:
     sp_df = pd.DataFrame(columns=["commitment_id", "commitment_type", "scope_sku", "scope_region", "scope_os", "hourly_usd_commitment", "reserved_qty", "term", "expiry_date", "provider"])
     compute_sp_df = sp_df.copy()
     db_sp_df = sp_df.copy()
+    sagemaker_sp_df = sp_df.copy()
     ri_df = sp_df.copy()
     from analysis.engine import SPAnalysisResult, RIAnalysisResult, WaterfallResult
     sp_result = SPAnalysisResult(0.0, 0.0, 0.0, 0.0, 0.0, safety_buffer, [])
@@ -2083,9 +2122,9 @@ if is_live_mode and not is_live_configured:
         "financial_impact_hr": 0.0, "items": [],
     }]
 elif is_live_mode and is_live_configured:
-    inv_raw, sp_df, compute_sp_df, db_sp_df, ri_df, sp_result, ri_result, recs = load_live_data(
+    inv_raw, sp_df, compute_sp_df, db_sp_df, sagemaker_sp_df, ri_df, sp_result, ri_result, recs = load_live_data(
         selected_provider, active_tenant.id, simulate_days, safety_buffer,
-        tuple(compute_sp_eligible_types | db_eligible_types),
+        tuple(compute_sp_eligible_types | db_eligible_types | sagemaker_sp_eligible_types),
     )
     if inv_raw.empty:
         recs = [{
@@ -2096,9 +2135,9 @@ elif is_live_mode and is_live_configured:
             "financial_impact_hr": 0.0, "items": [],
         }]
 else:
-    inv_raw, sp_df, compute_sp_df, db_sp_df, ri_df, sp_result, ri_result, recs = load_benchmark_data(
+    inv_raw, sp_df, compute_sp_df, db_sp_df, sagemaker_sp_df, ri_df, sp_result, ri_result, recs = load_benchmark_data(
         simulate_days, safety_buffer, selected_provider,
-        tuple(compute_sp_eligible_types | db_eligible_types),
+        tuple(compute_sp_eligible_types | db_eligible_types | sagemaker_sp_eligible_types),
     )
 
 # Real Savings Plan / Reserved Instance commitment pricing cache (Phase A) -
@@ -2121,11 +2160,15 @@ if not inv_raw.empty:
     # actually covers per Azure policy (VMs, App Service, Functions Premium,
     # Container Instances, Dedicated Host, ...), not just literal VMs.
     compute_sp_pool_inventory = inv_raw[inv_raw["Resource Type"].isin(compute_sp_eligible_types)].copy()
+    # SageMaker Endpoints/Notebook Instances - AWS-only, a genuinely separate
+    # SP pool from Compute above (see sagemaker_sp_eligible_types).
+    sagemaker_sp_pool_inventory = inv_raw[inv_raw["Resource Type"].isin(sagemaker_sp_eligible_types)].copy()
 else:
     vm_inventory = pd.DataFrame(columns=["Resource ID", "Resource Name", "Resource Type", "Resource State", "Region", "OS", "SKU", "PAYG Hourly Cost USD", "Avg Daily Running Hours", "Subscription", "Provider", "Is Orphaned"])
     db_inventory = vm_inventory.copy()
     other_inventory = vm_inventory.copy()
     compute_sp_pool_inventory = vm_inventory.copy()
+    sagemaker_sp_pool_inventory = vm_inventory.copy()
 
 running_vms      = vm_inventory[vm_inventory["Resource State"] == "Running"] if not vm_inventory.empty else pd.DataFrame()
 running_dbs      = db_inventory[db_inventory["Resource State"] == "Running"] if not db_inventory.empty else pd.DataFrame()
@@ -2133,9 +2176,10 @@ running_dbs      = db_inventory[db_inventory["Resource State"] == "Running"] if 
 total_vm_payg_hr = float(running_vms["PAYG Hourly Cost USD"].sum()) if not running_vms.empty else 0.0
 total_db_payg_hr = float(running_dbs["PAYG Hourly Cost USD"].sum()) if not running_dbs.empty else 0.0
 
-compute_sp_commit = float(compute_sp_df["hourly_usd_commitment"].sum()) if not compute_sp_df.empty else 0.0
-db_sp_commit      = float(db_sp_df["hourly_usd_commitment"].sum())      if not db_sp_df.empty else 0.0
-total_sp_commit   = compute_sp_commit + db_sp_commit
+compute_sp_commit   = float(compute_sp_df["hourly_usd_commitment"].sum())   if not compute_sp_df.empty else 0.0
+db_sp_commit        = float(db_sp_df["hourly_usd_commitment"].sum())        if not db_sp_df.empty else 0.0
+sagemaker_sp_commit = float(sagemaker_sp_df["hourly_usd_commitment"].sum()) if not sagemaker_sp_df.empty else 0.0
+total_sp_commit   = compute_sp_commit + db_sp_commit + sagemaker_sp_commit
 total_ri_commit   = float((ri_df["hourly_usd_commitment"] * ri_df["reserved_qty"]).sum()) if not ri_df.empty else 0.0
 orphaned_count    = int(inv_raw["Is Orphaned"].sum()) if not inv_raw.empty else 0
 high_recs         = sum(1 for r in recs if r["severity"] == "HIGH")
@@ -2150,6 +2194,11 @@ compute_24x7_candidates = compute_sp_pool_inventory[
 compute_24x7, compute_sp_excluded = _split_sp_eligible(compute_24x7_candidates, is_azure)
 db_running_candidates = db_inventory[db_inventory["Resource State"] == "Running"]
 db_running, db_sp_excluded = _split_sp_eligible(db_running_candidates, is_azure)
+sagemaker_24x7_candidates = sagemaker_sp_pool_inventory[
+    (sagemaker_sp_pool_inventory["Resource State"] == "Running") &
+    (sagemaker_sp_pool_inventory["Avg Daily Running Hours"] == 24)
+]
+sagemaker_24x7, sagemaker_sp_excluded = _split_sp_eligible(sagemaker_24x7_candidates, is_azure)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # RUN THE SELECTED PAGE

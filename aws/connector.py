@@ -174,6 +174,20 @@ REQUIRED_AWS_POLICIES = [
         "Required":        "Yes — For OpenSearch inventory + RI data",
         "Purpose":         "Scan OpenSearch domains and read active Reserved Instances you own (real IAM action is es:Describe* despite the newer 'opensearch' boto3 client name)",
     },
+    # Added 2026-08-23 alongside SageMaker Endpoint/Notebook Instance
+    # inventory - confirmed real (arn:aws:iam::aws:policy/AmazonSageMakerReadOnly),
+    # its sagemaker:Describe*/List* wildcard already covers ListEndpoints/
+    # DescribeEndpoint/DescribeEndpointConfig/ListNotebookInstances, no
+    # separate policy needed for each call. Savings Plan data itself needs
+    # no new permission - the existing savingsplans:DescribeSavingsPlans
+    # entry above already returns SageMaker-type plans too (one API, filtered
+    # by the savingsPlanType field, not a separate call per type).
+    {
+        "Policy / Action": "sagemaker:ListEndpoints / sagemaker:DescribeEndpoint / sagemaker:DescribeEndpointConfig / sagemaker:ListNotebookInstances",
+        "AWS Managed Policy": "AmazonSageMakerReadOnly",
+        "Required":        "Yes — For SageMaker inventory",
+        "Purpose":         "Scan Real-Time Inference Endpoints and Notebook Instances for SageMaker Savings Plan coverage - Training/Processing/Batch Transform jobs are not scanned (ephemeral, no persistent resource identity to track)",
+    },
 ]
 
 # Fast lookup for the checklist renderer (app.py) - keeps the exact same
@@ -389,6 +403,10 @@ def check_aws_permissions(creds: AWSCredentials) -> dict:
     _probe(
         "es:DescribeDomains / es:DescribeReservedInstances",
         lambda: session.client("opensearch").list_domain_names(),
+    )
+    _probe(
+        "sagemaker:ListEndpoints / sagemaker:DescribeEndpoint / sagemaker:DescribeEndpointConfig / sagemaker:ListNotebookInstances",
+        lambda: session.client("sagemaker").list_endpoints(MaxResults=20),
     )
 
     for action in ["ce:GetCostAndUsage"]:
@@ -1082,6 +1100,88 @@ def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
                                 "Provider":                "AWS",
                                 "Is Orphaned":             False,
                             })
+        except (ClientError, BotoCoreError):
+            pass
+
+        # Amazon SageMaker - Real-Time Inference Endpoints + Notebook
+        # Instances. Added 2026-08-23 after confirming feasibility: unlike
+        # classic Lambda (no running-resource state) or Lambda Managed
+        # Instances (RI/SP-eligible but AWS exposes no per-instance
+        # visibility, only pool-level CloudWatch aggregates), these two
+        # SageMaker resource types are real, listable, persistent resources
+        # with an instance type and running/stopped state, the same shape
+        # every other tracked service in this app has. Training/Processing/
+        # Data Wrangler/Batch Transform jobs are deliberately NOT fetched -
+        # they're one-shot ephemeral executions with no persistent identity,
+        # not a "resource" this app's inventory model can represent at all
+        # (same category as Lambda invocations or Glue jobs). Real IAM:
+        # AmazonSageMakerReadOnly (sagemaker:Describe*/List* wildcard,
+        # confirmed via the policy's own JSON) - see REQUIRED_AWS_POLICIES.
+        try:
+            sm = session.client("sagemaker", region_name=region)
+
+            # Real-Time Inference Endpoints. DescribeEndpoint itself doesn't
+            # carry instance type (that lives on the EndpointConfig it
+            # references, confirmed via CreateEndpointConfig's own
+            # ProductionVariants[].InstanceType parameter) - one extra
+            # DescribeEndpointConfig call per endpoint is needed to get the
+            # real SKU, same "list then describe for detail" shape RDS/EC2
+            # already use elsewhere in this function.
+            for page in sm.get_paginator("list_endpoints").paginate():
+                for ep_summary in page.get("Endpoints", []):
+                    ep_name = ep_summary.get("EndpointName", "")
+                    try:
+                        ep = sm.describe_endpoint(EndpointName=ep_name)
+                        config = sm.describe_endpoint_config(EndpointConfigName=ep.get("EndpointConfigName", ep_name))
+                        status = ep.get("EndpointStatus", "")
+                        for variant in config.get("ProductionVariants", []):
+                            instance_type = variant.get("InstanceType")
+                            if not instance_type:
+                                continue   # serverless/managed-instance variants carry no fixed instance type - out of scope, same reasoning as Lambda Managed Instances.
+                            instance_count = variant.get("InitialInstanceCount") or 1
+                            variant_name = variant.get("VariantName", "")
+                            for node_idx in range(instance_count):
+                                records.append({
+                                    "Resource ID":             f"{ep.get('EndpointArn') or ep_name}#{variant_name}#{node_idx}",
+                                    "Resource Name":           f"{ep_name}-{variant_name}" if instance_count == 1 else f"{ep_name}-{variant_name}-{node_idx}",
+                                    "Resource Type":           "Amazon SageMaker Endpoint",
+                                    "Resource State":          "Running" if status == "InService" else "Stopped (deallocated)",
+                                    "Region":                  region,
+                                    "OS":                      "N/A",
+                                    "SKU":                     instance_type,
+                                    "Redundancy":              "N/A",
+                                    "HA Replicas":             0,
+                                    "PAYG Hourly Cost USD":    0.0,
+                                    "Avg Daily Running Hours": 24,
+                                    "Subscription":            account_id,
+                                    "Provider":                "AWS",
+                                    "Is Orphaned":             False,
+                                })
+                    except (ClientError, BotoCoreError):
+                        pass   # one endpoint failing to describe shouldn't drop every other endpoint in the region.
+
+            # Notebook Instances - InstanceType is returned directly on the
+            # list response itself (NotebookInstanceSummary), no separate
+            # describe call needed, unlike Endpoints above.
+            for page in sm.get_paginator("list_notebook_instances").paginate():
+                for nb in page.get("NotebookInstances", []):
+                    nb_name = nb.get("NotebookInstanceName", "")
+                    records.append({
+                        "Resource ID":             nb.get("NotebookInstanceArn") or nb_name,
+                        "Resource Name":           nb_name,
+                        "Resource Type":           "Amazon SageMaker Notebook Instance",
+                        "Resource State":          "Running" if nb.get("NotebookInstanceStatus") == "InService" else "Stopped (deallocated)",
+                        "Region":                  region,
+                        "OS":                      "N/A",
+                        "SKU":                     nb.get("InstanceType", "N/A"),
+                        "Redundancy":              "N/A",
+                        "HA Replicas":             0,
+                        "PAYG Hourly Cost USD":    0.0,
+                        "Avg Daily Running Hours": 24,
+                        "Subscription":            account_id,
+                        "Provider":                "AWS",
+                        "Is Orphaned":             False,
+                    })
         except (ClientError, BotoCoreError):
             pass
 

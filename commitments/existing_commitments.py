@@ -36,6 +36,15 @@ _DATABASE_SP_TYPE = "Savings Plan for Databases"
 # covered databases at any point) and now correctly bucket as Compute.
 _AWS_COMPUTE_SP_TYPES  = ["Compute Savings Plan", "EC2 Instance Savings Plan"]
 _AWS_DATABASE_SP_TYPES = ["Database Savings Plan"]
+# SageMaker Savings Plans - a genuinely separate, first-class AWS SP type
+# (boto3 savingsplans client's savingsPlanType enum: 'Compute'|'EC2Instance'|
+# 'SageMaker'|'Database'), added 2026-08-23. AWS-only - Azure has no
+# equivalent product, so there is no corresponding Azure bucket here.
+_AWS_SAGEMAKER_SP_TYPES = ["SageMaker Savings Plan"]
+
+
+def _sp_type_list() -> list:
+    return [_COMPUTE_SP_TYPE, _DATABASE_SP_TYPE] + _AWS_COMPUTE_SP_TYPES + _AWS_DATABASE_SP_TYPES + _AWS_SAGEMAKER_SP_TYPES
 
 
 def get_all_commitments(provider: str = "Azure", mode: str = "demo", tenant_id=None) -> pd.DataFrame:
@@ -81,8 +90,7 @@ def get_all_commitments(provider: str = "Azure", mode: str = "demo", tenant_id=N
 def get_existing_savings_plans(provider: str = "Azure", mode: str = "demo", tenant_id=None) -> pd.DataFrame:
     """Returns ALL Savings Plan commitments."""
     df = get_all_commitments(provider, mode, tenant_id)
-    sp_types = [_COMPUTE_SP_TYPE, _DATABASE_SP_TYPE] + _AWS_COMPUTE_SP_TYPES + _AWS_DATABASE_SP_TYPES
-    mask = df["commitment_type"].isin(sp_types)
+    mask = df["commitment_type"].isin(_sp_type_list())
     return df[mask].reset_index(drop=True)
 
 
@@ -97,6 +105,13 @@ def get_database_savings_plans(provider: str = "Azure", mode: str = "demo", tena
     """Returns Database Savings Plan commitments."""
     df = get_all_commitments(provider, mode, tenant_id)
     mask = df["commitment_type"].isin([_DATABASE_SP_TYPE] + _AWS_DATABASE_SP_TYPES)
+    return df[mask].reset_index(drop=True)
+
+
+def get_sagemaker_savings_plans(provider: str = "Azure", mode: str = "demo", tenant_id=None) -> pd.DataFrame:
+    """Returns SageMaker Savings Plan commitments. AWS-only - always empty for Azure."""
+    df = get_all_commitments(provider, mode, tenant_id)
+    mask = df["commitment_type"].isin(_AWS_SAGEMAKER_SP_TYPES)
     return df[mask].reset_index(drop=True)
 
 
@@ -119,7 +134,15 @@ def get_total_database_sp_hr(provider: str = "Azure", mode: str = "demo", tenant
     return float(df["hourly_usd_commitment"].sum()) if not df.empty else 0.0
 
 
+def get_total_sagemaker_sp_hr(provider: str = "Azure", mode: str = "demo", tenant_id=None) -> float:
+    """Total SageMaker Savings Plan $/hr pool. AWS-only - always 0.0 for Azure."""
+    df = get_sagemaker_savings_plans(provider, mode, tenant_id)
+    return float(df["hourly_usd_commitment"].sum()) if not df.empty else 0.0
+
+
 def get_total_sp_commitment_hr(provider: str = "Azure", mode: str = "demo", tenant_id=None) -> float:
     """Total $/hr across all Savings Plans."""
-    return get_total_compute_sp_hr(provider, mode, tenant_id) + get_total_database_sp_hr(provider, mode, tenant_id)
+    return (get_total_compute_sp_hr(provider, mode, tenant_id)
+            + get_total_database_sp_hr(provider, mode, tenant_id)
+            + get_total_sagemaker_sp_hr(provider, mode, tenant_id))
 

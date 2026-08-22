@@ -242,7 +242,53 @@ AWS_RI_ONLY_INVENTORY = [
      "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
 ]
 
-AWS_INVENTORY = AWS_COMPUTE_INVENTORY + AWS_DATABASE_INVENTORY + AWS_RI_ONLY_INVENTORY + AWS_FARGATE_INVENTORY
+# ── Amazon SageMaker AI (SageMaker Savings Plan eligible, not RI-eligible) ────
+# Added 2026-08-23 after confirming feasibility: unlike classic Lambda (no
+# running-resource state at all) or Lambda Managed Instances (RI/SP-eligible
+# but AWS exposes no per-instance visibility, only pool-level CloudWatch
+# aggregates), SageMaker's "always-on" resource types genuinely fit this
+# app's inventory model - real, listable, persistent resources with an
+# instance type and a running/stopped state:
+#   - Real-Time Inference Endpoints (sagemaker:ListEndpoints/DescribeEndpoint)
+#   - Notebook Instances (sagemaker:ListNotebookInstances/DescribeNotebookInstance)
+# Training/Processing/Data Wrangler/Batch Transform jobs are deliberately NOT
+# modeled - they're one-shot ephemeral executions with no persistent
+# identity to track as an inventory row (same category as Lambda invocations
+# or Glue jobs), not merely excluded from the SP baseline the way a
+# business-hours VM would be.
+# SageMaker AI Savings Plans are a genuinely separate, first-class Savings
+# Plan type in AWS's own API - confirmed via boto3's savingsplans client
+# service model, whose savingsPlanType enum is literally
+# 'Compute'|'EC2Instance'|'SageMaker'|'Database' - not a Compute-SP subtype
+# and not folded into it here. No Reserved Instance concept exists for
+# SageMaker (confirmed: no ec2-style DescribeReservedInstances-equivalent
+# anywhere in the sagemaker boto3 service model).
+AWS_SAGEMAKER_INVENTORY = [
+    # Real-Time Inference Endpoint - ml.m5.xlarge. Rate is the real live
+    # AmazonSageMaker Price List On-Demand "Hosting" rate for us-east-1,
+    # confirmed 2026-08-23 against real downloaded price list data
+    # (component="Hosting", NOT the Studio/Training/Notebook components that
+    # share the same instanceType attribute pattern in that data).
+    {"resource_id": "sagemaker-endpoint-prod-fraud-model", "resource_name": "prod-fraud-detection-endpoint",
+     "resource_type": "Amazon SageMaker Endpoint",
+     "resource_state": "Running",
+     "region": "us-east-1", "os": "N/A", "sku": "ml.m5.xlarge",
+     "payg_hourly_usd": 0.23, "avg_daily_running_hours": 24,
+     "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
+
+    # Notebook Instance - ml.t3.medium. Same real-price-list-confirmed rate
+    # (component="Notebook", distinct from the "Studio-Notebook" component
+    # which shares the identical instanceType+region combination but is a
+    # separate SKU/price entry - confirmed against real downloaded data).
+    {"resource_id": "sagemaker-notebook-prod-data-science-01", "resource_name": "prod-datascience-notebook",
+     "resource_type": "Amazon SageMaker Notebook Instance",
+     "resource_state": "Running",
+     "region": "us-east-1", "os": "N/A", "sku": "ml.t3.medium",
+     "payg_hourly_usd": 0.05, "avg_daily_running_hours": 24,
+     "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
+]
+
+AWS_INVENTORY = AWS_COMPUTE_INVENTORY + AWS_DATABASE_INVENTORY + AWS_RI_ONLY_INVENTORY + AWS_FARGATE_INVENTORY + AWS_SAGEMAKER_INVENTORY
 
 
 # ── AWS Commitments ────────────────────────────────────────────────────────────
@@ -336,6 +382,15 @@ AWS_COMMITMENTS = [
      "scope_sku": "Any Database", "scope_region": "Global", "scope_os": "N/A",
      "hourly_usd_commitment": 0.20,
      "reserved_qty": 0, "term": "1-year", "expiry_date": "2027-03-15", "provider": "AWS"},
+
+    # ── AWS SageMaker Savings Plan (flexible $/hr across all SageMaker AI usage) ─
+    # Added 2026-08-23 - a genuinely separate SP type (see AWS_SAGEMAKER_SP_TYPES
+    # below), not part of the Compute or Database pools above.
+    {"commitment_id": "SP-AWS-SAGEMAKER-001",
+     "commitment_type": "SageMaker Savings Plan",
+     "scope_sku": "Any SageMaker", "scope_region": "Global", "scope_os": "N/A",
+     "hourly_usd_commitment": 0.15,
+     "reserved_qty": 0, "term": "1-year", "expiry_date": "2027-05-01", "provider": "AWS"},
 ]
 
 
@@ -390,6 +445,16 @@ AWS_DATABASE_SP_TYPES = {
     "Amazon DocumentDB", "Amazon Neptune", "AWS DMS Replication Instance", "Amazon Keyspaces",
 }
 
+# SageMaker AI Savings Plans - a genuinely separate, first-class Savings Plan
+# type (boto3 savingsplans client's savingsPlanType enum: 'Compute'|
+# 'EC2Instance'|'SageMaker'|'Database'), not a Compute-SP subtype. Applies to
+# ALL SageMaker AI instance usage "regardless of instance family, size,
+# Region, or component" per AWS's own SP pricing page - no per-SKU/tier
+# eligibility restriction the way e.g. an Azure App Service Basic plan has,
+# so unlike compute_sp_eligible_types/db_eligible_types above, every
+# resource_type entry here is unconditionally eligible.
+AWS_SAGEMAKER_SP_TYPES = {"Amazon SageMaker Endpoint", "Amazon SageMaker Notebook Instance"}
+
 AWS_RI_COVERAGE_NOTES = {
     "Compute":              ("EC2 On-Demand hourly compute rate (Standard: fixed family; Convertible: exchangeable family)", "EBS volumes, data transfer, OS licensing surcharges"),
     "AWS RDS PostgreSQL":   ("RDS DB instance hourly compute capacity (Single-AZ or Multi-AZ)", "Storage (GB-month), provisioned IOPS, automated backups"),
@@ -423,6 +488,12 @@ AWS_RI_COVERAGE_NOTES = {
     # create a demand/supply mismatch coverage could never actually match -
     # see aws/connector.py's MemoryDB inventory block for the full reasoning.
     "Amazon MemoryDB":      ("Cache node hourly compute capacity (Redis or Valkey - engine not distinguished, see mapping notes)", "Data storage overhead, snapshot backups"),
+    # Added 2026-08-23. No Reserved Instance concept exists for SageMaker at
+    # all (confirmed: no equivalent of DescribeReservedInstances anywhere in
+    # the sagemaker boto3 service model) - SageMaker-SP-eligible only, never
+    # shown in the RI Coverage tab.
+    "Amazon SageMaker Endpoint":          ("Real-time inference endpoint instance hourly compute capacity", "Data processed, model storage. NOT RI-eligible - no Reserved Instance product exists for SageMaker, SageMaker-SP-eligible only"),
+    "Amazon SageMaker Notebook Instance": ("Notebook instance hourly compute capacity", "EBS volume storage. NOT RI-eligible - no Reserved Instance product exists for SageMaker, SageMaker-SP-eligible only"),
 }
 
 
