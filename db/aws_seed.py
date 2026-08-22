@@ -185,12 +185,44 @@ AWS_FARGATE_INVENTORY = [
 # ── AWS RI-Only / Reserved Node Inventory ──────────────────────────────────────
 
 AWS_RI_ONLY_INVENTORY = [
-    # Amazon ElastiCache Redis Node — cache.m5.large
+    # Amazon ElastiCache for Redis Node — cache.m5.large. Resource type
+    # split by engine 2026-08-23 (was flat "Amazon ElastiCache") after
+    # confirming Database Savings Plans only cover ElastiCache for Valkey -
+    # rate corrected to the real On-Demand Redis rate for this instance
+    # type/region ($0.156/hr, confirmed against real downloaded
+    # AmazonElastiCache price list data - was a rounded $0.136 estimate
+    # from before this app had any ElastiCache pricing lookup at all).
     {"resource_id": "elasticache-prod-01", "resource_name": "prod-cache-redis",
-     "resource_type": "Amazon ElastiCache",
+     "resource_type": "Amazon ElastiCache for Redis",
      "resource_state": "Running",
      "region": "us-east-1", "os": "N/A", "sku": "cache.m5.large",
-     "payg_hourly_usd": 0.136, "avg_daily_running_hours": 24,
+     "payg_hourly_usd": 0.156, "avg_daily_running_hours": 24,
+     "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
+
+    # Amazon ElastiCache for Valkey Node — cache.m5.large. Added 2026-08-23
+    # specifically so the demo Database SP pool has a real Valkey resource
+    # to show as eligible (the Redis node above correctly is NOT database-
+    # SP-eligible, only RI-eligible).
+    {"resource_id": "elasticache-prod-valkey-01", "resource_name": "prod-cache-valkey",
+     "resource_type": "Amazon ElastiCache for Valkey",
+     "resource_state": "Running",
+     "region": "us-east-1", "os": "N/A", "sku": "cache.m5.large",
+     "payg_hourly_usd": 0.1248, "avg_daily_running_hours": 24,   # real On-Demand Valkey rate for cache.m5.large in us-east-1, confirmed against real downloaded price list data - genuinely cheaper than Redis at the identical instance type.
+     "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
+
+    # Amazon MemoryDB for Redis Node — db.r6g.large. New service, added
+    # 2026-08-23 - real Reserved Nodes product (confirmed via boto3), no
+    # Savings Plan coverage (absent from the official Database Savings
+    # Plans eligible-services table). Resource type kept flat "Amazon
+    # MemoryDB" (not split by engine) - see aws/connector.py's MemoryDB
+    # inventory block for why (the Reserved Node purchase record can't
+    # specify engine, so splitting demand but not supply would permanently
+    # break coverage matching).
+    {"resource_id": "memorydb-prod-01", "resource_name": "prod-sessions-memorydb (Redis)",
+     "resource_type": "Amazon MemoryDB",
+     "resource_state": "Running",
+     "region": "us-east-1", "os": "N/A", "sku": "db.r6g.large",
+     "payg_hourly_usd": 0.309, "avg_daily_running_hours": 24,   # real On-Demand Redis rate for db.r6g.large in us-east-1, confirmed against real downloaded AmazonMemoryDB price list data.
      "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
 
     # Amazon Redshift Cluster — dc2.large
@@ -240,12 +272,31 @@ AWS_COMMITMENTS = [
      "term": "1-year", "expiry_date": "2027-01-01", "provider": "AWS"},
 
     # ── Reserved Instance — ElastiCache Node ────────────────────────────────────
+    # scope_resource_type set EXPLICITLY (unlike this demo file's other RI
+    # entries, which mostly leave it blank) - reservation_analysis() treats
+    # a blank scope_resource_type as "matches any Resource Type" (see
+    # analysis/engine.py's supply-side merge), which was harmless while
+    # ElastiCache was one flat resource type but would have ambiguously
+    # matched BOTH the new Redis and Valkey demo rows below (same SKU,
+    # cache.m5.large) once the 2026-08-23 engine split landed - explicit
+    # here to keep this RI correctly scoped to Redis only, not "any engine".
     {"commitment_id": "RI-ELASTICACHE-M5-LARGE-USE1",
      "commitment_type": "Reserved Capacity",
      "scope_sku": "cache.m5.large", "scope_region": "us-east-1", "scope_os": "N/A",
+     "scope_resource_type": "Amazon ElastiCache for Redis",
      "hourly_usd_commitment": 0.088,
      "reserved_qty": 1,
      "term": "1-year", "expiry_date": "2026-11-20", "provider": "AWS"},
+
+    # ── Reserved Instance — MemoryDB Node ────────────────────────────────────
+    # Added 2026-08-23 alongside MemoryDB's new live fetch (aws/connector.py).
+    {"commitment_id": "RI-MEMORYDB-R6G-LARGE-USE1",
+     "commitment_type": "Reserved Capacity",
+     "scope_sku": "db.r6g.large", "scope_region": "us-east-1", "scope_os": "N/A",
+     "scope_resource_type": "Amazon MemoryDB",
+     "hourly_usd_commitment": 0.195,   # ~37% off the $0.309/hr On-Demand Redis rate, in line with MemoryDB's real 1yr No-Upfront RI discount range - illustrative, not a live-fetched rate.
+     "reserved_qty": 1,
+     "term": "1-year", "expiry_date": "2027-02-01", "provider": "AWS"},
 
     # ── Reserved Instance — OpenSearch Node ──────────────────────────────────
     # Added 2026-08-22 alongside OpenSearch's new live RI fetch
@@ -324,8 +375,16 @@ AWS_COMPUTE_SP_TYPES = {"Compute", "AWS Lambda", "AWS Fargate"}
 # ("AWS RDS MySQL" vs "Amazon RDS for MySQL") - a separate, pre-existing
 # demo/live naming inconsistency also affecting AWS_RI_COVERAGE_NOTES
 # below, not fully resolved here.
+# CORRECTED 2026-08-23: flat "Amazon ElastiCache" removed, replaced with
+# "Amazon ElastiCache for Valkey" ONLY - confirmed via the actual Database
+# Savings Plans pricing table (aws.amazon.com/savingsplans/database-pricing),
+# which explicitly lists "ElastiCache for Valkey Instances"/"...Serverless"
+# and nothing for Redis or Memcached. The flat entry had wrongly treated
+# ALL ElastiCache resources as Database-SP-eligible regardless of engine -
+# Redis/Memcached remain Reserved-Instance-eligible only (see
+# AWS_RI_COVERAGE_NOTES below), never Database-SP-eligible.
 AWS_DATABASE_SP_TYPES = {
-    "AWS RDS PostgreSQL", "AWS RDS MySQL", "Amazon Aurora", "Amazon DynamoDB", "Amazon ElastiCache", "Amazon OpenSearch",   # demo seed naming
+    "AWS RDS PostgreSQL", "AWS RDS MySQL", "Amazon Aurora", "Amazon DynamoDB", "Amazon ElastiCache for Valkey", "Amazon OpenSearch",   # demo seed naming
     "Amazon RDS for MySQL", "Amazon RDS for PostgreSQL", "Amazon RDS for MariaDB",                      # live fetch naming
     "Amazon RDS for Oracle", "Amazon RDS for SQL Server", "Amazon Aurora (MySQL)", "Amazon Aurora (PostgreSQL)",
     "Amazon DocumentDB", "Amazon Neptune", "AWS DMS Replication Instance", "Amazon Keyspaces",
@@ -346,9 +405,24 @@ AWS_RI_COVERAGE_NOTES = {
     # not a literal purchase recommendation - see the caveat in
     # _render_ri_coverage_tab().
     "Amazon DynamoDB":      ("Provisioned WCU & RCU throughput capacity", "Data storage per GB, backup/restore, data transfer, AND the reservation itself - purchase data isn't fetchable via any API (Console-only)"),
-    "Amazon ElastiCache":   ("Cache node hourly compute capacity (Redis / Memcached)", "Data storage overhead, snapshot backups"),
+    # Split by engine 2026-08-23 (was one flat "Amazon ElastiCache" row) -
+    # all three engines remain equally RI-eligible (Reserved Instance
+    # discounts apply the same way regardless of engine), only the
+    # Database Savings Plan side is Valkey-specific (see the "excludes"
+    # column and AWS_DATABASE_SP_TYPES above).
+    "Amazon ElastiCache for Redis":     ("Cache node hourly compute capacity", "Data storage overhead, snapshot backups. NOT Database-SP-eligible (Redis is RI-only - confirmed via the actual Database Savings Plans pricing table, which lists Valkey only)"),
+    "Amazon ElastiCache for Memcached": ("Cache node hourly compute capacity", "Data storage overhead, snapshot backups. NOT Database-SP-eligible (Memcached is RI-only, same as Redis)"),
+    "Amazon ElastiCache for Valkey":    ("Cache node hourly compute capacity", "Data storage overhead, snapshot backups. Also Database-SP-eligible (the only ElastiCache engine that is)"),
     "Amazon Redshift":      ("Redshift data warehouse node compute capacity", "Storage exceeding node capacity, concurrency scaling"),
     "Amazon OpenSearch":    ("Search cluster node instance compute capacity", "EBS volume storage, snapshot storage"),
+    # New service, added 2026-08-23 - real Reserved Nodes product
+    # (confirmed via boto3), NOT Database-SP-eligible (absent from the
+    # official Database Savings Plans eligible-services table). Kept flat
+    # (not split Redis/Valkey) - the ReservedNode purchase record carries
+    # no engine field at all, unlike ElastiCache's, so a split here would
+    # create a demand/supply mismatch coverage could never actually match -
+    # see aws/connector.py's MemoryDB inventory block for the full reasoning.
+    "Amazon MemoryDB":      ("Cache node hourly compute capacity (Redis or Valkey - engine not distinguished, see mapping notes)", "Data storage overhead, snapshot backups"),
 }
 
 

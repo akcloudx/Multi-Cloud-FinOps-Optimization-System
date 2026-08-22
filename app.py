@@ -1386,8 +1386,8 @@ def _render_savings_plan_tab():
                 },
                 {
                     "Savings Plan Type": "Database Savings Plans (1-yr ONLY)",
-                    "What Is Covered": "Aurora, RDS, DynamoDB, ElastiCache, DocumentDB, Timestream, Neptune, Keyspaces, DMS, and Amazon OpenSearch Service - confirmed via the full AWS Savings Plans User Guide, up to 35% off",
-                    "What Is NOT Covered": "Amazon Redshift, EC2/Fargate/Lambda compute, 3-year term (1-yr only per AWS policy - same restriction Azure's Savings Plan for Databases has)"
+                    "What Is Covered": "Aurora, RDS, DynamoDB, ElastiCache for Valkey ONLY (not Redis or Memcached - confirmed via the actual Database Savings Plans pricing table), DocumentDB, Timestream, Neptune, Keyspaces, DMS, and Amazon OpenSearch Service - up to 35% off",
+                    "What Is NOT Covered": "Amazon Redshift, Amazon MemoryDB, ElastiCache for Redis/Memcached (Reserved Instance-eligible only, not Database SP), EC2/Fargate/Lambda compute, 3-year term (1-yr only per AWS policy - same restriction Azure's Savings Plan for Databases has)"
                 },
                 {
                     "Savings Plan Type": "SageMaker AI Savings Plans (1-yr / 3-yr)",

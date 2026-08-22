@@ -89,16 +89,22 @@ REQUIRED_AWS_POLICIES = [
         "Purpose":         "Read active RDS Reserved Instances you own",
     },
     {
-        "Policy / Action": "elasticache:DescribeReservedCacheNodes",
+        "Policy / Action": "elasticache:DescribeCacheClusters / elasticache:DescribeReservedCacheNodes",
         "AWS Managed Policy": "AmazonElastiCacheReadOnlyAccess",
-        "Required":        "Yes — For RI data",
-        "Purpose":         "Read active ElastiCache Reserved Nodes you own",
+        "Required":        "Yes — For inventory + RI data",
+        "Purpose":         "Scan ElastiCache clusters and read active Reserved Nodes you own (one elasticache:Describe* wildcard covers both - confirmed via the policy's own JSON; inventory scanning added 2026-08-23, previously only RI data was fetched)",
     },
     {
-        "Policy / Action": "redshift:DescribeReservedNodes",
+        "Policy / Action": "redshift:DescribeClusters / redshift:DescribeReservedNodes",
         "AWS Managed Policy": "AmazonRedshiftReadOnlyAccess",
-        "Required":        "Yes — For RI data",
-        "Purpose":         "Read active Redshift Reserved Nodes you own",
+        "Required":        "Yes — For inventory + RI data",
+        "Purpose":         "Scan Redshift clusters and read active Reserved Nodes you own (one redshift:Describe* wildcard covers both; inventory scanning added 2026-08-23, previously only RI data was fetched)",
+    },
+    {
+        "Policy / Action": "memorydb:DescribeClusters / memorydb:DescribeReservedNodes",
+        "AWS Managed Policy": "AmazonMemoryDBReadOnlyAccess",
+        "Required":        "Yes — For inventory + RI data",
+        "Purpose":         "Scan MemoryDB clusters and read active Reserved Nodes you own (one memorydb:Describe* wildcard covers both, same pattern as ElastiCache/Redshift above)",
     },
     {
         "Policy / Action": "savingsplans:DescribeSavingsPlans",
@@ -336,12 +342,16 @@ def check_aws_permissions(creds: AWSCredentials) -> dict:
         lambda: session.client("rds").describe_reserved_db_instances(MaxRecords=20),
     )
     _probe(
-        "elasticache:DescribeReservedCacheNodes",
+        "elasticache:DescribeCacheClusters / elasticache:DescribeReservedCacheNodes",
         lambda: session.client("elasticache").describe_reserved_cache_nodes(MaxRecords=20),
     )
     _probe(
-        "redshift:DescribeReservedNodes",
+        "redshift:DescribeClusters / redshift:DescribeReservedNodes",
         lambda: session.client("redshift").describe_reserved_nodes(MaxRecords=20),
+    )
+    _probe(
+        "memorydb:DescribeClusters / memorydb:DescribeReservedNodes",
+        lambda: session.client("memorydb").describe_reserved_nodes(MaxResults=20),
     )
     _probe(
         "savingsplans:DescribeSavingsPlans",
@@ -548,6 +558,51 @@ def map_rds_engine(engine: str) -> str:
     unrecognized/future engine is still visible and identifiable, not
     silently mislabeled."""
     return _RDS_ENGINE_LABELS.get((engine or "").lower(), engine or "Unknown")
+
+
+_ELASTICACHE_ENGINE_LABELS = {
+    "redis":     "Amazon ElastiCache for Redis",
+    "memcached": "Amazon ElastiCache for Memcached",
+    "valkey":    "Amazon ElastiCache for Valkey",
+}
+
+
+def map_elasticache_engine(engine: str) -> str:
+    """ElastiCache's `Engine` field (DescribeCacheClusters) - confirmed
+    valid values "redis"/"memcached"/"valkey" via boto3's service model and
+    a real "memcached" example in AWS's own docs. Split by engine (matching
+    the real AWS product names, and mirroring map_rds_engine()'s per-engine
+    convention) rather than kept as one flat "Amazon ElastiCache" bucket -
+    added 2026-08-23 after confirming Database Savings Plans only cover
+    ElastiCache for Valkey specifically (verified against the actual
+    Database Savings Plans pricing table, which lists "ElastiCache for
+    Valkey Instances"/"...Serverless" and nothing for Redis or Memcached) -
+    a flat resource_type made that real distinction impossible to check.
+    Reserved Instances remain available for all three engines (unlike
+    Savings Plans) - this split doesn't change RI eligibility, only makes
+    the SP-side restriction checkable. Falls back to the raw engine string
+    for any future/unrecognized engine, same discipline as map_rds_engine."""
+    return _ELASTICACHE_ENGINE_LABELS.get((engine or "").lower(), engine or "Unknown")
+
+
+_MEMORYDB_ENGINE_LABELS = {
+    "redis":  "Amazon MemoryDB for Redis",
+    "valkey": "Amazon MemoryDB for Valkey",
+}
+
+
+def map_memorydb_engine(engine: str) -> str:
+    """MemoryDB's `Engine` field (DescribeClusters) - confirmed valid values
+    "redis"/"valkey" via real downloaded AmazonMemoryDB price list data
+    (MemoryDB has no Memcached-compatible option at all, unlike ElastiCache -
+    confirmed the same way: no "Memcached" cacheEngine/engine value appears
+    anywhere in its price list). Split by engine for the same reason as
+    map_elasticache_engine() - real downloaded price list data confirms
+    MemoryDB's per-node rate genuinely differs by engine at the identical
+    instanceType (e.g. db.r6g.large: $0.309/hr Redis vs $0.2163/hr Valkey in
+    us-east-1) - a flat resource_type would silently blend two different
+    real prices into one ambiguous pricing-cache key."""
+    return _MEMORYDB_ENGINE_LABELS.get((engine or "").lower(), engine or "Unknown")
 
 
 def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
@@ -918,6 +973,118 @@ def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
         except (ClientError, BotoCoreError):
             pass
 
+        # ElastiCache, Redshift, MemoryDB - discovered 2026-08-23 that
+        # inventory for these was NEVER fetched at all, only their Reserved
+        # Instance purchases (see fetch_live_reservations() below) - a real
+        # tenant's actual ElastiCache/Redshift resources were completely
+        # invisible despite already being demo-tracked and RI-eligible.
+        # elasticache:Describe* / redshift:Describe* (already required for
+        # RI data above) already cover DescribeCacheClusters/DescribeClusters
+        # too - confirmed via each policy's own JSON - no new IAM permission
+        # needed for either.
+        try:
+            ec = session.client("elasticache", region_name=region)
+            paginator = ec.get_paginator("describe_cache_clusters")
+            for page in paginator.paginate():
+                for cc in page.get("CacheClusters", []):
+                    records.append({
+                        "Resource ID":             cc.get("ARN") or cc.get("CacheClusterId", ""),
+                        "Resource Name":           cc.get("CacheClusterId", ""),
+                        "Resource Type":           map_elasticache_engine(cc.get("Engine", "")),
+                        "Resource State":          "Running" if cc.get("CacheClusterStatus") == "available" else "Stopped (deallocated)",
+                        "Region":                  region,
+                        "OS":                      "N/A",
+                        "SKU":                     cc.get("CacheNodeType", "N/A"),
+                        "Redundancy":              "N/A",   # No per-node price differentiator for replication-group membership (confirmed via real AmazonElastiCache price list data - each node in a replication group is billed at the same flat per-node rate as a standalone cluster, no Multi-AZ-style doubled meter the way RDS has).
+                        "HA Replicas":             0,
+                        "PAYG Hourly Cost USD":    0.0,
+                        "Avg Daily Running Hours": 24,
+                        "Subscription":            account_id,
+                        "Provider":                "AWS",
+                        "Is Orphaned":             False,
+                    })
+        except (ClientError, BotoCoreError):
+            pass
+
+        try:
+            rs = session.client("redshift", region_name=region)
+            paginator = rs.get_paginator("describe_clusters")
+            for page in paginator.paginate():
+                for cl in page.get("Clusters", []):
+                    records.append({
+                        "Resource ID":             cl.get("ClusterNamespaceArn") or cl.get("ClusterIdentifier", ""),
+                        "Resource Name":           cl.get("ClusterIdentifier", ""),
+                        "Resource Type":           "Amazon Redshift",
+                        "Resource State":          "Running" if cl.get("ClusterStatus") == "available" else "Stopped (deallocated)",
+                        "Region":                  region,
+                        "OS":                      "N/A",
+                        "SKU":                     cl.get("NodeType", "N/A"),
+                        "Redundancy":              "N/A",
+                        "HA Replicas":             max((cl.get("NumberOfNodes") or 1) - 1, 0),
+                        "PAYG Hourly Cost USD":    0.0,
+                        "Avg Daily Running Hours": 24,
+                        "Subscription":            account_id,
+                        "Provider":                "AWS",
+                        "Is Orphaned":             False,
+                    })
+        except (ClientError, BotoCoreError):
+            pass
+
+        # MemoryDB - new service, never tracked in this app at all before
+        # 2026-08-23. Real IAM action is memorydb:Describe* (confirmed via
+        # AmazonMemoryDBReadOnlyAccess's own policy JSON), one wildcard
+        # covering both inventory and Reserved Nodes, same pattern as every
+        # other service added this session. One row per real node (iterating
+        # Shards[].Nodes[], which DescribeClusters exposes directly - unlike
+        # OpenSearch, MemoryDB gives real per-node identifiers, no synthetic
+        # IDs needed).
+        #
+        # Resource Type deliberately stays flat "Amazon MemoryDB" (NOT split
+        # by engine like ElastiCache above) - confirmed via boto3's service
+        # model that MemoryDB's Reserved Node purchase record (below) carries
+        # NO engine/product-description field at all, unlike ElastiCache's
+        # ReservedCacheNode (which has ProductDescription). Splitting
+        # inventory by engine while RI purchases can't be engine-specific
+        # would make coverage matching (which requires an exact Resource
+        # Type match between demand and supply) silently and permanently
+        # broken for MemoryDB - AWS's own reservation product doesn't
+        # distinguish engine either, so neither does this app's matching key.
+        # Real per-node engine is still captured in Resource Name for
+        # visibility (via map_memorydb_engine()) - just not part of the
+        # matching key. See pricing/aws_price_list.py for how this affects
+        # pricing (defaults to the safer/higher-priced engine when the real
+        # one can't be threaded through a flat SKU+resource_type lookup).
+        try:
+            mdb = session.client("memorydb", region_name=region)
+            paginator = mdb.get_paginator("describe_clusters")
+            for page in paginator.paginate(ShowShardDetails=True):
+                for cluster in page.get("Clusters", []):
+                    cluster_name = cluster.get("Name", "")
+                    node_type = cluster.get("NodeType", "N/A")
+                    engine_label = map_memorydb_engine(cluster.get("Engine", ""))
+                    cluster_arn = cluster.get("ARN") or cluster_name
+                    for shard in cluster.get("Shards", []):
+                        for node in shard.get("Nodes", []):
+                            node_name = node.get("Name", "")
+                            records.append({
+                                "Resource ID":             f"{cluster_arn}#{node_name}",
+                                "Resource Name":           f"{node_name or cluster_name} ({engine_label.rsplit(' ', 1)[-1]})",
+                                "Resource Type":           "Amazon MemoryDB",
+                                "Resource State":          "Running" if node.get("Status") == "available" else "Stopped (deallocated)",
+                                "Region":                  region,
+                                "OS":                      "N/A",
+                                "SKU":                     node_type,
+                                "Redundancy":              "N/A",
+                                "HA Replicas":             0,
+                                "PAYG Hourly Cost USD":    0.0,
+                                "Avg Daily Running Hours": 24,
+                                "Subscription":            account_id,
+                                "Provider":                "AWS",
+                                "Is Orphaned":             False,
+                            })
+        except (ClientError, BotoCoreError):
+            pass
+
     return pd.DataFrame(records)
 
 
@@ -1150,6 +1317,43 @@ def fetch_live_reservations(creds: AWSCredentials) -> pd.DataFrame:
                     "usage_price":           ri.get("UsagePrice"),
                     "currency_code":         ri.get("CurrencyCode"),
                     "offering_type":         ri.get("PaymentOption"),
+                    "offering_class":        None,
+                    "instance_tenancy":      None,
+                    "scope":                 None,
+                    "multi_az":              None,
+                    "state":                 ri.get("State", ""),
+                    "start_time":            str(ri.get("StartTime")) if ri.get("StartTime") else None,
+                    "recurring_charge_hourly": _recurring_hourly_charge(ri.get("RecurringCharges")),
+                })
+        except (ClientError, BotoCoreError):
+            pass
+
+        # MemoryDB Reserved Nodes - confirmed via boto3's service model: no
+        # UsagePrice field at all (unlike every other RI type fetched so
+        # far) - only FixedPrice + RecurringCharges. _effective_hourly_rate()
+        # already treats a missing usage_price as 0.0, so this needs no
+        # special-casing, just an honest None passthrough rather than
+        # guessing a value. Also no product_description/engine field - see
+        # fetch_live_inventory()'s MemoryDB block for why scope_resource_type
+        # stays flat "Amazon MemoryDB" rather than split by engine.
+        try:
+            mdb_ri = session.client("memorydb", region_name=region)
+            for ri in mdb_ri.describe_reserved_nodes().get("ReservedNodes", []):
+                if ri.get("State") != "active":
+                    continue
+                records.append({
+                    "service":               "MemoryDB",
+                    "reserved_instance_id":  ri.get("ReservationId", ""),
+                    "instance_type":         ri.get("NodeType", ""),
+                    "region":                region,
+                    "availability_zone":     None,
+                    "product_description":   None,
+                    "instance_count":        ri.get("NodeCount", 0),
+                    "duration_seconds":      ri.get("Duration", 0),
+                    "fixed_price":           ri.get("FixedPrice"),
+                    "usage_price":           None,
+                    "currency_code":         None,
+                    "offering_type":         ri.get("OfferingType"),
                     "offering_class":        None,
                     "instance_tenancy":      None,
                     "scope":                 None,

@@ -85,6 +85,12 @@ _INSTANCE_CLASS_SERVICE_CODES = {
     # no DocumentDB/Neptune-style "CPU Credits" ambiguity to filter out
     # here), but the explicit filter is kept anyway for consistency/safety.
     "Amazon OpenSearch":              ("AmazonES", "Amazon OpenSearch Service Instance"),
+    # Redshift's inventory fetch was added 2026-08-23 (previously only its
+    # RI purchases were fetched - see aws/connector.py). Single engine, one
+    # clean "Compute Instance" productFamily match per (region, instanceType)
+    # confirmed against real downloaded AmazonRedshift price list data - no
+    # ambiguity to filter out the way DocDB/Neptune needed.
+    "Amazon Redshift":                ("AmazonRedshift", "Compute Instance"),
 }
 
 # resource_type -> AWS Price List service code, for the 2 provisioned-
@@ -157,6 +163,99 @@ def _fetch_instance_class_price(resource_type: str, sku: str, region: str, redun
             if attrs.get("availabilityZone") != expected_az:
                 continue
         candidates.append(price)
+    return min(candidates) if candidates else None
+
+
+_ELASTICACHE_RESOURCE_TYPE_TO_ENGINE = {
+    "Amazon ElastiCache for Redis":     "Redis",
+    "Amazon ElastiCache for Memcached": "Memcached",
+    "Amazon ElastiCache for Valkey":    "Valkey",
+}
+
+
+def _fetch_elasticache_price(resource_type: str, sku: str, region: str, creds) -> Optional[float]:
+    """ElastiCache - needs BOTH productFamily ("Cache Instance") AND
+    cacheEngine filters, confirmed via real downloaded price list data that
+    the identical instanceType genuinely prices differently per engine at
+    the same region (e.g. cache.m5.large in us-east-1: $0.156/hr Redis,
+    $0.156/hr Memcached, $0.1248/hr Valkey - not a rounding coincidence,
+    real distinct meters). Also confirmed two other real traps in the same
+    data that a naive region+instanceType+engine filter would fall into:
+    AWS Outposts variants of the same (instanceType, engine) pair carry a
+    different price under "locationType": "AWS Outposts" (excluded via the
+    locationType check), and "Extended Support" surcharge line items for
+    running an EOL engine version share the same instanceType/cacheEngine
+    but have no vcpu/memory/networkPerformance attributes at all (excluded
+    via the vcpu-presence check) - both would have silently produced a
+    wrong price via min() if left in the candidate pool."""
+    engine = _ELASTICACHE_RESOURCE_TYPE_TO_ENGINE.get(resource_type)
+    if engine is None:
+        return None
+
+    try:
+        session = boto3.Session(aws_access_key_id=creds.access_key_id, aws_secret_access_key=creds.secret_access_key)
+        client = session.client("pricing", region_name=_PRICING_API_REGION)
+        filters = [
+            {"Type": "TERM_MATCH", "Field": "regionCode", "Value": region},
+            {"Type": "TERM_MATCH", "Field": "instanceType", "Value": sku},
+            {"Type": "TERM_MATCH", "Field": "productFamily", "Value": "Cache Instance"},
+            {"Type": "TERM_MATCH", "Field": "cacheEngine", "Value": engine},
+        ]
+        price_list = _get_products(client, "AmazonElastiCache", filters)
+    except Exception:
+        return None
+    if not price_list:
+        return None
+
+    candidates = []
+    for item in price_list:
+        attrs = item.get("product", {}).get("attributes", {})
+        if attrs.get("locationType") != "AWS Region":
+            continue
+        if "vcpu" not in attrs:
+            continue
+        prices = _extract_ondemand_prices(item)
+        if prices:
+            candidates.append(prices[0][0])
+    return min(candidates) if candidates else None
+
+
+# MemoryDB's Reserved Node purchase record carries no engine field at all
+# (confirmed via boto3's service model), so aws/connector.py deliberately
+# keeps "Amazon MemoryDB" as one flat resource_type for RI-matching
+# correctness rather than splitting by engine the way ElastiCache is split -
+# see that module's MemoryDB block for the full reasoning. That means a
+# price lookup here has no way to know which of the two real, different
+# engine rates a given SKU/region combo should use (confirmed via real
+# price list data: db.r6g.large in us-east-1 is $0.309/hr Redis vs
+# $0.2163/hr Valkey - genuinely different meters, not interchangeable).
+# Defaults to Redis (the higher of the two) so this never UNDERSTATES a
+# real MemoryDB resource's cost - same "pick the safe direction when a
+# signal genuinely isn't available" principle already used for Fargate's
+# x86-vs-ARM default in _fetch_fargate_price below.
+_MEMORYDB_DEFAULT_ENGINE = "Redis"
+
+
+def _fetch_memorydb_price(sku: str, region: str, creds) -> Optional[float]:
+    try:
+        session = boto3.Session(aws_access_key_id=creds.access_key_id, aws_secret_access_key=creds.secret_access_key)
+        client = session.client("pricing", region_name=_PRICING_API_REGION)
+        filters = [
+            {"Type": "TERM_MATCH", "Field": "regionCode", "Value": region},
+            {"Type": "TERM_MATCH", "Field": "instanceType", "Value": sku},
+            {"Type": "TERM_MATCH", "Field": "engine", "Value": _MEMORYDB_DEFAULT_ENGINE},
+        ]
+        price_list = _get_products(client, "AmazonMemoryDB", filters)
+    except Exception:
+        return None
+    if not price_list:
+        return None
+
+    candidates = []
+    for item in price_list:
+        prices = _extract_ondemand_prices(item)
+        if prices:
+            candidates.append(prices[0][0])
     return min(candidates) if candidates else None
 
 
@@ -328,6 +427,10 @@ def _fetch_from_api(resource_type: str, sku: str, region: str, os_: str, redunda
         return _fetch_capacity_unit_price(resource_type, sku, region, creds)
     if resource_type == "AWS Fargate":
         return _fetch_fargate_price(sku, region, os_, creds)
+    if resource_type in _ELASTICACHE_RESOURCE_TYPE_TO_ENGINE:
+        return _fetch_elasticache_price(resource_type, sku, region, creds)
+    if resource_type == "Amazon MemoryDB":
+        return _fetch_memorydb_price(sku, region, creds)
 
     is_ec2 = (resource_type == "Compute")
     if is_ec2:

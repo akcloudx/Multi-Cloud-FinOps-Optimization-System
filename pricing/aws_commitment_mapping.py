@@ -34,7 +34,7 @@ full verification.
 
 from typing import Optional
 
-from aws.connector import map_ec2_platform, map_rds_engine
+from aws.connector import map_ec2_platform, map_rds_engine, map_elasticache_engine
 
 # AWS's own definition, confirmed via https://docs.aws.amazon.com/savingsplans/latest/userguide/what-is-savings-plans.html:
 # "One year: ... 365 days (31,536,000 seconds). Three years: ... 1,095 days
@@ -91,18 +91,37 @@ def derive_aws_reservation_commitment_fields(purchase: dict) -> Optional[dict]:
         scope_os = "N/A"
         scope_redundancy = "Zone Redundant" if purchase.get("multi_az") else "Locally Redundant"
     elif service == "ElastiCache":
-        # This app's inventory taxonomy tracks ElastiCache as one flat
-        # "Amazon ElastiCache" resource_type regardless of engine (aws/
-        # connector.py's fetch_live_inventory doesn't split redis vs
-        # memcached vs valkey either) - matched here for consistency, not
-        # further split by product_description's real redis/memcached/
-        # valkey value even though that data is available on the purchase
-        # record. Redundancy: unlike RDS, the reservation record itself
-        # carries no Multi-AZ signal (confirmed via boto3's service model -
-        # no such field exists on ReservedCacheNode), so this is "N/A"
-        # rather than guessed - same reasoning Azure Reservations use when
-        # a purchase record doesn't carry a needed signal.
-        scope_resource_type = "Amazon ElastiCache"
+        # Split by engine (Redis/Memcached/Valkey) as of 2026-08-23, matching
+        # aws/connector.py's inventory taxonomy - previously kept as one flat
+        # "Amazon ElastiCache" bucket, which made it impossible to check
+        # Database Savings Plans' real Valkey-only restriction (confirmed
+        # against the actual Database Savings Plans pricing table). RIs
+        # remain purchasable and eligible for all three engines - this split
+        # only makes the SP-side distinction checkable, it doesn't change RI
+        # eligibility. product_description carries the real engine
+        # ("redis"/"memcached"/"valkey", confirmed via a real "memcached"
+        # example in AWS's own docs - same convention as DescribeCacheClusters's
+        # Engine field), so no guessing is needed, just reading data that was
+        # already on the purchase record and simply unused until now.
+        # Redundancy: the reservation record carries no Multi-AZ signal at
+        # all (confirmed via boto3's service model - no such field exists on
+        # ReservedCacheNode), so this is "N/A" rather than guessed - same
+        # reasoning Azure Reservations use when a purchase record doesn't
+        # carry a needed signal.
+        scope_resource_type = map_elasticache_engine(purchase.get("product_description") or "")
+        scope_os = "N/A"
+        scope_redundancy = "N/A"
+    elif service == "MemoryDB":
+        # Deliberately flat "Amazon MemoryDB" (NOT split by engine like
+        # ElastiCache above) - confirmed via boto3's service model that
+        # MemoryDB's ReservedNode purchase record carries no engine/product-
+        # description field at all, unlike ElastiCache's ReservedCacheNode.
+        # Splitting here while the purchase record can't specify engine
+        # would create a scope_resource_type this fetch could never actually
+        # produce for any real reservation, permanently breaking coverage
+        # matching - see aws/connector.py's MemoryDB inventory block for the
+        # matching, deliberately-flat resource_type on the demand side.
+        scope_resource_type = "Amazon MemoryDB"
         scope_os = "N/A"
         scope_redundancy = "N/A"
     elif service == "Redshift":
