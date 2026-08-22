@@ -132,6 +132,24 @@ def derive_reservation_commitment_fields(purchase: dict) -> Optional[dict]:
                     f"'{sku_name}' doesn't match a known General Purpose (D-series) or Memory Optimized (E-series) "
                     f"prefix) - defaulted to General Purpose, the more common tier.")
 
+    elif resource_type == "AppService":
+        # Added 2026-08-23 - same missing-branch gap as MySQL/PostgreSQL
+        # above, found in the same audit pass. Pricing side (pricing/
+        # sku_mapping.py's _plan_app_service) already fully supports
+        # Reservation pricing - confirmed live against the Retail Prices API
+        # that skuName matches ARM's own sku.name tier code directly,
+        # INCLUDING the space some v2/early-v3 codes carry (e.g. "I3 v2",
+        # "P2 v3") - that's the exact same field azure_conn/connector.py's
+        # live inventory fetch captures via its generic top-level
+        # topSku = tostring(sku.name) extraction, so a purchase record's
+        # sku_name needs no reformatting to match a live inventory resource's
+        # SKU. quantity IS the real instance count (App Service Plan
+        # reservations are purchased per-instance, confirmed via
+        # analysis/ri_eligibility.py's "instance" coverage-model
+        # classification for this type) - identical semantics to
+        # VirtualMachines above, no conversion.
+        scope_resource_type, scope_sku, reserved_qty = "App Service", sku_name, quantity
+
     elif resource_type == "DedicatedHost":
         # Reservation-side sku_name uses a space ("DSv3 Type3" - confirmed
         # against db/seed.py's real example); this app's SKU convention
@@ -266,7 +284,7 @@ def derive_reservation_commitment_fields(purchase: dict) -> Optional[dict]:
         is_inferred = True
 
     return {
-        "commitment_type":     "Reserved Instance" if resource_type in ("VirtualMachines", "DedicatedHost", "RedisCache") else "Reserved Capacity",
+        "commitment_type":     "Reserved Instance" if resource_type in ("VirtualMachines", "DedicatedHost", "RedisCache", "AppService") else "Reserved Capacity",
         "scope_sku":           scope_sku,
         "scope_resource_type": scope_resource_type,
         "scope_region":        region,
