@@ -301,6 +301,15 @@ _RULES = {
     "AWS DMS Serverless":             lambda sku: (False, "AWS DMS Serverless has no Reserved Instance offering - Reserved Instances require a fixed instance class to reserve, and Serverless bills per-DCU-hour instead. Eligible for Database Savings Plans instead."),
     "Amazon Keyspaces":               lambda sku: (False, "Amazon Keyspaces is fully serverless (provisioned Read/Write Capacity Units, no instance to reserve) - confirmed via boto3's keyspaces service model, no Reserved*-style operation exists at all. Eligible for Database Savings Plans instead."),
     "AWS Fargate":                    lambda sku: (False, "AWS Fargate has no Reserved Instance concept - you bill your own chosen vCPU/memory directly, not a purchasable instance type. Confirmed via boto3's ecs service model. Eligible for Compute Savings Plans instead."),
+    # Added 2026-08-23 - found missing while auditing the full RI/SP
+    # coverage picture for the user: SageMaker was added to inventory
+    # without an explicit rule here, so it had been silently defaulting to
+    # eligible=True (check_eligibility()'s "no rule encoded yet" fallback),
+    # the exact same regression class already caught once for DocumentDB
+    # Serverless. Confirmed via boto3's sagemaker service model: no
+    # Reserved*-style operation exists for either resource type.
+    "Amazon SageMaker Endpoint":          lambda sku: (False, "SageMaker Endpoints have no Reserved Instance offering - confirmed via boto3's sagemaker service model (no Reserved*-style operation exists). Eligible for SageMaker AI Savings Plans instead."),
+    "Amazon SageMaker Notebook Instance": lambda sku: (False, "SageMaker Notebook Instances have no Reserved Instance offering - confirmed via boto3's sagemaker service model (no Reserved*-style operation exists). Eligible for SageMaker AI Savings Plans instead."),
 }
 
 
