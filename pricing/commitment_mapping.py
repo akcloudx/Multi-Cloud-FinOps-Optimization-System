@@ -31,6 +31,7 @@ leaving it out. The raw ReservationPurchase row is stored either way (see
 data/sync_pipeline.py) - only the simplified/derived row is skipped.
 """
 
+import re
 from typing import Optional
 
 # Reservation-side sku_name tier token -> this app's TIER code (matches
@@ -48,6 +49,37 @@ _SQL_TIER_TOKEN_TO_CODE = {"GP": "GP", "BC": "BC", "HYPERSCALE": "HS"}
 _REDIS_ENTERPRISE_LETTER_TO_FAMILY = {
     "B": "Balanced", "M": "MemoryOptimized", "C": "ComputeOptimized", "F": "FlashOptimized", "E": "Enterprise",
 }
+
+# MySQL/PostgreSQL Flexible Server reservation sku_name is the bare real VM
+# size ("Standard_D4ds_v5") with NO tier field at all - confirmed via a real
+# downloaded Retail Prices API scan, unlike SQL Database's sku_name (which
+# encodes tier directly, e.g. "GP_Gen5_4"). This app's own SKU convention
+# needs "{tier}_{vm_size}" (see pricing/sku_mapping.py's _plan_postgresql/
+# _plan_mysql docstring), so the tier has to be inferred from the VM series
+# prefix - Azure's D-series family is General Purpose and E-series is Memory
+# Optimized across every series confirmed live for both services (Ddsv6/
+# Dadsv5/Dsv3/... all General Purpose; Esv3/Edsv6/Edsv5/Eadsv5/Easv5/... all
+# Memory Optimized) - a well-established, publicly documented Azure family
+# naming convention, not something specific to this one lookup. B-series
+# (Burstable) and EC-/DC-series (Confidential Compute) reservations don't
+# exist in the real API at all (confirmed live - zero entries for either),
+# so a real purchase record can never actually carry one of those series
+# codes here regardless.
+_FLEX_SERIES_PREFIX_RE = re.compile(r"^(?:Standard_)?([A-Za-z]+?)\d")
+
+
+def _flex_server_tier(vm_size: str) -> tuple:
+    """Returns (tier, is_inferred). Defaults to GeneralPurpose (the more
+    common tier) with is_inferred=True for any series prefix outside the
+    confirmed D/E families, same "safe default, flagged not fabricated"
+    discipline as the Redis Enterprise family inference above."""
+    m = _FLEX_SERIES_PREFIX_RE.match((vm_size or "").strip())
+    prefix = m.group(1).upper() if m else ""
+    if prefix.startswith("D"):
+        return "GeneralPurpose", False
+    if prefix.startswith("E"):
+        return "MemoryOptimized", False
+    return "GeneralPurpose", True
 
 
 def derive_reservation_commitment_fields(purchase: dict) -> Optional[dict]:
@@ -74,6 +106,31 @@ def derive_reservation_commitment_fields(purchase: dict) -> Optional[dict]:
         # quantity IS the real instance count - identical semantics to this
         # app's reserved_qty="resources covered" convention, no conversion.
         scope_resource_type, scope_sku, reserved_qty = "Compute", sku_name, quantity
+
+    elif resource_type in ("MySql", "PostgreSql"):
+        # Added 2026-08-23 - found missing while auditing this file for the
+        # same "real inventory + real eligibility + no mapper branch" gap
+        # already fixed for Cosmos DB. Unlike Cosmos DB, the pricing side
+        # (pricing/sku_mapping.py's _plan_postgresql/_plan_mysql) already
+        # fully supports Reservation pricing - only this mapping branch was
+        # missing. Confirmed via a real downloaded Retail Prices API scan
+        # that Flexible Server Reservations are purchased per-instance at a
+        # specific VM size (same quantity=instance-count semantics as
+        # VirtualMachines above, NOT a pooled/reconstructed-SKU case like
+        # SQL Database or Cosmos DB), and are genuinely region-scoped like
+        # every "normal" reservation type here (no Cosmos-DB-style Global
+        # purchase concept). sku_name is the bare VM size with no tier
+        # field - see _flex_server_tier() above for how the tier is
+        # inferred from the series prefix.
+        scope_resource_type = "Azure Database for MySQL" if resource_type == "MySql" else "Azure Database for PostgreSQL"
+        tier, tier_is_inferred = _flex_server_tier(sku_name)
+        scope_sku = f"{tier}_{sku_name}"
+        reserved_qty = quantity
+        if tier_is_inferred:
+            is_inferred = True
+            note = (f"Service tier can't be determined from the purchase record's VM series alone (sku_name "
+                    f"'{sku_name}' doesn't match a known General Purpose (D-series) or Memory Optimized (E-series) "
+                    f"prefix) - defaulted to General Purpose, the more common tier.")
 
     elif resource_type == "DedicatedHost":
         # Reservation-side sku_name uses a space ("DSv3 Type3" - confirmed
