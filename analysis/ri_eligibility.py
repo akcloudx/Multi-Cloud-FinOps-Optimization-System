@@ -255,7 +255,11 @@ _RULES = {
     "Azure DocumentDB":              lambda sku: (True, "Eligible for Reserved Instances - verified live, real Reservation catalog entries exist (Coordinator Node 1 vCore, confirmed 1yr/3yr pricing). This app doesn't price DocumentDB yet (see sp_eligibility.py/pricing/sku_mapping.py for the real, disclosed reason), but the underlying Azure product genuinely does sell reservations for it."),
     "Azure Database Migration Service": lambda sku: (False, "Azure Database Migration Service has no Reservation offering at all - verified live, zero Reservation entries exist across all three tiers. (It IS eligible for Savings Plan for Databases - see sp_eligibility.py.)"),
     "Azure Data Factory": lambda sku: (True, "Eligible for Reserved Capacity, but it's a pure subscription-wide 'buy N cores of a compute type' spend commitment with no per-resource allocation at all - Microsoft's own docs confirm a reservation 'does not pre-allocate or reserve specific infrastructure' and applies automatically to ANY matching data flow, existing or future. Not eligible for Savings Plan for Compute or Databases (not on either official coverage list)."),
-    "Azure Data Explorer": lambda sku: (True, "Eligible for Reserved Capacity, but it ONLY discounts a separate services 'markup' fee - cluster compute/networking/storage are billed and reserved (via Savings Plan for Compute, if applicable) separately. Verified live: purchasing needs no SKU/size/region at all, just a term - applies globally to every Data Explorer deployment in the subscription."),
+    "Azure Data Explorer": lambda sku: (
+        (True, "Eligible for Reserved Capacity (Standard tier) - only discounts a separate services 'markup' fee (~$0.11/hr/node in most regions, verified live), NOT cluster compute/networking/storage (billed and reserved separately). Purchased per-node; Microsoft's docs say the discount applies to all deployments/regions once bought, but the reservation itself is still priced per-region at purchase time (verified live: real catalog entries currently exist for only some regions, e.g. westus2, not others like australiaeast).")
+        if (sku or "").split("_", 1)[0] == "Standard" else
+        (False, f"Basic (Dev/No SLA) tier Data Explorer clusters have no Engine Cluster Markup fee at all - verified live, zero pricing/reservation items exist for this tier. '{sku}' is Basic tier.")
+    ),
     "Azure Backup Storage": lambda sku: (True, "Eligible for Reserved Capacity for the vault-standard tier only (not vault-archive, not Protected Instance cost) - verified live, sold ONLY in 100 TiB/1 PiB blocks, applied subscription/resource-group-wide, not tied to any specific Recovery Services Vault."),
     "Azure NetApp Files": lambda sku: (True, "Eligible for Reserved Capacity for Standard/Premium/Ultra service levels (not the Flexible service level) - verified live, sold ONLY in 100 TiB/1 PiB blocks per service-level+region, not tied to a specific capacity pool. Cool-access capacity pools only get the reservation benefit on 'hot' tier consumption; cross-region replication and backup add-ons aren't covered."),
     "Microsoft Fabric": lambda sku: (True, "Eligible for Reserved Capacity - verified live, real per-CU pricing exists (1yr and 3yr both give the same ~$0.1249/CU-hr effective rate, a real finding not a bug). Not eligible for any Savings Plan - see sp_eligibility.py."),
@@ -392,7 +396,7 @@ def check_eligibility(resource_type: str, sku: str) -> Tuple[bool, str]:
 _CAPACITY_POOLED_TYPES = {
     "Azure Cosmos DB", "Azure Databricks", "Azure Synapse Analytics",
     "Azure SQL Database", "Azure SQL Managed Instance", "Azure SQL Elastic Pool",
-    "Azure SQL Managed Instance Pool", "Microsoft Fabric",
+    "Azure SQL Managed Instance Pool", "Microsoft Fabric", "Azure Data Explorer",
 }
 #   Azure Data Factory: verified live (Microsoft Learn, 2026-08) - a data flow
 #              reservation is a pure subscription-wide "buy N cores of compute
@@ -410,16 +414,30 @@ _CAPACITY_POOLED_TYPES = {
 #              gap is meaningless here in a more absolute way than Storage/
 #              Files' "minimum purchase size dwarfs a resource" reason -
 #              kept in "unmeasurable", not "capacity".
-#   Azure Data Explorer: verified live (Microsoft Learn, 2026-08) - even more
-#              purely pooled than Data Factory. A Data Explorer reservation
-#              doesn't cover cluster compute/networking/storage at all (those
-#              bill as normal VM costs) - it ONLY discounts a separate
-#              "markup" fee layered on top, and purchasing one needs no SKU,
-#              size, core count, or even region: "you only need to specify
-#              the term, it will apply to all deployments of Azure Data
-#              Explorer in all regions" (the docs' own words). Zero
-#              dimensions exist to match against any single resource -
-#              "unmeasurable" is the only correct classification.
+#   Azure Data Explorer: moved OUT of unmeasurable and into capacity-pooled,
+#              2026-08-23, once live inventory tracking was built for it
+#              (azure_conn/connector.py) - the ORIGINAL "unmeasurable"
+#              classification below was based on "this app can't represent
+#              it as inventory at all," a premise that's no longer true.
+#              A Data Explorer reservation doesn't cover cluster compute/
+#              networking/storage at all (those bill as normal VM costs) -
+#              it ONLY discounts a separate "markup" fee layered on top,
+#              purchased as a real node count (this app's inventory SKU now
+#              captures the same unit via sku.capacity - see
+#              pricing/sku_mapping.py's _plan_data_explorer), small/granular
+#              enough to plausibly correlate with actual cluster node counts,
+#              same reasoning as SQL DB's vCore reservations. Microsoft's own
+#              docs state the discount "will apply to all deployments of
+#              Azure Data Explorer in all regions" once purchased (pooled
+#              application) - but verified live (2026-08) against the real
+#              Retail Prices API, the reservation is still PRICED per
+#              region at purchase time like a normal Reservation (real
+#              armRegionName values, e.g. 'westus2'), not "Global" the way
+#              Cosmos DB/Databricks reservations literally are - only one
+#              region currently has a populated catalog entry, most others
+#              (including australiaeast, checked directly) return zero. This
+#              app's normal "query live, no data if genuinely absent"
+#              pattern already handles that gap safely either way.
 #   Azure Backup Storage: verified live (Microsoft Learn, 2026-08) - same
 #              "unmeasurable" shape as Blob Storage/Files, for the same
 #              reason: sold ONLY in 100 TiB or 1 PiB blocks, applied
@@ -436,7 +454,7 @@ _CAPACITY_POOLED_TYPES = {
 #              smaller than the 100 TiB minimum purchase, so per-pool gap
 #              tracking would be meaningless even though this app could
 #              technically ingest individual capacity pool resources.
-_UNMEASURABLE_TYPES = {"Azure Blob Storage", "Azure Files", "Azure Data Factory", "Azure Data Explorer", "Azure Backup Storage", "Azure NetApp Files"}
+_UNMEASURABLE_TYPES = {"Azure Blob Storage", "Azure Files", "Azure Data Factory", "Azure Backup Storage", "Azure NetApp Files"}
 
 
 def get_coverage_model(resource_type: str) -> str:

@@ -307,6 +307,19 @@ RI_ONLY_INVENTORY = [
      "payg_hourly_usd": 13.44, "avg_daily_running_hours": 24,
      "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
 
+    # Azure Data Explorer — Reserved Capacity (Engine Cluster Markup fee only).
+    # RI covers: the markup fee only, NOT cluster compute/storage/networking
+    # (billed and reserved separately - see RI_COVERAGE_NOTES below). SKU
+    # convention: "{tier}_{vmSize}_{capacity}" - real example from Microsoft's
+    # own REST API reference (2026-08): tier=Standard, vmSize=Standard_L16as_v3,
+    # capacity=2 nodes. Real live-fetched rate: 2 x $0.11/hr markup (australiaeast).
+    {"resource_id": "ADX-Prod-01", "resource_name": "prod-telemetry-adx",
+     "resource_type": "Azure Data Explorer",
+     "resource_state": "Running",
+     "region": "australiaeast", "os": "N/A", "sku": "Standard_Standard_L16as_v3_2",
+     "payg_hourly_usd": 0.22, "avg_daily_running_hours": 24,
+     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+
     # Azure Disk Storage — Reserved (P30+ Premium SSD only)
     # RI covers: Premium SSD P30 and larger. NOT: other disk types or smaller sizes.
     {"resource_id": "DISK-Prod-01", "resource_name": "prod-vm-disk-p30",

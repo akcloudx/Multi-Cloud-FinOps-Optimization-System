@@ -535,7 +535,19 @@ Resources
     // - picked up by the existing generic top-level `topSku` fallback below
     // with no dedicated extraction needed, same as Dedicated Host/Redis
     // Enterprise.
-    'microsoft.fabric/capacities'
+    'microsoft.fabric/capacities',
+    // Azure Data Explorer (Kusto) clusters have `sku` as a top-level field
+    // (name, tier: 'Basic'|'Standard', capacity: int node count) - confirmed
+    // via Microsoft's own REST API reference, 2026-08. Unlike Dedicated
+    // Host/Redis Enterprise/Fabric, this app needs BOTH sku.name AND
+    // sku.tier/sku.capacity (pricing genuinely depends on tier, and node
+    // count is a real billing multiplier - see pricing/sku_mapping.py's
+    // _plan_data_explorer), so it gets its own dedicated extraction below
+    // rather than riding the generic topSku fallback. Also has a genuine
+    // Running/Stopped lifecycle (properties.state, confirmed via Microsoft's
+    // REST API reference, 2026-08 - clusters can be manually or
+    // automatically stopped after inactivity), unlike most PaaS types here.
+    'microsoft.kusto/clusters'
 )
 // Every Azure SQL logical server auto-creates a "master" system database -
 // it's not billable and not user-managed, so exclude it from inventory.
@@ -580,6 +592,18 @@ Resources
     // distinguishable from current inventory data" disclaimer.
     pgMysqlSkuName = tostring(sku.name),
     pgMysqlSkuTier = tostring(sku.tier),
+    // Data Explorer clusters report tier/capacity at the SAME top-level
+    // sku.tier/sku.capacity path as PostgreSQL/MySQL Flexible Server above
+    // (a generic ARM AzureSku shape reused across resource types) - named
+    // separately here for clarity, same reasoning as poolSkuName/
+    // pgMysqlSkuName/topSku all independently reading sku.name below.
+    adxSkuTier = tostring(sku.tier),
+    adxSkuCapacity = tostring(sku.capacity),
+    // Real state values (Creating/Running/Stopping/Stopped/Starting/...) -
+    // a DIFFERENT ARM path than VMs' properties.extended.instanceView.
+    // powerState.displayStatus, confirmed via Microsoft's own REST API
+    // reference, 2026-08. Combined into the shared powerState field below.
+    adxState = tostring(properties.state),
     topSku     = tostring(sku.name),
     redisSkuName  = tostring(properties.sku.name),
     redisFamily   = tostring(properties.sku.family),
@@ -682,6 +706,17 @@ Resources
             strcat(pgMysqlSkuTier, "_", pgMysqlSkuName),
         ""
     ),
+    // "{tier}_{vmSize}_{capacity}" (e.g. "Standard_Standard_D13_v2_2") - the
+    // convention pricing/sku_mapping.py's _plan_data_explorer parses. tier
+    // gates whether the Engine Cluster Markup fee applies at all (Basic/Dev
+    // tier has none - verified live), capacity is the real node count that
+    // multiplies the flat per-node rate. Gated to microsoft.kusto/clusters
+    // since sku.name/tier/capacity are generic top-level ARM fields.
+    adxSku = case(
+        type == 'microsoft.kusto/clusters' and isnotempty(adxSkuTier) and isnotempty(topSku) and isnotempty(adxSkuCapacity),
+            strcat(adxSkuTier, "_", topSku, "_", adxSkuCapacity),
+        ""
+    ),
     // "{CapacityMode}_{ServiceTier}" (e.g. "Provisioned_GeneralPurpose") -
     // the convention pricing/sku_mapping.py's _plan_cosmos_db parses.
     // "Provisioned" (not "Standard"/"Autoscale") is deliberate - see that
@@ -717,8 +752,18 @@ Resources
         isnotempty(pgMysqlSku), pgMysqlSku,
         isnotempty(cosmosSku), cosmosSku,
         isnotempty(aciSku), aciSku,
+        isnotempty(adxSku), adxSku,
         isnotempty(topSku), topSku,
         'N/A'
+    ),
+    // Data Explorer clusters report state at properties.state (Running/
+    // Stopped/Starting/Stopping/Creating/...), a different ARM path than
+    // VMs' powerState - combined into the same shared field _map_power_state
+    // already reads, so no Python-side change is needed (it already does a
+    // case-insensitive "running"/"stopped"/"deallocated" substring match).
+    resolvedPowerState = case(
+        type == 'microsoft.kusto/clusters', adxState,
+        powerState
     ),
     // Verified live (2026-08): properties.zoneRedundant is a real ARM bool
     // on BOTH Microsoft.Sql/servers/databases and .../elasticPools - and a
@@ -742,7 +787,7 @@ Resources
     )
 | project
     id, name, type, location, subscriptionId,
-    powerState, resolvedSku, osType, resolvedRedundancy, resolvedHaReplicas,
+    resolvedPowerState, resolvedSku, osType, resolvedRedundancy, resolvedHaReplicas,
     resourceGroup, tags
 | order by type asc, name asc
 """
@@ -779,7 +824,7 @@ def fetch_live_inventory(creds: AzureCredentials) -> pd.DataFrame:
             "Resource ID":             r.get("id", ""),
             "Resource Name":           r.get("name", ""),
             "Resource Type":           _map_resource_type(rtype),
-            "Resource State":          _map_power_state(r.get("powerState", "")),
+            "Resource State":          _map_power_state(r.get("resolvedPowerState", "")),
             "Region":                  r.get("location", ""),
             "OS":                      r.get("osType", "N/A") or "N/A",
             "SKU":                     r.get("resolvedSku", "N/A") or "N/A",
@@ -815,6 +860,7 @@ def _map_resource_type(azure_type: str) -> str:
         "microsoft.databricks/workspaces":              "Azure Databricks",
         "microsoft.web/serverfarms":                    "App Service",
         "microsoft.fabric/capacities":                   "Microsoft Fabric",
+        "microsoft.kusto/clusters":                      "Azure Data Explorer",
     }
     return mapping.get(azure_type, azure_type)
 

@@ -1386,6 +1386,56 @@ def _plan_databricks(sku: str) -> SkuQueryPlan:
     return SkuQueryPlan(supported=False, reason="Databricks Commit Unit (DBCU) reservations are real and priced (verified live), but apply as a subscription-wide pooled discount across all workloads/VM SKUs, not a per-resource rate this app's SKU-matching model can represent.")
 
 
+_ADX_SKU_RE = re.compile(r"^(Basic|Standard)_(.+)_(\d+)$")
+
+
+def _plan_data_explorer(sku: str) -> SkuQueryPlan:
+    # Added 2026-08-23 - Azure Data Explorer (Microsoft.Kusto/clusters) was
+    # previously entirely untracked (no live inventory fetch existed at
+    # all). This app's SKU convention for it is "{tier}_{vmSize}_{capacity}"
+    # (e.g. "Standard_Standard_D13_v2_2" for a 2-node Standard-tier D13_v2
+    # cluster) - see azure_conn/connector.py's adxSku extraction. tier and
+    # capacity come straight from the real top-level sku.tier/sku.capacity
+    # ARM fields (confirmed via Microsoft's own REST API reference, 2026-08:
+    # AzureSku = {name, tier: 'Basic'|'Standard', capacity: int}).
+    #
+    # Verified live against the Retail Prices API: Azure Data Explorer's
+    # OWN dedicated meter is a single flat "Standard Engine Cluster Markup"
+    # ($0.11/hr in most commercial regions, $0.138/hr in US Gov, confirmed
+    # identical across 54+ regions checked) - it does NOT vary by VM size at
+    # all (skuName is always literally "Standard", never a per-series rate).
+    # The underlying VM compute/storage/networking bills separately under
+    # Microsoft.Compute, same "service fee tracked, underlying infra
+    # excluded" convention already used for Databricks (see
+    # RI_COVERAGE_NOTES). Basic/Dev("No SLA") tier has NO markup meter at
+    # all (verified live, zero Consumption items) - genuinely free of this
+    # fee, not just untracked, hence supported=False rather than a guess.
+    # capacity (node count) directly multiplies the flat per-node rate.
+    #
+    # Reservation pricing also verified real and live (2 items: 1yr/3yr,
+    # skuName "Standard") - but unlike every claim in the pre-existing
+    # ri_eligibility.py comment, it is NOT region-independent: a region
+    # query for 'westus2' returns real data, 'australiaeast' returns zero -
+    # genuinely region-scoped like a normal Reservation, just not yet
+    # rolled out everywhere. No special-casing needed here - the normal
+    # "query live, no data if genuinely absent in this region" pattern
+    # already handles partial rollout correctly (same as newer Dedicated
+    # Host series). Multiplied by capacity for the same flat-per-node reason
+    # as Consumption above.
+    match = _ADX_SKU_RE.match((sku or "").strip())
+    if not match:
+        return SkuQueryPlan(supported=False, reason=f"SKU '{sku}' doesn't match the expected '{{tier}}_{{vmSize}}_{{capacity}}' pattern.")
+    tier, _vm_size, capacity_str = match.group(1), match.group(2), match.group(3)
+    if tier != "Standard":
+        return SkuQueryPlan(supported=False, reason="Basic (Dev/No SLA) tier Data Explorer clusters have no Engine Cluster Markup fee at all - verified live, zero pricing items exist for this tier.")
+    capacity = max(1, int(capacity_str))
+    return SkuQueryPlan(
+        supported=True, service_name="Azure Data Explorer", match_field="skuName",
+        consumption_match_value="Standard", consumption_multiplier=capacity,
+        reservation_match_value="Standard", reservation_multiplier=capacity,
+    )
+
+
 def _plan_unmeasurable_storage(sku: str) -> SkuQueryPlan:
     # Blob Storage / Files reservations are sold in 100 TB+/10 TiB+ blocks
     # far larger than any single resource - already marked "unmeasurable" in
@@ -1438,6 +1488,7 @@ _PLAN_RESOLVERS = {
     "Azure Cache for Redis Enterprise": _plan_redis_enterprise,
     "Azure Cosmos DB":               _plan_cosmos_db,
     "Azure Databricks":              _plan_databricks,
+    "Azure Data Explorer":           _plan_data_explorer,
     "Azure Blob Storage":            _plan_unmeasurable_storage,
     "Azure Files":                   _plan_unmeasurable_storage,
     "Azure Database for PostgreSQL": _plan_postgresql,
