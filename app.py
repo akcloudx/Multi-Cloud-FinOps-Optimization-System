@@ -126,7 +126,7 @@ inject_global_css()
 # Imports
 from data.inventory_loader import get_compute_inventory
 from data.sync_pipeline import run_ingestion_pipeline
-from pricing.retail_pricing import price_inventory, usd, fmt_currency, get_inr_rate
+from pricing.retail_pricing import usd, fmt_currency, get_inr_rate
 from pricing.commitment_pricing import get_commitment_prices, MONTH_HOURS
 from ui.charts import get_cost_distribution_chart, get_waterfall_savings_chart, get_recommendation_opportunity_chart
 from commitments.existing_commitments import (

@@ -40,10 +40,18 @@ Base.metadata.create_all(engine)
 print("[OK] Tables created successfully in Azure SQL Database!")
 
 print("Seeding initial benchmark datasets into Azure SQL Database...")
-import db.schema
-db.schema._engines["AZURE"] = engine
-db.schema._engines["AWS"]   = engine
-
+# seed_if_empty()/seed_aws_if_empty() resolve their own DB engine via
+# db.schema.get_engine(), which reads DATABASE_URL from the environment
+# directly (db/schema.py:71) - the same env var this script already read
+# into `db_url` above, so no manual engine wiring is needed here. This
+# used to (wrongly) try `db.schema._engines["AZURE"] = engine` /
+# `db.schema._engines["AWS"] = engine` - leftover from a pre-2026-08
+# architecture where db/schema.py cached engines in a module-level
+# `_engines` dict. That dict no longer exists (schema.py now uses
+# `_base_mssql_engines`/`_mode_engines`, keyed by (provider, mode) for the
+# demo/live split), so those two lines would raise AttributeError the
+# instant this script ran - found and removed 2026-08-23, confirmed via a
+# direct grep that db.schema has no `_engines` attribute at all anymore.
 seed_if_empty()
 seed_aws_if_empty()
 

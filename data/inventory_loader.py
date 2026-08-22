@@ -12,14 +12,13 @@ These are normalized/provider-neutral in spirit but are NOT the FOCUS
 see analysis/focus_mapping.py for the actual FOCUS v1.2 projection, exposed
 in the UI via the Asset Inventory tab's "FOCUS View" toggle.
 
-REAL AZURE EQUIVALENT (when you move off mock data):
-  Azure Resource Graph query, e.g.:
-    Resources
-    | where type in (
-        'microsoft.compute/virtualmachines',
-        'microsoft.sql/servers/databases')
-    | extend powerState = tostring(properties.extended.instanceView.powerState.displayStatus)
-  Use azure-mgmt-resourcegraph SDK, authenticated via Workload Identity Federation.
+This module is purely the READ side and doesn't care whether a row came
+from demo/seed data or a real live fetch - both land in the identical
+`cloud_inventory` table shape via the same CloudInventory model, so one
+query path serves both. Live fetch is real and already wired up (Azure:
+azure_conn/connector.py's fetch_live_inventory via Resource Graph; AWS:
+aws/connector.py's fetch_live_inventory across all regions) - called from
+data/sync_pipeline.py's write side, not from here.
 """
 
 import pandas as pd

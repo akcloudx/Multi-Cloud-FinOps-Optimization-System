@@ -250,6 +250,17 @@ if (-not $sharedSecretKey) {
 }
 if (-not $sharedSecretKey) { Fail "TENANT_SECRET_KEY resolved empty - refusing to deploy with a blank encryption key." }
 az functionapp config appsettings set --resource-group $ResourceGroupName --name $FunctionAppName --settings TENANT_SECRET_KEY="$sharedSecretKey" -o none
+# Unlike every other az call in this script, this one had no exit-code
+# check - confirmed as a real gap 2026-08-23: a transient DNS failure on
+# this exact call let the script print "[OK] Generated a new
+# TENANT_SECRET_KEY." (true - the LOCAL .NET generation above did succeed)
+# and continue straight past a Function App that never actually got the
+# key set. Since the Web App's matching TENANT_SECRET_KEY gets set later
+# using the same $sharedSecretKey variable in this same run, that mismatch
+# would silently break the cron sync's decryption of tenant secrets the
+# Web App encrypted - exactly the kind of "looked fine, wasn't" failure
+# the Fail() pattern exists to catch everywhere else in this script.
+if ($LASTEXITCODE -ne 0) { Fail "Setting TENANT_SECRET_KEY on Function App '$FunctionAppName'" }
 
 # Fix PowerShell 5.1 Join-Path syntax: use nested 2-argument Join-Path calls
 $parentPath   = Join-Path $PSScriptRoot ".."

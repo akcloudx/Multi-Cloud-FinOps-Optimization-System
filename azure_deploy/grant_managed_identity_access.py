@@ -37,8 +37,16 @@ def main() -> None:
     server, database = sys.argv[1], sys.argv[2]
     principals = sys.argv[3:]
 
+    # "tcp:" prefix + explicit port is required, not cosmetic - without it,
+    # Windows ODBC clients can default to trying the Named Pipes protocol
+    # first for an unqualified Server value, which Azure SQL Database does
+    # not support at all (TCP:1433 only) - fails with "Named Pipes
+    # Provider: Could not open a connection to SQL Server [64]" before ever
+    # attempting TCP. Confirmed as the real cause of a live deployment
+    # failure 2026-08-23 (protocol-ordering issue, not a credentials or
+    # firewall problem - the same connection succeeds once forced to TCP).
     conn = mssql_python.connect(
-        f"Server={server};Database={database};Encrypt=yes",
+        f"Server=tcp:{server},1433;Database={database};Encrypt=yes",
         token_provider=AzureCliCredential(),
         autocommit=True,
     )
