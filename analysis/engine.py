@@ -463,14 +463,34 @@ def reservation_analysis(
         .reset_index(name="running_count")
     )
 
-    # Supply side: all RI / Reserved Capacity commitments
+    # Split off globally-scoped commitments (scope_region == "Global") before
+    # building supply - Azure Cosmos DB Reservations are the first (and so
+    # far only) commitment type in this app with no region lock at all,
+    # confirmed 2026-08-23 directly against Azure's real Retail Prices API
+    # (every real Cosmos DB reservation price item carries
+    # "armRegionName": "Global", unlike every other Reservation type here,
+    # which are all region-scoped meters). The exact-tuple merge below
+    # requires a literal Region match, which "Global" can never satisfy
+    # against a real inventory row's actual region - handled as a fully
+    # separate, additive pooled comparison further down instead of forcing
+    # it through this merge, so every existing region-scoped commitment
+    # type's behavior here is completely unchanged.
     if ri_df.empty:
+        ri_df_regional = ri_df
+        ri_df_global = ri_df
+    else:
+        is_global_scope = ri_df["scope_region"] == "Global"
+        ri_df_regional = ri_df[~is_global_scope]
+        ri_df_global = ri_df[is_global_scope]
+
+    # Supply side: all RI / Reserved Capacity commitments
+    if ri_df_regional.empty:
         supply = pd.DataFrame(columns=[
             "Resource Type", "SKU", "Region", "OS", "Redundancy", "reserved_qty",
             "commitment_id", "hourly_usd_commitment", "term", "expiry_date"
         ])
     else:
-        supply = ri_df.rename(columns={
+        supply = ri_df_regional.rename(columns={
             "scope_sku":            "SKU",
             "scope_resource_type":  "Resource Type",
             "scope_region":         "Region",
@@ -538,6 +558,78 @@ def reservation_analysis(
         merged["coverage_model"] = merged["Resource Type"].apply(get_coverage_model)
         merged.loc[merged["coverage_model"] == "unmeasurable", "gap"] = 0
         merged.loc[merged["coverage_model"] == "unmeasurable", "excess"] = 0
+
+    # Globally-scoped commitments (split off above) - Cosmos DB Reservations
+    # have no per-region purchase concept at all (real quantity is a
+    # subscription-wide RU/s pool, confirmed via Azure's own reservation
+    # discount docs: "the reservation discount automatically applies to
+    # another matching resource" anywhere it's needed), so the comparison
+    # here is deliberately pooled across every region rather than run
+    # through the exact 5-tuple merge above: total running demand for a
+    # (Resource Type, SKU, OS, Redundancy) profile, summed across ALL
+    # regions, compared against this commitment's own reserved_qty. Region
+    # is not part of the join key (there's no real regional split to key
+    # on) and is set to the literal "Global" string afterward so the
+    # coverage table reads honestly, not as if it were one specific region.
+    # Deliberately mirrors the exact-tuple path above's gap/excess/
+    # eligibility logic verbatim (not refactored into a shared helper - the
+    # join key genuinely differs, and duplicating ~15 lines here is safer
+    # than parametrizing the well-exercised path above for a case that, so
+    # far, only ever fires for one resource type). Also deliberately does
+    # NOT deduplicate/sum multiple commitments sharing one profile beyond
+    # what the exact-tuple path above already does (or doesn't) for the
+    # identical scenario - consistent with existing behavior, not a new
+    # design decision specific to Global scope.
+    if not ri_df_global.empty:
+        # Scoped to ONLY the Resource Type(s) that actually have a Global
+        # commitment - without this, the outer join below would manufacture
+        # a spurious "Global" pseudo-row (reserved_qty=0, gap=running_count)
+        # for every OTHER resource type in inventory too (e.g. Compute/VMs,
+        # which have no Global reservation concept in real Azure at all),
+        # duplicating a "gap" that's often already correctly resolved by
+        # the exact-tuple regional path above - caught in testing before
+        # this shipped, not a hypothetical.
+        global_resource_types = set(ri_df_global["scope_resource_type"].dropna().unique())
+        global_demand = (
+            running_resources[running_resources["Resource Type"].isin(global_resource_types)]
+            .groupby(["Resource Type", "SKU", "OS", "Redundancy"])
+            .size()
+            .reset_index(name="running_count")
+        )
+        global_supply = ri_df_global.rename(columns={
+            "scope_sku":            "SKU",
+            "scope_resource_type":  "Resource Type",
+            "scope_os":             "OS",
+            "scope_redundancy":     "Redundancy",
+        })[[
+            "commitment_id", "SKU", "Resource Type", "OS", "Redundancy",
+            "reserved_qty", "hourly_usd_commitment", "term", "expiry_date",
+        ]].copy()
+        global_supply["Redundancy"] = global_supply["Redundancy"].fillna("N/A")
+
+        global_merged = global_demand.merge(
+            global_supply, on=["Resource Type", "SKU", "OS", "Redundancy"], how="outer"
+        ).fillna(0)
+        global_merged["Region"] = "Global"
+        global_merged["running_count"] = global_merged["running_count"].astype(int)
+        global_merged["reserved_qty"]  = global_merged["reserved_qty"].astype(int)
+        global_merged["gap"]           = (global_merged["running_count"] - global_merged["reserved_qty"]).clip(lower=0)
+        global_merged["excess"]        = (global_merged["reserved_qty"] - global_merged["running_count"]).clip(lower=0)
+
+        if global_merged.empty:
+            global_merged["is_eligible"] = pd.Series(dtype=bool)
+            global_merged["eligibility_reason"] = pd.Series(dtype=str)
+            global_merged["coverage_model"] = pd.Series(dtype=str)
+        else:
+            gelig = global_merged.apply(lambda r: check_eligibility(r["Resource Type"], r["SKU"]), axis=1)
+            global_merged["is_eligible"]        = gelig.apply(lambda t: t[0])
+            global_merged["eligibility_reason"] = gelig.apply(lambda t: t[1])
+            global_merged.loc[~global_merged["is_eligible"], "gap"] = 0
+            global_merged["coverage_model"] = global_merged["Resource Type"].apply(get_coverage_model)
+            global_merged.loc[global_merged["coverage_model"] == "unmeasurable", "gap"] = 0
+            global_merged.loc[global_merged["coverage_model"] == "unmeasurable", "excess"] = 0
+
+        merged = pd.concat([merged, global_merged], ignore_index=True)
 
     # Orphaned RI drain: Stopped VMs/resources whose profile is covered by an RI
     stopped = inventory_df[inventory_df["Resource State"] == "Stopped (deallocated)"]

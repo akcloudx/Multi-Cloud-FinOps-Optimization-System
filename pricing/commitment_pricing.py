@@ -312,8 +312,18 @@ def _fetch_azure_ri_rates(resource_type: str, sku: str, region: str, os_: str, r
     if not plan.supported or plan.reservation_unsupported_reason:
         return result
 
+    # Azure Cosmos DB Reservations are purchased globally, not per-region -
+    # confirmed 2026-08-23 directly against the real Retail Prices API
+    # (every real Cosmos DB reservation price item carries
+    # "armRegionName": "Global"), unlike every other Reservation type this
+    # app prices, which are genuinely region-scoped meters. Querying with
+    # the tenant's real region here would always return zero rows. Narrow,
+    # resource-type-scoped override rather than a general "sometimes query
+    # Global" parameter, since so far this is the only service that needs it.
+    ri_query_region = "Global" if resource_type == "Azure Cosmos DB" else region
+
     try:
-        ri_items = _query_retail_items("Reservation", region, plan, plan.reservation_match_value)
+        ri_items = _query_retail_items("Reservation", ri_query_region, plan, plan.reservation_match_value)
     except Exception:
         return result
     ri_items = _exclude_noise_meters(ri_items)

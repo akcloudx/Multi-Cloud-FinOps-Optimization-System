@@ -114,6 +114,51 @@ def derive_reservation_commitment_fields(purchase: dict) -> Optional[dict]:
             return None
         scope_resource_type, scope_sku, reserved_qty = "Azure Synapse Analytics", f"DW{quantity * 100}c", 1
 
+    elif resource_type == "CosmosDb":
+        # Added 2026-08-23 after confirming, directly against the real
+        # Retail Prices API, that Cosmos DB Reservations ARE real and
+        # priceable (pricing/sku_mapping.py's _plan_cosmos_db now supports
+        # this), but are architecturally unlike every other Reservation
+        # type here: sold at fixed discrete bucket-size SKUs ("100 RU/s",
+        # "1 Million RU/s", ... "30 Million RU/s", plus a parallel
+        # "Multi-master" set for multi-region-write accounts) rather than a
+        # continuous linear meter, AND purchased GLOBALLY - confirmed via
+        # real price items all carrying "armRegionName": "Global" - unlike
+        # every other reservation type, which are region-locked. See
+        # analysis/engine.py's reservation_analysis() for the matching
+        # "Global" scope_region handling this depends on.
+        bucket_to_ru = {
+            "100 RU/s": 100, "1 Million RU/s": 1_000_000, "2 Million RU/s": 2_000_000,
+            "3 Million RU/s": 3_000_000, "5 Million RU/s": 5_000_000, "10 Million RU/s": 10_000_000,
+            "20 Million RU/s": 20_000_000, "30 Million RU/s": 30_000_000,
+        }
+        if "Multi-master" in sku_name:
+            # Multi-region-write is a real, separate reservation SKU set,
+            # but this app's Cosmos DB inventory SKU convention
+            # ("{CapacityMode}_{ServiceTier}_{RUs}") has no multi-master
+            # dimension at all - can't map this to a real inventory profile
+            # without guessing, so it's dropped rather than mismapped, same
+            # "don't fabricate what can't be modeled" discipline as
+            # unmapped reserved_resource_type values in the module docstring.
+            return None
+        bucket_ru = bucket_to_ru.get(sku_name)
+        if bucket_ru is None or not quantity:
+            return None
+        total_ru = bucket_ru * quantity
+        # No signal on the purchase record distinguishes GeneralPurpose from
+        # BusinessCritical (confirmed: the real Reservation API's SKU only
+        # encodes RU/s bucket size, not service tier) - defaults to
+        # GeneralPurpose, the far more common tier, flagged as inferred
+        # rather than silently presented as fact.
+        scope_resource_type, scope_sku, reserved_qty = "Azure Cosmos DB", f"Standard_GeneralPurpose_{total_ru}", 1
+        is_inferred = True
+        note = (f"Cosmos DB Reservation service tier can't be determined from the purchase record (real Reservation "
+                f"SKU only encodes RU/s bucket size, e.g. '{sku_name}') - defaulted to GeneralPurpose, the more common tier.")
+        # Cosmos DB Reservations are purchased globally (see comment above),
+        # not against the purchase's own location - overrides the
+        # region-from-purchase default every other branch here uses.
+        region = "Global"
+
     elif resource_type == "SqlDatabases":
         parts = sku_name.split("_")
         if len(parts) < 2:

@@ -1200,12 +1200,29 @@ def _plan_cosmos_db(sku: str) -> SkuQueryPlan:
     else:
         return SkuQueryPlan(supported=False, reason=f"Unrecognized Cosmos DB service tier '{tier}' - expected GeneralPurpose or BusinessCritical.")
 
+    # Reservation side, added 2026-08-23: confirmed live against the real
+    # Retail Prices API that Cosmos DB Reservations ARE priced, but only at
+    # a fixed set of discrete bucket-size SKUs ("100 RU/s", "1 Million RU/s",
+    # "2 Million RU/s", ... up to "30 Million RU/s", plus a parallel
+    # "Multi-master" set for multi-region-write accounts) - not a single
+    # continuous per-RU/s meter. "100 RU/s" is always purchasable regardless
+    # of total size (confirmed: it's the SAME bucket the real "500 quantity
+    # of 100 RU/s meter" worked example in Microsoft's own reservation-
+    # charges docs uses for a 50,000 RU/s need), so - exactly mirroring
+    # Synapse's identical "Reservations only sold at the DW100c unit, scale
+    # by reservation_multiplier" precedent just above - this always prices
+    # against the 100 RU/s bucket and scales linearly. This is a
+    # deliberately conservative choice: if a real tenant's reservation used
+    # one of the larger bucket sizes at a better effective rate, this may
+    # slightly OVERstate the true cost, never understate it - same
+    # "don't guess in the direction that hides real spend" principle used
+    # elsewhere in this app (e.g. MemoryDB's engine default).
     return SkuQueryPlan(
         supported=True, service_name="Azure Cosmos DB", match_field="skuName",
-        consumption_match_value=sku_label, reservation_match_value="",
+        consumption_match_value=sku_label, reservation_match_value="100 RU/s",
         product_contains=product_contains,
         consumption_multiplier=max(1, ru_count // 100),
-        reservation_unsupported_reason="Cosmos DB Reserved Capacity is a subscription-wide RU/s pool sold in fixed bucket sizes (100 RU/s up to 30 Million RU/s), not priced linearly against any single resource's provisioned throughput - see get_coverage_model()=='capacity' in analysis/ri_eligibility.py.",
+        reservation_multiplier=max(1, ru_count // 100),
     )
 
 
