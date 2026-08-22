@@ -199,6 +199,21 @@ AWS_DATABASE_INVENTORY = [
      "payg_hourly_usd": 0.0745, "avg_daily_running_hours": 24,
      "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
 
+    # AWS DMS Serverless - a genuinely different resource ("ReplicationConfig",
+    # not "ReplicationInstance" above). Added 2026-08-23 alongside its new
+    # live fetch (aws/connector.py). Real rate: MinCapacityUnits (2 DCU
+    # here) x the real Single-AZ On-Demand rate for that tier, confirmed
+    # against real downloaded AWSDatabaseMigrationSvc price list data
+    # ($0.1639/hr for 2 DCU in us-east-1). No Reserved Instance concept,
+    # Database-SP-eligible only (same product family as provisioned DMS,
+    # already confirmed Database-SP-eligible).
+    {"resource_id": "dms-serverless-prod-migration-01", "resource_name": "prod-cdc-dms-serverless",
+     "resource_type": "AWS DMS Serverless",
+     "resource_state": "Running",
+     "region": "us-east-1", "os": "N/A", "sku": "2DCU-min",
+     "payg_hourly_usd": 0.1639, "avg_daily_running_hours": 24,
+     "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
+
     # Amazon Keyspaces — provisioned-throughput table (mirrors DynamoDB's
     # own SKU convention: this app's live fetch encodes provisioned RCU/WCU
     # into the SKU string since neither service has a literal AWS "SKU" the
@@ -497,6 +512,7 @@ AWS_DATABASE_SP_TYPES = {
     "Amazon DocumentDB Serverless",   # added 2026-08-23 - confirmed real via AWS's Database Savings Plans announcement, which explicitly calls out Serverless coverage alongside provisioned.
     "Amazon Neptune Serverless",      # added 2026-08-23 - same confirmation, AWS's Database Savings Plans announcement explicitly calls out Neptune Serverless coverage.
     "Amazon Neptune Analytics",       # added 2026-08-23 - confirmed via AWS's March 2026 announcement extending Database Savings Plans coverage to Neptune Analytics specifically (a separate product from Neptune Database/Neptune Serverless).
+    "AWS DMS Serverless",             # added 2026-08-23 - same DMS product family as "AWS DMS Replication Instance" above (already confirmed Database-SP-eligible).
 }
 
 # SageMaker AI Savings Plans - a genuinely separate, first-class Savings Plan
@@ -558,6 +574,8 @@ AWS_RI_COVERAGE_NOTES = {
     # rate (see aws/connector.py/pricing/aws_price_list.py) - genuinely
     # unlike every other resource type in this table.
     "Amazon Neptune Analytics":     ("Provisioned m-NCU graph capacity, fixed (not auto-scaling)", "Snapshot storage, data transfer. A Stopped graph still bills at 10% of the running rate (not $0/hr like every other Stopped resource in this app) - replica cost isn't modeled (no confirmed price list evidence replicas bill separately)"),
+    # Added 2026-08-23, same reasoning/caveat as DocumentDB/Neptune Serverless.
+    "AWS DMS Serverless":           ("DCU-hour capacity floor (MinCapacityUnits, see mapping notes - not live variable usage)", "Data transfer, real-time DCU usage above the MinCapacityUnits floor stays on-demand"),
     # Added 2026-08-23. No Reserved Instance concept exists for SageMaker at
     # all (confirmed: no equivalent of DescribeReservedInstances anywhere in
     # the sagemaker boto3 service model) - SageMaker-SP-eligible only, never

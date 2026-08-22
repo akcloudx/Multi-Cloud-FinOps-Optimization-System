@@ -566,6 +566,44 @@ def _fetch_neptune_analytics_price(sku: str, region: str, creds) -> Optional[flo
     return min(candidates) if candidates else None
 
 
+def _fetch_dms_serverless_price(sku: str, region: str, redundancy: str, creds) -> Optional[float]:
+    """DMS Serverless - sku is "{DCU}DCU-min" (MinCapacityUnits floor),
+    same reasoning as DocumentDB/Neptune Serverless. Real productFamily is
+    the SAME "Replication Server" family as provisioned DMS instances
+    (confirmed against a real downloaded AWSDatabaseMigrationSvc price
+    list file) - disambiguated via a "type": "Serverless" attribute plus a
+    discrete "capacityUsage" attribute matching the DCU tier exactly (1, 2,
+    4, 8, 16, 32, 64, 128, 192, 256, 384 - not a computed per-unit rate).
+    Single/Multi-AZ split reused from the existing DMS redundancy handling."""
+    try:
+        dcu = int(sku.replace("DCU-min", ""))
+    except (ValueError, AttributeError):
+        return None   # not our synthetic SKU shape - don't guess.
+
+    try:
+        session = boto3.Session(aws_access_key_id=creds.access_key_id, aws_secret_access_key=creds.secret_access_key)
+        client = session.client("pricing", region_name=_PRICING_API_REGION)
+        filters = [
+            {"Type": "TERM_MATCH", "Field": "regionCode", "Value": region},
+            {"Type": "TERM_MATCH", "Field": "productFamily", "Value": "Replication Server"},
+            {"Type": "TERM_MATCH", "Field": "type", "Value": "Serverless"},
+            {"Type": "TERM_MATCH", "Field": "capacityUsage", "Value": str(dcu)},
+            {"Type": "TERM_MATCH", "Field": "availabilityZone", "Value": "Multiple" if redundancy == "Zone Redundant" else "Single"},
+        ]
+        price_list = _get_products(client, "AWSDatabaseMigrationSvc", filters)
+    except Exception:
+        return None
+    if not price_list:
+        return None
+
+    candidates = []
+    for item in price_list:
+        prices = _extract_ondemand_prices(item)
+        if prices:
+            candidates.append(prices[0][0])
+    return min(candidates) if candidates else None
+
+
 def _extract_ondemand_prices(price_list_item: dict) -> list:
     """Returns every (price_usd, attributes) pair found under this product's
     terms.OnDemand section - deliberately NOT terms.Reserved, which lives
@@ -616,6 +654,8 @@ def _fetch_from_api(resource_type: str, sku: str, region: str, os_: str, redunda
         return _fetch_neptune_serverless_price(sku, region, creds)
     if resource_type == "Amazon Neptune Analytics":
         return _fetch_neptune_analytics_price(sku, region, creds)
+    if resource_type == "AWS DMS Serverless":
+        return _fetch_dms_serverless_price(sku, region, redundancy, creds)
 
     is_ec2 = (resource_type == "Compute")
     if is_ec2:

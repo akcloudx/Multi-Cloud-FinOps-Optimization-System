@@ -146,10 +146,10 @@ REQUIRED_AWS_POLICIES = [
         "Purpose":         "List keyspaces/tables (Keyspaces' own IAM actions use the historical cassandra: prefix, not keyspaces: - confirmed via AWS's Service Authorization Reference)",
     },
     {
-        "Policy / Action": "dms:DescribeReplicationInstances",
+        "Policy / Action": "dms:DescribeReplicationInstances / dms:DescribeReplicationConfigs / dms:DescribeReplications",
         "AWS Managed Policy": "(no dedicated managed policy - attach a custom inline policy, or the broad ReadOnlyAccess policy)",
         "Required":        "Yes — For DMS inventory",
-        "Purpose":         "Scan DMS replication instances - confirmed no AWS-managed read-only policy exists specifically for DMS user access (its managed policies are all internal service-linked-role policies)",
+        "Purpose":         "Scan DMS replication instances and DMS Serverless replications (added 2026-08-23) - confirmed no AWS-managed read-only policy exists specifically for DMS user access (its managed policies are all internal service-linked-role policies)",
     },
     {
         "Policy / Action": "ecs:ListClusters / ecs:ListTasks / ecs:DescribeTasks",
@@ -947,6 +947,59 @@ def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
                         "HA Replicas":             0,
                         "PAYG Hourly Cost USD":    0.0,
                         "Avg Daily Running Hours": 24,
+                        "Subscription":            account_id,
+                        "Provider":                "AWS",
+                        "Is Orphaned":             False,
+                    })
+        except (ClientError, BotoCoreError):
+            pass
+
+        # DMS Serverless - a genuinely different resource ("ReplicationConfig",
+        # not "ReplicationInstance" above), added 2026-08-23. Confirmed real
+        # via botocore's own installed dms service model:
+        # CreateReplicationConfig/DescribeReplicationConfigs, with a
+        # ComputeConfig.MinCapacityUnits/MaxCapacityUnits DCU range (DMS's
+        # own "DCU" - a different unit from DocumentDB's DCU, same acronym,
+        # unrelated products). Same "MinCapacity floor as steady-state
+        # baseline" reasoning as DocumentDB/Neptune Serverless. Real
+        # current status comes from describe_replications() (a genuinely
+        # separate call - DescribeReplicationConfigs only returns the
+        # config, not live status), matching the config back to its
+        # replication by ReplicationConfigArn.
+        try:
+            dms_serverless = session.client("dms", region_name=region)
+            status_by_config_arn = {}
+            try:
+                for page in dms_serverless.get_paginator("describe_replications").paginate():
+                    for repl in page.get("Replications", []):
+                        status_by_config_arn[repl.get("ReplicationConfigArn", "")] = repl.get("Status", "")
+            except (ClientError, BotoCoreError):
+                pass   # config-only fallback below still works without live status - defaults to Stopped rather than assuming Running.
+
+            for page in dms_serverless.get_paginator("describe_replication_configs").paginate():
+                for cfg in page.get("ReplicationConfigs", []):
+                    compute = cfg.get("ComputeConfig") or {}
+                    min_capacity = compute.get("MinCapacityUnits")
+                    if min_capacity is None:
+                        continue   # never fabricate a SKU from a missing value.
+                    config_arn = cfg.get("ReplicationConfigArn", "")
+                    status = status_by_config_arn.get(config_arn, "")
+                    is_running = status.lower() in ("running", "starting")
+                    is_multi_az = bool(compute.get("MultiAZ"))
+                    records.append({
+                        "Resource ID":             config_arn or cfg.get("ReplicationConfigIdentifier", ""),
+                        "Resource Name":           cfg.get("ReplicationConfigIdentifier", ""),
+                        "Resource Type":           "AWS DMS Serverless",
+                        "Resource State":          "Running" if is_running else "Stopped (deallocated)",
+                        "Region":                  region,
+                        "OS":                      "N/A",
+                        # Synthetic "{DCU}DCU-min" SKU, same convention as
+                        # DocumentDB/Neptune Serverless's "{unit}-min" SKUs.
+                        "SKU":                     f"{min_capacity}DCU-min",
+                        "Redundancy":              "Zone Redundant" if is_multi_az else "Locally Redundant",
+                        "HA Replicas":             0,
+                        "PAYG Hourly Cost USD":    0.0,
+                        "Avg Daily Running Hours": 24 if is_running else 0,
                         "Subscription":            account_id,
                         "Provider":                "AWS",
                         "Is Orphaned":             False,
