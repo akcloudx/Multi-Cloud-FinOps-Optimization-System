@@ -582,6 +582,26 @@ AWS_RI_COVERAGE_NOTES = {
     # shown in the RI Coverage tab.
     "Amazon SageMaker Endpoint":          ("Real-time inference endpoint instance hourly compute capacity", "Data processed, model storage. NOT RI-eligible - no Reserved Instance product exists for SageMaker, SageMaker-SP-eligible only"),
     "Amazon SageMaker Notebook Instance": ("Notebook instance hourly compute capacity", "EBS volume storage. NOT RI-eligible - no Reserved Instance product exists for SageMaker, SageMaker-SP-eligible only"),
+    # Documentation-only row, added 2026-08-23 - deliberately NOT a tracked
+    # inventory resource type (no row will ever appear for it in the Asset
+    # Inventory or Per-Resource Coverage tables below), included here so
+    # this real eligibility gap is disclosed rather than silently absent.
+    # Lambda Managed Instances (launched ~Dec 2025, confirmed via boto3
+    # 1.43.67 + AWS's own News Blog) is a real Lambda deployment mode that
+    # runs on genuine, dedicated EC2 capacity under the hood - billed as
+    # standard EC2 On-Demand price + 15% management fee + $0.20/million
+    # requests, NOT the classic GB-second Lambda rate - and is genuinely
+    # EC2 Reserved Instance-eligible (up to 72% off) for exactly that
+    # reason. This app can't track it: the only APIs (ListCapacityProviders/
+    # GetCapacityProvider) return configuration (an allow-list of eligible
+    # instance types, a max-vCPU ceiling), never the actual running
+    # instance count/type; CloudWatch adds only pool-level aggregates
+    # (CPUUtilization, vCPUAllocated) - never a per-instance-type
+    # breakdown. RI Coverage needs a real running_count at a specific SKU
+    # to compare against reserved_qty, which no available API can produce
+    # for this resource. Same root cause as its Savings Plan-side gap (see
+    # app.py's SP Coverage Policy "This App Tracks" column).
+    "AWS Lambda (Managed Instances)": ("Real EC2 On-Demand instance price + 15% management fee + $0.20/million requests - genuinely EC2 Reserved Instance-eligible (up to 72% off) since it runs on real, dedicated EC2 capacity", "NOT TRACKED BY THIS APP - AWS exposes only pool-level configuration/CloudWatch aggregates (allowed instance types, max vCPU ceiling, CPU/memory utilization %), never the actual running instance count or type needed to compute a real coverage gap. Classic per-invocation Lambda has no RI concept at all (no persistent resource to reserve)."),
 }
 
 
