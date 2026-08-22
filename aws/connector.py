@@ -188,6 +188,15 @@ REQUIRED_AWS_POLICIES = [
         "Required":        "Yes — For SageMaker inventory",
         "Purpose":         "Scan Real-Time Inference Endpoints and Notebook Instances for SageMaker Savings Plan coverage - Training/Processing/Batch Transform jobs are not scanned (ephemeral, no persistent resource identity to track)",
     },
+    # Added 2026-08-23 alongside Neptune Analytics inventory - a genuinely
+    # separate product/client ("neptune-graph") from classic Neptune above,
+    # confirmed real (arn:aws:iam::aws:policy/NeptuneGraphReadOnlyAccess).
+    {
+        "Policy / Action": "neptune-graph:ListGraphs / neptune-graph:GetGraph",
+        "AWS Managed Policy": "NeptuneGraphReadOnlyAccess",
+        "Required":        "Yes — For Neptune Analytics inventory",
+        "Purpose":         "Scan Neptune Analytics graphs (a separate product from Neptune Database) for Database Savings Plan coverage",
+    },
 ]
 
 # Fast lookup for the checklist renderer (app.py) - keeps the exact same
@@ -407,6 +416,10 @@ def check_aws_permissions(creds: AWSCredentials) -> dict:
     _probe(
         "sagemaker:ListEndpoints / sagemaker:DescribeEndpoint / sagemaker:DescribeEndpointConfig / sagemaker:ListNotebookInstances",
         lambda: session.client("sagemaker").list_endpoints(MaxResults=20),
+    )
+    _probe(
+        "neptune-graph:ListGraphs / neptune-graph:GetGraph",
+        lambda: session.client("neptune-graph").list_graphs(maxResults=20),
     )
 
     for action in ["ce:GetCostAndUsage"]:
@@ -833,6 +846,78 @@ def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
                         "HA Replicas":             0,
                         "PAYG Hourly Cost USD":    0.0,
                         "Avg Daily Running Hours": 24,
+                        "Subscription":            account_id,
+                        "Provider":                "AWS",
+                        "Is Orphaned":             False,
+                    })
+        except (ClientError, BotoCoreError):
+            pass
+
+        # Amazon Neptune Analytics - a genuinely SEPARATE product from
+        # Neptune (Database) above, its own boto3 client ("neptune-graph",
+        # not "neptune"), confirmed via botocore's own installed service
+        # model (real operations: ListGraphs/GetGraph/StartGraph/StopGraph -
+        # no Reserved*-style operation exists anywhere, so no RI concept).
+        # A graph analytics engine, not a transactional database - billed by
+        # a FIXED, user-chosen "provisionedMemory" capacity (in m-NCU,
+        # memory-optimized Neptune Capacity Units), unlike Neptune
+        # Serverless's auto-scaling min/max range - ListGraphs itself
+        # returns provisionedMemory/status/replicaCount directly, no second
+        # describe call needed. Confirmed Database-SP-eligible via AWS's own
+        # March 2026 announcement extending Database Savings Plans to
+        # Neptune Analytics. Real IAM: NeptuneGraphReadOnlyAccess.
+        #
+        # Genuinely unlike every other resource this app tracks: a STOPPED
+        # graph still bills, at 10% of the running rate (confirmed via real
+        # downloaded AmazonNeptune price list data - CreateGraph vs
+        # StoppedGraph operations at the same m-ncu tier are exactly a 10:1
+        # ratio, not a coincidence). The SKU encodes both the capacity AND
+        # the running/stopped state (pricing/aws_price_list.py parses the
+        # "-stopped" suffix to pick the right price-list operation) so this
+        # real, non-zero "still costing money while stopped" fact isn't
+        # silently dropped the way every other service's Stopped state
+        # (correctly) implies $0/hr.
+        #
+        # replicaCount is captured for visibility (HA Replicas column,
+        # matching the Redshift/OpenSearch node-count convention) but NOT
+        # multiplied into PAYG Hourly Cost - unlike Redshift/OpenSearch
+        # (each additional node is a separately billed, separately priced
+        # line item there, confirmed via those services' own price list
+        # data), no confirmed price list evidence was found that Neptune
+        # Analytics replicas bill as a separate line item distinct from the
+        # primary's provisionedMemory rate - left undisclosed rather than
+        # guessed, same "don't fabricate what can't be confirmed" discipline
+        # as the DynamoDB Reserved Capacity caveat elsewhere in this app.
+        try:
+            ng = session.client("neptune-graph", region_name=region)
+            for page in ng.get_paginator("list_graphs").paginate():
+                for graph in page.get("graphs", []):
+                    status = graph.get("status", "")
+                    is_running = (status == "AVAILABLE")
+                    capacity = graph.get("provisionedMemory")
+                    if capacity is None:
+                        continue   # shouldn't happen for a real graph, but never fabricate a SKU from a missing value.
+                    records.append({
+                        "Resource ID":             graph.get("arn") or graph.get("id", ""),
+                        "Resource Name":           graph.get("name", ""),
+                        "Resource Type":           "Amazon Neptune Analytics",
+                        "Resource State":          "Running" if is_running else "Stopped (deallocated)",
+                        "Region":                  region,
+                        "OS":                      "N/A",
+                        "SKU":                     f"{capacity}m-NCU" if is_running else f"{capacity}m-NCU-stopped",
+                        "Redundancy":              "N/A",
+                        "HA Replicas":             graph.get("replicaCount") or 0,
+                        "PAYG Hourly Cost USD":    0.0,
+                        # 0 for a stopped graph, matching every other
+                        # service's stopped-state convention (this field
+                        # means "hours actively running", not "hours
+                        # incurring any charge at all" - the residual 10%
+                        # stopped rate is captured entirely in the SKU/price
+                        # lookup above, not here) - keeps this resource
+                        # correctly excluded from the 24x7 SP baseline
+                        # filter (Resource State == "Running" already
+                        # excludes it too, this is just for consistency).
+                        "Avg Daily Running Hours": 24 if is_running else 0,
                         "Subscription":            account_id,
                         "Provider":                "AWS",
                         "Is Orphaned":             False,

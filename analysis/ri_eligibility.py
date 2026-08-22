@@ -289,6 +289,11 @@ _RULES = {
     # this exact "forgot the explicit rule, defaulted to wrongly eligible"
     # mistake happened for DocumentDB Serverless immediately before this.
     "Amazon Neptune Serverless":      lambda sku: (False, "Neptune Serverless has no Reserved Instance offering - Reserved Instances require a fixed instance class to reserve, and Serverless bills per-NCU-hour instead. Eligible for Database Savings Plans instead."),
+    # Added 2026-08-23 alongside Neptune Analytics's new live fetch
+    # (aws/connector.py) - a separate product/boto3 client from Neptune
+    # Database. Confirmed via botocore's own installed neptune-graph service
+    # model: no Reserved*-style operation exists at all.
+    "Amazon Neptune Analytics":       lambda sku: (False, "Neptune Analytics has no Reserved Instance offering - confirmed via boto3's neptune-graph service model (no Reserved*-style operation exists). Eligible for Database Savings Plans instead."),
     "AWS DMS Replication Instance":   lambda sku: (False, "AWS DMS has no Reserved Instance offering for replication instances - confirmed via boto3's dms service model (no Reserved*-style operation exists). Eligible for Database Savings Plans instead."),
     "Amazon Keyspaces":               lambda sku: (False, "Amazon Keyspaces is fully serverless (provisioned Read/Write Capacity Units, no instance to reserve) - confirmed via boto3's keyspaces service model, no Reserved*-style operation exists at all. Eligible for Database Savings Plans instead."),
     "AWS Fargate":                    lambda sku: (False, "AWS Fargate has no Reserved Instance concept - you bill your own chosen vCPU/memory directly, not a purchasable instance type. Confirmed via boto3's ecs service model. Eligible for Compute Savings Plans instead."),

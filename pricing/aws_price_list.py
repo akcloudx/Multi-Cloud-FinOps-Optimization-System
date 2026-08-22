@@ -525,6 +525,47 @@ def _fetch_neptune_serverless_price(sku: str, region: str, creds) -> Optional[fl
     return ncu * min(candidates)
 
 
+def _fetch_neptune_analytics_price(sku: str, region: str, creds) -> Optional[float]:
+    """Neptune Analytics - sku is "{m-NCU}m-NCU" (running) or
+    "{m-NCU}m-NCU-stopped" (stopped, still bills at 10% per aws/connector.py's
+    comment) built by aws/connector.py's fetch. Real productFamily "Neptune
+    Memory Optimized Graph" confirmed 2026-08-23 against a real downloaded
+    AmazonNeptune price list file - priced in DISCRETE capacity tiers (16,
+    32, 64, ... 24576 m-NCU), not a continuous per-unit rate applied here,
+    so this filters on the exact "m-ncu" attribute value AWS's own price
+    list uses rather than computing a rate x quantity - safer if a future
+    tier ever isn't perfectly linear. "operation" distinguishes running
+    (CreateGraph) from stopped (StoppedGraph) - confirmed real values."""
+    is_stopped = sku.endswith("-stopped")
+    capacity_str = sku.replace("m-NCU-stopped", "").replace("m-NCU", "")
+    try:
+        capacity = int(capacity_str)
+    except (ValueError, AttributeError):
+        return None   # not our synthetic SKU shape - don't guess.
+
+    try:
+        session = boto3.Session(aws_access_key_id=creds.access_key_id, aws_secret_access_key=creds.secret_access_key)
+        client = session.client("pricing", region_name=_PRICING_API_REGION)
+        filters = [
+            {"Type": "TERM_MATCH", "Field": "regionCode", "Value": region},
+            {"Type": "TERM_MATCH", "Field": "productFamily", "Value": "Neptune Memory Optimized Graph"},
+            {"Type": "TERM_MATCH", "Field": "m-ncu", "Value": str(capacity)},
+            {"Type": "TERM_MATCH", "Field": "operation", "Value": "StoppedGraph" if is_stopped else "CreateGraph"},
+        ]
+        price_list = _get_products(client, "AmazonNeptune", filters)
+    except Exception:
+        return None
+    if not price_list:
+        return None
+
+    candidates = []
+    for item in price_list:
+        prices = _extract_ondemand_prices(item)
+        if prices:
+            candidates.append(prices[0][0])
+    return min(candidates) if candidates else None
+
+
 def _extract_ondemand_prices(price_list_item: dict) -> list:
     """Returns every (price_usd, attributes) pair found under this product's
     terms.OnDemand section - deliberately NOT terms.Reserved, which lives
@@ -573,6 +614,8 @@ def _fetch_from_api(resource_type: str, sku: str, region: str, os_: str, redunda
         return _fetch_docdb_serverless_price(sku, region, creds)
     if resource_type == "Amazon Neptune Serverless":
         return _fetch_neptune_serverless_price(sku, region, creds)
+    if resource_type == "Amazon Neptune Analytics":
+        return _fetch_neptune_analytics_price(sku, region, creds)
 
     is_ec2 = (resource_type == "Compute")
     if is_ec2:
