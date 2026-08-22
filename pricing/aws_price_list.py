@@ -443,6 +443,48 @@ def _fetch_sagemaker_price(resource_type: str, sku: str, region: str, creds) -> 
     return min(candidates) if candidates else None
 
 
+def _fetch_docdb_serverless_price(sku: str, region: str, creds) -> Optional[float]:
+    """DocumentDB Serverless - sku is the "{DCU}DCU-min" string built by
+    aws/connector.py's fetch (MinCapacity floor, not a real instance-class
+    SKU - see that module's comment for why MinCapacity is the right
+    baseline). Real productFamily "Serverless" confirmed 2026-08-23 against
+    a real downloaded AmazonDocDB price list file - genuinely separate from
+    "Database Instance" (provisioned) with its own flat $/DCU-hr rate, no
+    region/instance-type variation beyond regionCode. Defaults to the
+    "Standard" storageType rate (the lower of the two, and what a cluster
+    gets if I/O-Optimized isn't explicitly chosen) - this app doesn't track
+    which storage config a given cluster uses, same "pick the safe/default
+    direction when a signal isn't available" principle already used for
+    Fargate's x86-vs-ARM default and MemoryDB's engine default."""
+    try:
+        dcu = float(sku.replace("DCU-min", ""))
+    except (ValueError, AttributeError):
+        return None   # not our synthetic SKU shape - don't guess.
+
+    try:
+        session = boto3.Session(aws_access_key_id=creds.access_key_id, aws_secret_access_key=creds.secret_access_key)
+        client = session.client("pricing", region_name=_PRICING_API_REGION)
+        filters = [
+            {"Type": "TERM_MATCH", "Field": "regionCode", "Value": region},
+            {"Type": "TERM_MATCH", "Field": "productFamily", "Value": "Serverless"},
+            {"Type": "TERM_MATCH", "Field": "storageType", "Value": "Standard"},
+        ]
+        price_list = _get_products(client, "AmazonDocDB", filters)
+    except Exception:
+        return None
+    if not price_list:
+        return None
+
+    candidates = []
+    for item in price_list:
+        prices = _extract_ondemand_prices(item)
+        if prices:
+            candidates.append(prices[0][0])
+    if not candidates:
+        return None
+    return dcu * min(candidates)
+
+
 def _extract_ondemand_prices(price_list_item: dict) -> list:
     """Returns every (price_usd, attributes) pair found under this product's
     terms.OnDemand section - deliberately NOT terms.Reserved, which lives
@@ -487,6 +529,8 @@ def _fetch_from_api(resource_type: str, sku: str, region: str, os_: str, redunda
         return _fetch_memorydb_price(sku, region, creds)
     if resource_type in _SAGEMAKER_RESOURCE_TYPE_TO_COMPONENT:
         return _fetch_sagemaker_price(resource_type, sku, region, creds)
+    if resource_type == "Amazon DocumentDB Serverless":
+        return _fetch_docdb_serverless_price(sku, region, creds)
 
     is_ec2 = (resource_type == "Compute")
     if is_ec2:

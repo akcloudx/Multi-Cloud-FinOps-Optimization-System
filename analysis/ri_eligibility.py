@@ -274,6 +274,12 @@ _RULES = {
     # (Database SP for the first four, Compute SP for Fargate - see
     # db/aws_seed.py's AWS_DATABASE_SP_TYPES/AWS_COMPUTE_SP_TYPES).
     "Amazon DocumentDB":              lambda sku: (False, "Amazon DocumentDB has no Reserved Instance offering - confirmed via boto3's docdb service model (no DescribeReservedDBInstances-equivalent operation exists). Eligible for Database Savings Plans instead."),
+    # Added 2026-08-23 alongside DocumentDB Serverless's new live fetch
+    # (aws/connector.py) - genuinely can't have an RI even in principle
+    # (Reserved Instances require a fixed instance class to reserve;
+    # Serverless has none, billing per-DCU-hour instead), same underlying
+    # reason as classic DocumentDB above.
+    "Amazon DocumentDB Serverless":   lambda sku: (False, "DocumentDB Serverless has no Reserved Instance offering - Reserved Instances require a fixed instance class to reserve, and Serverless bills per-DCU-hour instead. Eligible for Database Savings Plans instead."),
     "Amazon Neptune":                 lambda sku: (False, "Amazon Neptune has no Reserved Instance offering - confirmed via boto3's neptune service model (no Reserved*-style operation exists). Eligible for Database Savings Plans instead."),
     "AWS DMS Replication Instance":   lambda sku: (False, "AWS DMS has no Reserved Instance offering for replication instances - confirmed via boto3's dms service model (no Reserved*-style operation exists). Eligible for Database Savings Plans instead."),
     "Amazon Keyspaces":               lambda sku: (False, "Amazon Keyspaces is fully serverless (provisioned Read/Write Capacity Units, no instance to reserve) - confirmed via boto3's keyspaces service model, no Reserved*-style operation exists at all. Eligible for Database Savings Plans instead."),

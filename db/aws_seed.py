@@ -127,6 +127,22 @@ AWS_DATABASE_INVENTORY = [
      "payg_hourly_usd": 0.277, "avg_daily_running_hours": 24,
      "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
 
+    # Amazon DocumentDB Serverless - a genuinely different resource type
+    # from provisioned DocumentDB above (billed per-DCU-hour, not by a
+    # named instance class). Added 2026-08-23 alongside its new live fetch
+    # (aws/connector.py) - real rate is MinCapacity (2 DCU here) x the real
+    # $0.0822/DCU-hr Standard On-Demand rate, confirmed against real
+    # downloaded AmazonDocDB price list data (productFamily "Serverless").
+    # No Reserved Instance concept exists (same as provisioned DocumentDB),
+    # Database-SP-eligible only - confirmed real via AWS's Database Savings
+    # Plans announcement, which explicitly calls out Serverless coverage.
+    {"resource_id": "docdb-serverless-prod-events-01", "resource_name": "prod-events-docdb-serverless",
+     "resource_type": "Amazon DocumentDB Serverless",
+     "resource_state": "Running",
+     "region": "us-east-1", "os": "N/A", "sku": "2DCU-min",
+     "payg_hourly_usd": 0.1644, "avg_daily_running_hours": 24,
+     "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
+
     # Amazon Neptune — db.r5.large. Same real-IAM/no-RI facts as DocumentDB above.
     {"resource_id": "neptune-prod-cluster-01", "resource_name": "prod-graph-neptune",
      "resource_type": "Amazon Neptune",
@@ -443,6 +459,7 @@ AWS_DATABASE_SP_TYPES = {
     "Amazon RDS for MySQL", "Amazon RDS for PostgreSQL", "Amazon RDS for MariaDB",                      # live fetch naming
     "Amazon RDS for Oracle", "Amazon RDS for SQL Server", "Amazon Aurora (MySQL)", "Amazon Aurora (PostgreSQL)",
     "Amazon DocumentDB", "Amazon Neptune", "AWS DMS Replication Instance", "Amazon Keyspaces",
+    "Amazon DocumentDB Serverless",   # added 2026-08-23 - confirmed real via AWS's Database Savings Plans announcement, which explicitly calls out Serverless coverage alongside provisioned.
 }
 
 # SageMaker AI Savings Plans - a genuinely separate, first-class Savings Plan
@@ -488,6 +505,14 @@ AWS_RI_COVERAGE_NOTES = {
     # create a demand/supply mismatch coverage could never actually match -
     # see aws/connector.py's MemoryDB inventory block for the full reasoning.
     "Amazon MemoryDB":      ("Cache node hourly compute capacity (Redis or Valkey - engine not distinguished, see mapping notes)", "Data storage overhead, snapshot backups"),
+    # Added 2026-08-23. PAYG rate here is MinCapacity (the configured DCU
+    # floor) x the real $/DCU-hr Standard rate, NOT real-time variable
+    # spend - AWS exposes actual live DCU usage only via a CloudWatch
+    # time-series metric, not a static describable value, so this app
+    # commits against the same conservative floor AWS's own Database
+    # Savings Plans guidance recommends. NOT RI-eligible - no Reserved
+    # Instance product exists for DocumentDB (Serverless or provisioned).
+    "Amazon DocumentDB Serverless": ("DCU-hour capacity floor (MinCapacity, see mapping notes - not live variable usage)", "Storage per GB-month, I/O charges (Standard config), real-time DCU usage above the MinCapacity floor stays on-demand"),
     # Added 2026-08-23. No Reserved Instance concept exists for SageMaker at
     # all (confirmed: no equivalent of DescribeReservedInstances anywhere in
     # the sagemaker boto3 service model) - SageMaker-SP-eligible only, never

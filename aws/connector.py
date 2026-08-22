@@ -727,17 +727,57 @@ def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
         # correctly absent from AWS_RI_COVERAGE_NOTES.
         try:
             docdb = session.client("docdb", region_name=region)
+
+            # DocumentDB Serverless - added 2026-08-23 after confirming
+            # feasibility. Serverless clusters bill per DCU-hour (a
+            # continuously auto-scaling capacity metric, not a fixed
+            # instance class), confirmed real Database-Savings-Plan-eligible
+            # via AWS's own SP announcement. The ACTUAL live DCU usage is
+            # only exposed as a CloudWatch time-series metric, not a
+            # describable static value - but describe_db_clusters()'s real
+            # ServerlessV2ScalingConfiguration.MinCapacity field (confirmed
+            # via botocore's own installed docdb service model) IS a static,
+            # describable floor, and AWS's own SP guidance explicitly
+            # recommends committing against exactly that floor ("identify
+            # the minimum hourly DCU spend your cluster maintains
+            # consistently and commit at that level"). So MinCapacity is
+            # used as this resource's steady-state baseline - the same
+            # "conservative floor, not live average" principle this app's
+            # own safety-buffer already applies everywhere else - rather
+            # than guessing at real-time usage this app has no way to fetch.
+            # A cluster only has this field populated if it's genuinely
+            # Serverless (confirmed via the field's own documentation -
+            # provisioned clusters simply omit it).
+            serverless_min_capacity = {}
+            try:
+                for page in docdb.get_paginator("describe_db_clusters").paginate():
+                    for cluster in page.get("DBClusters", []):
+                        scaling = cluster.get("ServerlessV2ScalingConfiguration")
+                        if scaling and scaling.get("MinCapacity") is not None:
+                            serverless_min_capacity[cluster.get("DBClusterIdentifier", "")] = scaling["MinCapacity"]
+            except (ClientError, BotoCoreError):
+                pass   # if this fails, every instance below just falls through to the regular provisioned path - never silently mis-tag a resource as Serverless without confirming it.
+
             paginator = docdb.get_paginator("describe_db_instances")
             for page in paginator.paginate():
                 for db in page.get("DBInstances", []):
+                    min_capacity = serverless_min_capacity.get(db.get("DBClusterIdentifier", ""))
+                    is_serverless = min_capacity is not None
                     records.append({
                         "Resource ID":             db.get("DBInstanceArn") or db.get("DBInstanceIdentifier", ""),
                         "Resource Name":           db.get("DBInstanceIdentifier", ""),
-                        "Resource Type":           "Amazon DocumentDB",
+                        "Resource Type":           "Amazon DocumentDB Serverless" if is_serverless else "Amazon DocumentDB",
                         "Resource State":          _map_rds_state(db.get("DBInstanceStatus", "")),
                         "Region":                  region,
                         "OS":                      "N/A",
-                        "SKU":                     db.get("DBInstanceClass", "N/A"),
+                        # Serverless SKU is a synthetic "{DCU}DCU-min" string
+                        # (no real AWS instance-class SKU exists for it,
+                        # same "encode the real billing unit into the SKU"
+                        # convention already used for Fargate/DynamoDB) so
+                        # pricing/aws_price_list.py can parse the real
+                        # MinCapacity back out and price it against the real
+                        # $/DCU-hr rate.
+                        "SKU":                     f"{min_capacity:g}DCU-min" if is_serverless else db.get("DBInstanceClass", "N/A"),
                         "Redundancy":              "N/A",   # DocumentDB HA is achieved via separate replica instances, not a Multi-AZ flag on one instance - confirmed no such price-differentiating attribute exists on real DocumentDB price list entries (unlike RDS).
                         "HA Replicas":             0,
                         "PAYG Hourly Cost USD":    0.0,
