@@ -19,14 +19,15 @@ reasons:
     - no sku_name-based guessing needed the way Azure's mapping has to do.
 
 commitment_type strings ("Reserved Instance", "Compute Savings Plan",
-"EC2 Instance Savings Plan", "Database Savings Plan") match exactly what
-commitments/existing_commitments.py's bucketing expects. "SageMaker" is
-the one Savings Plan type still deliberately dropped (raw purchase still
-stored in AWSSavingsPlanPurchase for completeness, no Commitment row) -
-this app has no SageMaker inventory model at all to match coverage
-against, same "don't fabricate what can't be priced/modeled" discipline
-the Azure mapping module already follows for unmodeled
-reserved_resource_type values. Database Savings Plans are NOT dropped -
+"EC2 Instance Savings Plan", "Database Savings Plan",
+"SageMaker Savings Plan") match exactly what
+commitments/existing_commitments.py's bucketing expects. All 4 real AWS
+savingsPlanType values (Compute/EC2Instance/Database/SageMaker) map to a
+real Commitment row - SageMaker used to be deliberately dropped here (this
+app had no SageMaker inventory model at the time), but that's no longer
+true as of 2026-08-23 (see derive_aws_savings_plan_commitment_fields()'s
+docstring below) and the stale drop was found and fixed the same day.
+Database Savings Plans are similarly a real, not-dropped product -
 confirmed as a real AWS product via AWS's own FAQ, see
 derive_aws_savings_plan_commitment_fields()'s docstring below for the
 full verification.
@@ -164,9 +165,24 @@ def derive_aws_reservation_commitment_fields(purchase: dict) -> Optional[dict]:
 
 def derive_aws_savings_plan_commitment_fields(purchase: dict) -> Optional[dict]:
     """Maps one AWSSavingsPlanPurchase-shaped dict into a full
-    Commitment-shaped dict. Returns None only for SageMaker (this app has
-    no SageMaker inventory model at all, no coverage to match against) -
-    see module docstring.
+    Commitment-shaped dict. Returns None only for an unrecognized
+    savings_plan_type value (defensive fallback - AWS's own enum is closed
+    to exactly 4 values, so this should never actually trigger).
+
+    SageMaker used to be dropped here deliberately ("this app has no
+    SageMaker inventory model at all, no coverage to match against" - see
+    the module docstring above, now stale) - that was true when this
+    mapping function was written, but SageMaker Real-Time Inference
+    Endpoints and Notebook Instances gained real live inventory tracking
+    and their own "SageMaker Savings Plan" Commitment bucket later the same
+    session (see aws/connector.py, db/aws_seed.py, commitments/
+    existing_commitments.py's _AWS_SAGEMAKER_SP_TYPES, and app.py's Pool C
+    UI section) - this mapping function was never updated to match, so a
+    real live tenant's actual SageMaker Savings Plan purchase would have
+    been silently dropped on sync, never reaching the Commitment table or
+    Pool C's "Already Committed" figure at all. Found 2026-08-23 while
+    checking this file for a different, unrelated question and fixed
+    alongside it.
 
     Database Savings Plans are a REAL AWS product - confirmed via AWS's
     own FAQ (https://aws.amazon.com/savingsplans/faqs/) and, more
@@ -210,8 +226,12 @@ def derive_aws_savings_plan_commitment_fields(purchase: dict) -> Optional[dict]:
         commitment_type = "Database Savings Plan"
         scope_sku = "Any Database"   # covers Aurora/RDS/DynamoDB/ElastiCache/DocumentDB collectively per AWS's FAQ - no finer per-engine scope is exposed by the API, matching Azure's own "Any Database" convention for the same reason.
         scope_region = "Global"
+    elif sp_type == "SageMaker":
+        commitment_type = "SageMaker Savings Plan"
+        scope_sku = "Any SageMaker"   # matches db/aws_seed.py's demo commitment convention - SageMaker AI Savings Plans apply "regardless of instance family, size, Region, or component" per AWS's own SP pricing page, no finer scope to expose.
+        scope_region = "Global"
     else:
-        return None   # SageMaker - no inventory model in this app at all, see module docstring.
+        return None   # unrecognized savings_plan_type - AWS's own enum is closed to Compute/EC2Instance/Database/SageMaker, so this should never actually trigger; a defensive guard, not an expected path.
 
     return {
         "commitment_type":       commitment_type,
