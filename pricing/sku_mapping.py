@@ -1436,6 +1436,65 @@ def _plan_data_explorer(sku: str) -> SkuQueryPlan:
     )
 
 
+_SSIS_SKU_RE = re.compile(r"^(.+)_(\d+)_(Standard|Enterprise)_(BasePrice|LicenseIncluded)$")
+_SSIS_NODE_SIZE_RE = re.compile(r"^(?:Standard|Basic)_(.+)$")
+
+
+def _plan_ssis_ir(sku: str) -> SkuQueryPlan:
+    # Added 2026-08-23 - Azure-SSIS Integration Runtime was previously
+    # entirely untracked (no live inventory fetch existed at all - see
+    # azure_conn/connector.py). This app's SKU convention is
+    # "{nodeSize}_{nodeCount}_{edition}_{licenseType}" (e.g.
+    # "Standard_D8_v3_1_Standard_BasePrice"), where nodeSize is the real ARM
+    # VM-size string, edition is 'Standard'|'Enterprise', and licenseType is
+    # 'BasePrice'|'LicenseIncluded' - all three confirmed real ARM fields
+    # (Microsoft's own ARM template reference, 2026-08).
+    #
+    # Verified live against the Retail Prices API: this service's real
+    # skuName uses "Standard_"-stripped, space-separated node sizes (e.g.
+    # "D8 v3", not ARM's "Standard_D8_v3") - transformed here, same "capture
+    # raw ARM value in connector.py, transform for pricing lookup here"
+    # split as MySQL/PostgreSQL's tier prefix. edition maps directly to a
+    # genuinely separate, differently-priced product ("SSIS Standard
+    # {series}-series VM" vs "SSIS Enterprise {series}-series VM" -
+    # Enterprise costs more for the same node size, not a small surcharge -
+    # so product_contains is REQUIRED here, not optional, same reasoning as
+    # Dedicated Host's product_contains requirement). licenseType maps to
+    # this service's Azure-Hybrid-Benefit equivalent: 'BasePrice' (bring
+    # your own SQL Server license) is a genuinely different, cheaper meter
+    # ("... AHB") than 'LicenseIncluded' ("... License Included") - deliber-
+    # ately NOT collapsed into one price the way Compute's OS license is,
+    # since unlike VMs this is a real customer choice recorded on the
+    # resource itself, not an assumption this app is choosing to exclude.
+    #
+    # No Reservation product exists for SSIS IR nodes at all - verified live
+    # (zero Reservation-priceType items for serviceName 'Azure Data Factory
+    # v2') and confirmed by Microsoft's own docs: the only real Reservation
+    # product under the shared "DataFactory" ReservedResourceType is Data
+    # Flow's unrelated, pooled compute-cores prepurchase (see
+    # analysis/ri_eligibility.py's existing _UNMEASURABLE_TYPES comment for
+    # that one) - it has no per-node dimension at all, so it can't cover
+    # this. Confirmed also NOT Savings-Plan-for-Compute eligible (Microsoft
+    # Learn's own covered-services list: VMs, App Service, Functions
+    # Premium, Container Instances, Dedicated Host, Container Apps, Spring
+    # Apps Enterprise - Data Factory/SSIS IR isn't on it).
+    match = _SSIS_SKU_RE.match((sku or "").strip())
+    if not match:
+        return SkuQueryPlan(supported=False, reason=f"SKU '{sku}' doesn't match the expected '{{nodeSize}}_{{nodeCount}}_{{edition}}_{{licenseType}}' pattern.")
+    node_size, node_count_str, edition, license_type = match.group(1), match.group(2), match.group(3), match.group(4)
+    node_count = max(1, int(node_count_str))
+    size_match = _SSIS_NODE_SIZE_RE.match(node_size)
+    transformed_size = size_match.group(1).replace("_", " ") if size_match else node_size.replace("_", " ")
+    license_suffix = "AHB" if license_type == "BasePrice" else "License Included"
+    meter_value = f"{transformed_size} {license_suffix}"
+    return SkuQueryPlan(
+        supported=True, service_name="Azure Data Factory v2", match_field="meterName",
+        consumption_match_value=meter_value, consumption_multiplier=node_count,
+        product_contains=f"SSIS {edition} ",
+        reservation_unsupported_reason="No Reservation product exists for Azure-SSIS Integration Runtime nodes - verified live, zero Reservation-priceType items for this service. The only real Data Factory Reservation product (shared 'DataFactory' ReservedResourceType) is Data Flow's unrelated pooled compute-cores prepurchase, which has no per-node dimension to cover this.",
+    )
+
+
 def _plan_unmeasurable_storage(sku: str) -> SkuQueryPlan:
     # Blob Storage / Files reservations are sold in 100 TB+/10 TiB+ blocks
     # far larger than any single resource - already marked "unmeasurable" in
@@ -1489,6 +1548,7 @@ _PLAN_RESOLVERS = {
     "Azure Cosmos DB":               _plan_cosmos_db,
     "Azure Databricks":              _plan_databricks,
     "Azure Data Explorer":           _plan_data_explorer,
+    "Azure-SSIS Integration Runtime": _plan_ssis_ir,
     "Azure Blob Storage":            _plan_unmeasurable_storage,
     "Azure Files":                   _plan_unmeasurable_storage,
     "Azure Database for PostgreSQL": _plan_postgresql,

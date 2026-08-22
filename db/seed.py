@@ -320,6 +320,18 @@ RI_ONLY_INVENTORY = [
      "payg_hourly_usd": 0.22, "avg_daily_running_hours": 24,
      "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
 
+    # Azure-SSIS Integration Runtime — Consumption only, no RI or SP of any
+    # kind exists for this (see analysis/ri_eligibility.py + sp_eligibility.py).
+    # SKU convention: "{nodeSize}_{nodeCount}_{edition}_{licenseType}" - real
+    # example nodeSize from Microsoft's own ARM template reference (2026-08).
+    # Real live-fetched australiaeast rate: D8 v3 AHB = $1.158/hr x 1 node.
+    {"resource_id": "SSIS-Prod-01", "resource_name": "prod-etl-ssisir",
+     "resource_type": "Azure-SSIS Integration Runtime",
+     "resource_state": "Running",
+     "region": "australiaeast", "os": "N/A", "sku": "Standard_D8_v3_1_Standard_BasePrice",
+     "payg_hourly_usd": 1.158, "avg_daily_running_hours": 24,
+     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+
     # Azure Disk Storage — Reserved (P30+ Premium SSD only)
     # RI covers: Premium SSD P30 and larger. NOT: other disk types or smaller sizes.
     {"resource_id": "DISK-Prod-01", "resource_name": "prod-vm-disk-p30",

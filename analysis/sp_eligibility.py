@@ -76,6 +76,12 @@ _NO_SAVINGS_PLAN_TYPES = {
     # have a per-resource SKU this app could price a Savings Plan against anyway
     # (see ri_eligibility.py's _UNMEASURABLE_TYPES for why).
     "Azure Data Factory", "Azure Data Explorer", "Azure Backup Storage", "Azure NetApp Files",
+    # Azure-SSIS Integration Runtime is NOT in this set, even though it's
+    # also not Savings-Plan-eligible - see check_sp_eligibility()'s
+    # dedicated branch above. Every member of THIS set is at least
+    # RI-eligible, which this set's generic reason text below assumes -
+    # SSIS IR genuinely has no commitment discount of any kind, which
+    # needed its own accurate message instead.
 }
 
 
@@ -238,6 +244,13 @@ def check_sp_eligibility(resource_type: str, sku: str) -> Tuple[bool, str]:
     savings plan product at all (Redis, Storage, Files, Disk, Synapse,
     Databricks) always return False with an explanatory reason - Reserved
     Capacity is the only commitment option for them."""
+    if resource_type == "Azure-SSIS Integration Runtime":
+        # The only member of _NO_SAVINGS_PLAN_TYPES where the set's generic
+        # "Reserved Capacity is the only commitment discount available"
+        # reason below would be FALSE, not just imprecise - no Reservation
+        # product exists for this either (see ri_eligibility.py's matching
+        # entry) - genuinely no commitment discount of any kind.
+        return False, "'Azure-SSIS Integration Runtime' isn't covered by any Azure Savings Plan (Compute or Databases), and has no Reserved Capacity option either - genuinely Consumption-only, no commitment discount of any kind is available for this service."
     if resource_type in _NO_SAVINGS_PLAN_TYPES:
         return False, f"'{resource_type}' isn't covered by any Azure Savings Plan (Compute or Databases) - Reserved Capacity is the only commitment discount available for this service."
 

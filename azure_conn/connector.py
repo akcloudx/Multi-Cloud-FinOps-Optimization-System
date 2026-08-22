@@ -75,6 +75,12 @@ try:
 except ImportError:
     HAS_BILLINGBENEFITS = False
 
+try:
+    from azure.mgmt.datafactory import DataFactoryManagementClient
+    HAS_DATAFACTORY = True
+except ImportError:
+    HAS_DATAFACTORY = False
+
 import base64
 import json
 import pandas as pd
@@ -128,7 +134,41 @@ REQUIRED_TENANT_ROLES = [
     },
 ]
 
-# Kept for anything that just wants the full reference table.
+# Deliberately NOT part of REQUIRED_SUBSCRIPTION_ROLES / REQUIRED_ROLES below -
+# check_role_assignments() treats every entry in REQUIRED_SUBSCRIPTION_ROLES
+# as mandatory (diffs the whole list against the Service Principal's actual
+# assignments with no "optional" filtering at all), so adding this there
+# would make every tenant without it show "missing_role" even though nothing
+# else in this app depends on it. This is narrow and genuinely optional: it
+# only enables Started/Stopped status for Azure-SSIS Integration Runtime
+# nodes specifically (azure_conn/connector.py's _fetch_ssis_ir_states) -
+# every other capability in this app keeps working without it.
+#
+# No built-in Azure role covers this at Reader scope - verified live against
+# Microsoft's own built-in role reference (2026-08): the ONLY built-in role
+# with Microsoft.DataFactory/factories/integrationRuntimes/getStatus/action
+# is "Data Factory Contributor", a full create/modify/delete role, because
+# getStatus is an "/action"-suffixed RPC operation, not "/read" - Azure's
+# generic Reader role's "*/read" wildcard genuinely does not match it. A
+# custom role scoped to just this one action is the least-privileged option.
+OPTIONAL_SUBSCRIPTION_ROLES = [
+    {
+        "Role Name":        "FinOps SSIS IR Status Reader",
+        "Scope":            "Subscription (custom role - must be created once before it can be assigned)",
+        "Required":         "No — only for Azure-SSIS Integration Runtime Started/Stopped status; everything else in this app works without it",
+        "Purpose":          "Read-only access to a single narrow action (getStatus) - no built-in role exists at Reader scope for this",
+        "How to Assign":    (
+            'az role definition create --role-definition \'{"Name": "FinOps SSIS IR Status Reader", '
+            '"Description": "Read-only Started/Stopped status for Azure-SSIS Integration Runtimes.", '
+            '"Actions": ["Microsoft.DataFactory/factories/integrationRuntimes/getStatus/action"], '
+            '"AssignableScopes": ["/subscriptions/<SUB_ID>"]}\' '
+            "&& az role assignment create --assignee <CLIENT_ID> --role \"FinOps SSIS IR Status Reader\" --scope /subscriptions/<SUB_ID>"
+        ),
+    },
+]
+
+# Kept for anything that just wants the full reference table. Deliberately
+# excludes OPTIONAL_SUBSCRIPTION_ROLES - see its own comment above.
 REQUIRED_ROLES = REQUIRED_SUBSCRIPTION_ROLES + REQUIRED_TENANT_ROLES
 
 
@@ -547,7 +587,21 @@ Resources
     // Running/Stopped lifecycle (properties.state, confirmed via Microsoft's
     // REST API reference, 2026-08 - clusters can be manually or
     // automatically stopped after inactivity), unlike most PaaS types here.
-    'microsoft.kusto/clusters'
+    'microsoft.kusto/clusters',
+    // Azure-SSIS Integration Runtime (a Managed IR with ssisProperties set -
+    // NOT the default serverless "AutoResolveIntegrationRuntime" every
+    // factory gets automatically, which has no compute size at all) is the
+    // ONLY persistent, per-node-billed Data Factory sub-resource - every
+    // other DF meter (pipeline/data-flow activity) is genuinely execution-
+    // based with no standing resource, confirmed via Microsoft Learn and
+    // already correctly excluded (see analysis/ri_eligibility.py's
+    // _UNMEASURABLE_TYPES). nodeSize/numberOfNodes are real top-level
+    // typeProperties.computeProperties fields (confirmed via Microsoft's own
+    // ARM template reference, 2026-08). Started/Stopped state is NOT
+    // available here at all - it's a separate getStatus() RPC call, not a
+    // stored ARM property Resource Graph can see - see
+    // _fetch_ssis_ir_states() below, called separately after this query.
+    'microsoft.datafactory/factories/integrationruntimes'
 )
 // Every Azure SQL logical server auto-creates a "master" system database -
 // it's not billable and not user-managed, so exclude it from inventory.
@@ -560,6 +614,15 @@ Resources
 // captured separately below via microsoft.sql/instancepools, is what's
 // actually billed) avoids double-counting the same compute cost twice.
 | where not(type == 'microsoft.sql/managedinstances' and isnotempty(tostring(properties.instancePoolId)))
+// Every factory auto-creates a default "AutoResolveIntegrationRuntime" - a
+// serverless Managed IR with no ssisProperties/computeProperties at all
+// (confirmed via Microsoft's own ARM template reference, 2026-08: both are
+// independently optional sibling fields under typeProperties). Requiring
+// BOTH here excludes that free, sizeless default and any other Managed IR
+// that isn't genuinely an SSIS-purpose one, so only real, user-provisioned
+// Azure-SSIS IR nodes become inventory rows.
+| where not(type == 'microsoft.datafactory/factories/integrationruntimes' and
+    (isempty(tostring(properties.typeProperties.ssisProperties)) or isempty(tostring(properties.typeProperties.computeProperties.nodeSize))))
 | extend
     powerState = tostring(properties.extended.instanceView.powerState.displayStatus),
     vmSize     = tostring(properties.hardwareProfile.vmSize),
@@ -604,6 +667,25 @@ Resources
     // powerState.displayStatus, confirmed via Microsoft's own REST API
     // reference, 2026-08. Combined into the shared powerState field below.
     adxState = tostring(properties.state),
+    // Real ARM VM-size format (e.g. "Standard_D8_v3" - confirmed via
+    // Microsoft's own ARM template example, 2026-08), NOT the Retail Prices
+    // API's spaced "D8 v3" skuName convention - transformed in
+    // pricing/sku_mapping.py's _plan_ssis_ir, same "capture the raw ARM
+    // value here, transform for pricing lookup there" split already used
+    // for MySQL/PostgreSQL's tier prefix.
+    ssisNodeSize  = tostring(properties.typeProperties.computeProperties.nodeSize),
+    ssisNodeCount = tostring(properties.typeProperties.computeProperties.numberOfNodes),
+    // Real ARM enums (confirmed via Microsoft's own ARM template reference,
+    // 2026-08): edition 'Standard'|'Enterprise' maps directly to the Retail
+    // Prices API's "SSIS Standard/Enterprise {series}-series VM" product
+    // split; licenseType 'BasePrice'|'LicenseIncluded' is this service's
+    // Azure-Hybrid-Benefit-equivalent (BasePrice = bring-your-own-license,
+    // matches the Retail API's "AHB" meter suffix; LicenseIncluded matches
+    // "License Included") - the SAME kind of distinction Compute's
+    // os_license_is_separable already tracks for VMs, just a different
+    // field name for this service.
+    ssisEdition     = tostring(properties.typeProperties.ssisProperties.edition),
+    ssisLicenseType = tostring(properties.typeProperties.ssisProperties.licenseType),
     topSku     = tostring(sku.name),
     redisSkuName  = tostring(properties.sku.name),
     redisFamily   = tostring(properties.sku.family),
@@ -717,6 +799,19 @@ Resources
             strcat(adxSkuTier, "_", topSku, "_", adxSkuCapacity),
         ""
     ),
+    // "{nodeSize}_{nodeCount}_{edition}_{licenseType}" (e.g.
+    // "Standard_D8_v3_1_Standard_BasePrice") - the convention
+    // pricing/sku_mapping.py's _plan_ssis_ir parses. nodeCount is a real
+    // billing multiplier (each node bills the per-node-size rate
+    // independently), same "count folded into the SKU string, resolver
+    // splits it back out" pattern as Cosmos DB/Data Explorer above.
+    ssisSku = case(
+        type == 'microsoft.datafactory/factories/integrationruntimes'
+            and isnotempty(ssisNodeSize) and isnotempty(ssisNodeCount)
+            and isnotempty(ssisEdition) and isnotempty(ssisLicenseType),
+            strcat(ssisNodeSize, "_", ssisNodeCount, "_", ssisEdition, "_", ssisLicenseType),
+        ""
+    ),
     // "{CapacityMode}_{ServiceTier}" (e.g. "Provisioned_GeneralPurpose") -
     // the convention pricing/sku_mapping.py's _plan_cosmos_db parses.
     // "Provisioned" (not "Standard"/"Autoscale") is deliberate - see that
@@ -753,6 +848,7 @@ Resources
         isnotempty(cosmosSku), cosmosSku,
         isnotempty(aciSku), aciSku,
         isnotempty(adxSku), adxSku,
+        isnotempty(ssisSku), ssisSku,
         isnotempty(topSku), topSku,
         'N/A'
     ),
@@ -761,8 +857,15 @@ Resources
     // VMs' powerState - combined into the same shared field _map_power_state
     // already reads, so no Python-side change is needed (it already does a
     // case-insensitive "running"/"stopped"/"deallocated" substring match).
+    // Azure-SSIS IR genuinely has no ARM-queryable state at all (see the
+    // resource-type comment above) - left empty here on purpose, falls to
+    // _map_power_state()'s "Running" default same as any true stateless
+    // PaaS type, and gets overwritten with the real value fetched via
+    // _fetch_ssis_ir_states()'s separate getStatus() RPC call (Python side,
+    // fetch_live_inventory() below) whenever that call succeeds.
     resolvedPowerState = case(
         type == 'microsoft.kusto/clusters', adxState,
+        type == 'microsoft.datafactory/factories/integrationruntimes', '',
         powerState
     ),
     // Verified live (2026-08): properties.zoneRedundant is a real ARM bool
@@ -792,6 +895,51 @@ Resources
 | order by type asc, name asc
 """
 
+def _fetch_ssis_ir_states(credential, subscription_id: str, ir_rows: list) -> dict:
+    """Azure-SSIS Integration Runtime's Started/Stopped state isn't a stored
+    ARM property Resource Graph can see at all (confirmed via Microsoft's
+    own REST API reference, 2026-08) - it only comes back from a separate
+    per-resource getStatus() RPC call. Requires the "FinOps SSIS IR Status
+    Reader" custom role (see OPTIONAL_SUBSCRIPTION_ROLES above) - no
+    built-in role covers this at Reader scope. Fails open, per row: any
+    error (missing role, transient failure, resource_group parsing miss)
+    just leaves that one IR out of the returned dict, so its state falls
+    back to _map_power_state()'s "Running" default in the caller rather
+    than breaking the whole sync - this is a narrow, optional enhancement,
+    not a required capability, matching the file's other HAS_* guards.
+    Returns {resource_id: raw_state_string} (e.g. "Started"/"Stopped")."""
+    states = {}
+    if not HAS_DATAFACTORY or not ir_rows:
+        return states
+    try:
+        client = DataFactoryManagementClient(credential, subscription_id)
+    except Exception:
+        return states
+    for r in ir_rows:
+        resource_id = r.get("id", "")
+        resource_group = r.get("resourceGroup", "")
+        if not resource_id or not resource_group:
+            continue
+        # ARM ID: .../resourceGroups/{rg}/providers/Microsoft.DataFactory/
+        # factories/{factory}/integrationRuntimes/{ir} - case-insensitive
+        # segment search since Resource Graph's `id` preserves the
+        # provider's real casing, not the lowercased `type` field this file
+        # matches elsewhere.
+        parts = resource_id.split("/")
+        lower_parts = [p.lower() for p in parts]
+        try:
+            factory_name = parts[lower_parts.index("factories") + 1]
+            ir_name = parts[lower_parts.index("integrationruntimes") + 1]
+        except (ValueError, IndexError):
+            continue
+        try:
+            status = client.integration_runtimes.get_status(resource_group, factory_name, ir_name)
+            states[resource_id] = status.properties.state
+        except Exception:
+            continue
+    return states
+
+
 def fetch_live_inventory(creds: AzureCredentials) -> pd.DataFrame:
     """
     Fetches live Azure resource inventory via Resource Graph API.
@@ -817,14 +965,20 @@ def fetch_live_inventory(creds: AzureCredentials) -> pd.DataFrame:
     result = client.resources(request)
     rows = result.data if result.data else []
 
+    ssis_rows = [r for r in rows if r.get("type", "").lower() == "microsoft.datafactory/factories/integrationruntimes"]
+    ssis_states = _fetch_ssis_ir_states(credential, creds.subscription_id, ssis_rows)
+
     records = []
     for r in rows:
         rtype = r.get("type", "").lower()
+        raw_power_state = r.get("resolvedPowerState", "")
+        if rtype == "microsoft.datafactory/factories/integrationruntimes":
+            raw_power_state = ssis_states.get(r.get("id", ""), raw_power_state)
         records.append({
             "Resource ID":             r.get("id", ""),
             "Resource Name":           r.get("name", ""),
             "Resource Type":           _map_resource_type(rtype),
-            "Resource State":          _map_power_state(r.get("resolvedPowerState", "")),
+            "Resource State":          _map_power_state(raw_power_state),
             "Region":                  r.get("location", ""),
             "OS":                      r.get("osType", "N/A") or "N/A",
             "SKU":                     r.get("resolvedSku", "N/A") or "N/A",
@@ -861,6 +1015,7 @@ def _map_resource_type(azure_type: str) -> str:
         "microsoft.web/serverfarms":                    "App Service",
         "microsoft.fabric/capacities":                   "Microsoft Fabric",
         "microsoft.kusto/clusters":                      "Azure Data Explorer",
+        "microsoft.datafactory/factories/integrationruntimes": "Azure-SSIS Integration Runtime",
     }
     return mapping.get(azure_type, azure_type)
 
