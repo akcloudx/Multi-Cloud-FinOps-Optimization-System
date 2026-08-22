@@ -1364,10 +1364,26 @@ def _plan_fabric_capacity(sku: str) -> SkuQueryPlan:
 
 
 def _plan_databricks(sku: str) -> SkuQueryPlan:
-    # Verified live: zero Reservation-type entries exist for Azure Databricks
-    # in the Retail Prices API at all. Databricks Commit Units (DBCU) are
-    # sold as a separate Marketplace pre-purchase plan, not exposed here.
-    return SkuQueryPlan(supported=False, reason="Databricks Commit Units are sold via Azure Marketplace, not the Retail Prices API - verified live, zero Reservation entries exist for this service.")
+    # Corrected 2026-08-23 - the original "zero Reservation entries exist"
+    # claim below was WRONG, caught the same way the Cosmos DB Global-scope
+    # gap was: a real, unfiltered query against the Retail Prices API
+    # (serviceName eq 'Azure Databricks' and priceType eq 'Reservation', NO
+    # region filter) returns 44 real items - fixed-bucket DBCU commitments
+    # (12,500 DBCUs up to 6 Million DBCUs, 1yr/3yr terms), armRegionName
+    # "Global" - reproducibly missed by a region-filtered query, the exact
+    # same false-negative pattern the earlier Cosmos DB investigation hit.
+    # Real pricing DOES exist. supported=False stays correct anyway, but for
+    # a different, structural reason: a DBCU commitment is a subscription-
+    # wide $ pool that auto-applies to ANY Databricks workload/VM-SKU/tier
+    # combination (confirmed both by analysis/ri_eligibility.py's existing
+    # "pooled discount... not a per-resource reservation match" note, and by
+    # the real Azure Pricing Calculator, which shows the reservation options
+    # as a flat ~41%/62% (1yr/3yr) discount identically regardless of which
+    # example VM/workload is selected) - there is no per-SKU rate for this
+    # module's resolve_sku_query() to return at all, unlike every other
+    # Reservation type here. See db/seed.py's RI_COVERAGE_NOTES entry for
+    # how this is disclosed to the user instead of silently mismatched.
+    return SkuQueryPlan(supported=False, reason="Databricks Commit Unit (DBCU) reservations are real and priced (verified live), but apply as a subscription-wide pooled discount across all workloads/VM SKUs, not a per-resource rate this app's SKU-matching model can represent.")
 
 
 def _plan_unmeasurable_storage(sku: str) -> SkuQueryPlan:

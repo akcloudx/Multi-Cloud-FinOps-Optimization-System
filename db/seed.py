@@ -925,7 +925,7 @@ RI_COVERAGE_NOTES = {
     "Azure Cache for Redis":            ("Compute costs only", "Networking, storage"),
     "Azure Cache for Redis Enterprise": ("Compute costs only (all service tiers eligible)", "Networking, storage"),
     "Azure Synapse Analytics":          ("cDWU usage", "Storage, networking"),
-    "Azure Databricks":                 ("DBU usage only", "Compute, storage, networking (charged separately)"),
+    "Azure Databricks":                 ("DBU usage only - Reserved Capacity (DBCU) is real and priced, but applies as a subscription-wide pooled discount across all workloads/VM SKUs, not matched to this specific resource - not yet represented in RI Coverage below, see pricing/sku_mapping.py", "Compute, storage, networking (charged separately)"),
     "Azure Disk Storage":               ("Premium SSD P30 and larger only", "Other disk types, sizes smaller than P30"),
     "Azure Dedicated Host":              ("Physical host compute costs only (~40-55% saving)", "Software, networking, storage"),
     "Azure Data Factory":               ("Integration runtime compute cost", "Data movement, storage"),
