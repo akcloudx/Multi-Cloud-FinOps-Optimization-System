@@ -1374,27 +1374,38 @@ def _render_savings_plan_tab():
                 }
             ]
         else:
+            # "This App Tracks" is deliberately a SEPARATE column from "What
+            # Is Covered" (AWS's real product eligibility) - added 2026-08-23
+            # after a full service-by-service feasibility pass this session.
+            # AWS eligibility and this app's ability to build a per-resource
+            # baseline for it are two different questions; conflating them
+            # into one cell had made it unclear which gaps were "AWS doesn't
+            # offer this" vs "AWS offers it but this app can't observe it."
             sp_coverage_rows = [
                 {
                     "Savings Plan Type": "Compute Savings Plans (1-yr / 3-yr)",
                     "What Is Covered": "Amazon EC2, AWS Fargate, and AWS Lambda usage across any region, instance family, OS, or tenancy (up to 66% discount)",
-                    "What Is NOT Covered": "EBS storage volumes, data transfer/bandwidth, software licensing surcharges, non-compute services"
+                    "What Is NOT Covered": "EBS storage volumes, data transfer/bandwidth, software licensing surcharges, non-compute services",
+                    "This App Tracks": "EC2, Fargate ✅. Lambda ❌ NOT tracked - classic Lambda has no persistent running/stopped resource to enumerate (pure per-invocation billing); Lambda Managed Instances is real and RI/SP-eligible but AWS exposes only pool-level CloudWatch aggregates, never per-instance-type counts.",
                 },
                 {
                     "Savings Plan Type": "EC2 Instance Savings Plans (1-yr / 3-yr)",
                     "What Is Covered": "EC2 instance usage within a specific family in a designated Region (e.g., m5 in us-east-1, up to 72% discount)",
-                    "What Is NOT Covered": "Amazon RDS databases, ElastiCache, Redshift, S3 storage, or instances outside the specified family/region"
+                    "What Is NOT Covered": "Amazon RDS databases, ElastiCache, Redshift, S3 storage, or instances outside the specified family/region",
+                    "This App Tracks": "EC2 ✅ - same inventory as Compute Savings Plans above (no separate resource type needed).",
                 },
                 {
                     "Savings Plan Type": "Database Savings Plans (1-yr ONLY)",
-                    "What Is Covered": "Aurora, RDS, DynamoDB, ElastiCache for Valkey ONLY (not Redis or Memcached - confirmed via the actual Database Savings Plans pricing table), DocumentDB, Timestream, Neptune, Keyspaces, DMS, and Amazon OpenSearch Service - up to 35% off",
-                    "What Is NOT Covered": "Amazon Redshift, Amazon MemoryDB, ElastiCache for Redis/Memcached (Reserved Instance-eligible only, not Database SP), EC2/Fargate/Lambda compute, 3-year term (1-yr only per AWS policy - same restriction Azure's Savings Plan for Databases has)"
+                    "What Is Covered": "Aurora, RDS, DynamoDB, ElastiCache for Valkey ONLY (not Redis or Memcached - confirmed via the actual Database Savings Plans pricing table), DocumentDB (+ Serverless), Timestream, Neptune (+ Serverless + Analytics), Keyspaces, DMS (+ Serverless), and Amazon OpenSearch Service - up to 35% off",
+                    "What Is NOT Covered": "Amazon Redshift, Amazon MemoryDB, ElastiCache for Redis/Memcached (Reserved Instance-eligible only, not Database SP), EC2/Fargate/Lambda compute, 3-year term (1-yr only per AWS policy - same restriction Azure's Savings Plan for Databases has)",
+                    "This App Tracks": "Aurora, RDS, DynamoDB (provisioned-capacity tables only), ElastiCache for Valkey, DocumentDB + Serverless, Neptune + Serverless + Analytics, Keyspaces, DMS + Serverless, OpenSearch - all ✅. Timestream ❌ NOT tracked - fully usage-based per byte ingested/stored/scanned, no instance class or capacity-unit concept to represent as an inventory resource at all.",
                 },
                 {
                     "Savings Plan Type": "SageMaker AI Savings Plans (1-yr / 3-yr)",
                     "What Is Covered": "Amazon SageMaker AI instance usage regardless of instance family, size, Region, or component (Notebook, Training, Inference, etc.) - up to 64% discount",
-                    "What Is NOT Covered": "EC2/Fargate/Lambda/database compute. Baseline below (Pool C) only covers Real-Time Inference Endpoints and Notebook Instances - Training/Processing/Data Wrangler/Batch Transform are one-shot ephemeral jobs with no persistent running/stopped identity, so they aren't modeled as inventory at all (same reasoning already applied to Lambda invocations)."
-                }
+                    "What Is NOT Covered": "EC2/Fargate/Lambda/database compute. Baseline below (Pool C) only covers Real-Time Inference Endpoints and Notebook Instances - Training/Processing/Data Wrangler/Batch Transform are one-shot ephemeral jobs with no persistent running/stopped identity, so they aren't modeled as inventory at all (same reasoning already applied to Lambda invocations).",
+                    "This App Tracks": "Real-Time Inference Endpoints, Notebook Instances ✅. Training/Processing/Data Wrangler/Batch Transform ❌ NOT tracked - ephemeral one-shot jobs, no persistent running/stopped identity to enumerate.",
+                },
             ]
         st.dataframe(pd.DataFrame(sp_coverage_rows), hide_index=True, width="stretch")
 
