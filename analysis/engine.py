@@ -887,8 +887,25 @@ def reservation_analysis(
         ri_df_rg_scoped  = ri_df_scoped[~no_rg_scope]
 
         if not ri_df_sub_scoped.empty:
+            # Demand must be restricted to the EXACT profile(s) this layer's
+            # own commitments target, not just "any resource in the same
+            # subscription" - a real, severe bug caught live 2026-08-23: an
+            # early version filtered only by Subscription membership, which
+            # pulled in every OTHER resource type/SKU sharing that
+            # subscription too (e.g. Cosmos DB, SQL DB, ...) and produced a
+            # spurious extra "gap = full demand, reserved=0" row for every
+            # one of them via the outer join below, even though they were
+            # already correctly accounted for in the main tenant-wide layer
+            # above - roughly doubled this table's total gap in demo data.
+            # Mirrors the Global-scope layer's existing Resource-Type
+            # restriction (see global_resource_types above), generalized to
+            # the full profile since scope_sku is more specific.
+            sub_profiles = ri_df_sub_scoped[["scope_resource_type", "scope_sku", "scope_region", "scope_os"]].rename(columns={
+                "scope_resource_type": "Resource Type", "scope_sku": "SKU", "scope_region": "Region", "scope_os": "OS",
+            }).drop_duplicates()
+            sub_candidates = running_resources.merge(sub_profiles, on=["Resource Type", "SKU", "Region", "OS"], how="inner")
             sub_demand = (
-                running_resources[running_resources["Subscription"].isin(ri_df_sub_scoped["scope_subscription_id"].unique())]
+                sub_candidates[sub_candidates["Subscription"].isin(ri_df_sub_scoped["scope_subscription_id"].unique())]
                 .groupby(["Resource Type", "SKU", "Region", "OS", "Redundancy", "Subscription"])
                 .size()
                 .reset_index(name="running_count")
@@ -918,8 +935,14 @@ def reservation_analysis(
             merged = pd.concat([merged, sub_merged], ignore_index=True)
 
         if not ri_df_rg_scoped.empty:
+            # Same profile restriction as sub_demand above - not just
+            # "any resource in the same resource group."
+            rg_profiles = ri_df_rg_scoped[["scope_resource_type", "scope_sku", "scope_region", "scope_os"]].rename(columns={
+                "scope_resource_type": "Resource Type", "scope_sku": "SKU", "scope_region": "Region", "scope_os": "OS",
+            }).drop_duplicates()
+            rg_candidates = running_resources.merge(rg_profiles, on=["Resource Type", "SKU", "Region", "OS"], how="inner")
             rg_demand = (
-                running_resources[running_resources["Resource Group"].isin(ri_df_rg_scoped["scope_resource_group_id"].unique())]
+                rg_candidates[rg_candidates["Resource Group"].isin(ri_df_rg_scoped["scope_resource_group_id"].unique())]
                 .groupby(["Resource Type", "SKU", "Region", "OS", "Redundancy", "Subscription", "Resource Group"])
                 .size()
                 .reset_index(name="running_count")
@@ -957,8 +980,14 @@ def reservation_analysis(
     # tenant-wide merge would silently cover same-instance-type demand in a
     # DIFFERENT AZ of the same region too.
     if not ri_df_az_scoped.empty:
+        # Same profile restriction as sub_demand/rg_demand above - not just
+        # "any resource in the same Availability Zone."
+        az_profiles = ri_df_az_scoped[["scope_resource_type", "scope_sku", "scope_region", "scope_os"]].rename(columns={
+            "scope_resource_type": "Resource Type", "scope_sku": "SKU", "scope_region": "Region", "scope_os": "OS",
+        }).drop_duplicates()
+        az_candidates = running_resources.merge(az_profiles, on=["Resource Type", "SKU", "Region", "OS"], how="inner")
         az_demand = (
-            running_resources[running_resources["Availability Zone"].isin(ri_df_az_scoped["scope_availability_zone"].unique())]
+            az_candidates[az_candidates["Availability Zone"].isin(ri_df_az_scoped["scope_availability_zone"].unique())]
             .groupby(["Resource Type", "SKU", "Region", "OS", "Redundancy", "Availability Zone"])
             .size()
             .reset_index(name="running_count")
