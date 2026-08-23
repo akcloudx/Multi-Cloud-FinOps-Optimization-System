@@ -6,6 +6,13 @@ COMPUTE (Savings Plan for Compute  OR  Reserved Instance):
     Standard_E4s_v5) - no partial-hours modeling, just Running or Stopped
   - 1 Dev VM (Standard_B2ms), also always Running - deliberately left
     uncommitted to demonstrate a real "not yet committed" gap
+  - 1 more Dev VM (Standard_D4ds_v5, sub-dev-002) - added 2026-08-23,
+    identical SKU/region/OS to VM-Prod-01 but a different subscription,
+    specifically to demonstrate real Azure Reservation/Savings Plan scope
+    restriction (Single subscription/resource group vs Shared - see
+    COMMITMENTS' RI-VM-D4DS-V5-AE-WIN below): this VM must show as its own
+    uncovered gap, not silently covered by a reservation scoped to a
+    different subscription.
   - 1 Stopped legacy VM (Standard_D4ds_v4) with an active RI it no longer
     uses  → Orphaned
 
@@ -50,7 +57,22 @@ COMPUTE_INVENTORY = [
      "resource_type": "Compute", "resource_state": "Running",
      "region": "australiaeast", "os": "Windows", "sku": "Standard_D4ds_v5",
      "payg_hourly_usd": 0.284, "avg_daily_running_hours": 24,
-     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+     "subscription": "sub-prod-001", "resource_group": "rg-prod", "provider": "Azure", "is_orphaned": False},
+
+    # Same SKU/region/OS as VM-Prod-01 above, but in a DIFFERENT subscription
+    # (sub-dev-002, same one VM-Dev-01 already uses below) - added 2026-08-23
+    # specifically to exercise real Azure Reservation scope restriction (see
+    # COMMITMENTS' RI-VM-D4DS-V5-AE-WIN below and analysis/engine.py's
+    # _scope_matches_resource): that RI is purchased with Single-subscription
+    # scope against sub-prod-001 ONLY, so in real Azure it can NEVER cover
+    # this VM despite the identical SKU/region/OS - proves the coverage
+    # table correctly shows VM-Prod-01 as covered and this VM as its own,
+    # separate uncovered gap, not silently pooled together.
+    {"resource_id": "VM-Dev-02", "resource_name": "dev-app-clone-01",
+     "resource_type": "Compute", "resource_state": "Running",
+     "region": "australiaeast", "os": "Windows", "sku": "Standard_D4ds_v5",
+     "payg_hourly_usd": 0.284, "avg_daily_running_hours": 24,
+     "subscription": "sub-dev-002", "resource_group": "rg-dev", "provider": "Azure", "is_orphaned": False},
 
     # Memory-optimized batch/reporting workload — real live-fetched australiaeast
     # Windows rate (Retail Prices API, "Virtual Machines Esv5 Series Windows"
@@ -460,12 +482,19 @@ INVENTORY = COMPUTE_INVENTORY + DATABASE_INVENTORY + RI_ONLY_INVENTORY + COMPUTE
 
 COMMITMENTS = [
     # ── Reserved Instances — Compute (VM SKU-level) ────────────────────────────
-    # reserved_qty=1 matches the single remaining D4ds_v5 VM (Prod-01) exactly
-    # - fully covered, no gap, a clean "matched" example.
+    # reserved_qty=1 matches VM-Prod-01 exactly - fully covered, no gap, a
+    # clean "matched" example. Purchased with real Azure "Single subscription"
+    # scope against sub-prod-001 (matches RESERVATION_PURCHASES' real
+    # applied_scope_subscription_id for this same reservation below) -
+    # scope_subscription_id added 2026-08-23 so this RI does NOT also cover
+    # VM-Dev-02 (identical SKU/region/OS, but a different subscription) the
+    # way this app incorrectly let it before - see analysis/engine.py's
+    # _scope_matches_resource.
     {"commitment_id": "RI-VM-D4DS-V5-AE-WIN",
      "commitment_type": "Reserved Instance",
      "scope_sku": "Standard_D4ds_v5", "scope_resource_type": "Compute",
      "scope_region": "australiaeast", "scope_os": "Windows", "scope_redundancy": "N/A",
+     "scope_subscription_id": "sub-prod-001",
      "hourly_usd_commitment": 0.20, "reserved_qty": 1,
      "term": "1-year", "expiry_date": "2026-11-01", "provider": "Azure"},
 

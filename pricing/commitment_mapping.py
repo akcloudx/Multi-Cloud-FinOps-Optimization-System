@@ -9,6 +9,18 @@ units (reserved_qty = "resources covered" vs quantity/commitment_amount =
 real Azure units), a different resource-type taxonomy, and (for Reservations)
 a computed, not raw, hourly_usd_commitment.
 
+Also derives the real Azure scope restriction (Single subscription / Single
+resource group / Shared / Management Group - confirmed via Microsoft Learn's
+"Buy an Azure reservation" and "Decide between a savings plan and a
+reservation" docs, 2026-08-23) into Commitment.scope_subscription_id/
+scope_resource_group_id - see _derive_scope below. Previously dropped
+entirely: analysis/engine.py's coverage matching used to ignore scope and
+match ANY tenant resource with the right SKU/region, which overstates
+coverage for any Single-scoped commitment in a multi-subscription tenant (a
+real, not hypothetical, gap - db/seed.py's own demo Reservation records are
+all Single-scoped, and Reservations/Savings Plans default to Single-
+subscription scope unless the buyer deliberately picks Shared).
+
 Two of Azure's own real, confirmed ambiguities can't be resolved from the
 purchase record alone - not a mapping gap better code would fix:
   - A SQL Database and a SQL Elastic Pool reservation share the identical
@@ -66,6 +78,54 @@ _REDIS_ENTERPRISE_LETTER_TO_FAMILY = {
 # so a real purchase record can never actually carry one of those series
 # codes here regardless.
 _FLEX_SERIES_PREFIX_RE = re.compile(r"^(?:Standard_)?([A-Za-z]+?)\d")
+
+
+def _last_path_segment(fully_qualified_id: Optional[str]) -> Optional[str]:
+    """'/subscriptions/{guid}' -> '{guid}'; '/subscriptions/{guid}/resourceGroups/{name}'
+    -> '{name}' - both Reservation and Savings Plan AppliedScopeProperties
+    report subscription_id/resource_group_id as fully-qualified ARM IDs
+    (confirmed against the installed azure-mgmt-reservations/billingbenefits
+    SDK models, 2026-08-23), but CloudInventory.subscription/resource_group
+    store the bare Resource Graph values - this strips the ARM prefix so the
+    two sides can actually be compared. None/empty-safe."""
+    if not fully_qualified_id:
+        return None
+    return fully_qualified_id.rstrip("/").split("/")[-1] or None
+
+
+def _derive_scope(applied_scope_type: str, subscription_id: Optional[str], resource_group_id: Optional[str]) -> tuple:
+    """Returns (scope_subscription_id, scope_resource_group_id, is_inferred, note).
+    Real Azure scoping options (confirmed via Microsoft Learn's "Buy an Azure
+    reservation" and "Decide between a savings plan and a reservation" docs,
+    2026-08-23 - both Reservations and Savings Plans share the same 3-value
+    AppliedScopeType enum: Single/Shared/ManagementGroup, with "Single
+    resource group" being a sub-case of Single where resource_group_id is
+    ALSO set, not a separate enum value):
+      - Single (+ resource_group_id set) -> Single resource group scope:
+        the tightest restriction, matching requires resource_group too.
+      - Single (no resource_group_id)    -> Single subscription scope.
+      - Shared -> unrestricted (this app's original, still-correct default
+        for the common case - Shared applies across every eligible
+        subscription in the billing context).
+      - ManagementGroup -> a real restriction (only subscriptions inside
+        that management group), but this app has no Microsoft.Management
+        API integration to resolve group membership - falls back to
+        unrestricted/tenant-wide matching (same as Shared) rather than
+        guessing membership, flagged as inferred so the UI can disclose
+        that this may overstate coverage for subscriptions outside the
+        group, the same direction of error the Single-scope fix closes."""
+    t = (applied_scope_type or "").strip()
+    if t == "Single":
+        sub = _last_path_segment(subscription_id)
+        rg = _last_path_segment(resource_group_id)
+        return sub, rg, False, None
+    if t == "ManagementGroup":
+        return None, None, True, (
+            "Purchased with Management Group scope - this app doesn't resolve which subscriptions "
+            "belong to that management group, so coverage matching treats it as tenant-wide, which "
+            "may overstate coverage for subscriptions outside the group."
+        )
+    return None, None, False, None
 
 
 def _flex_server_tier(vm_size: str) -> tuple:
@@ -283,6 +343,15 @@ def derive_reservation_commitment_fields(purchase: dict) -> Optional[dict]:
         note = f"{note} {redundancy_note}" if note else redundancy_note
         is_inferred = True
 
+    scope_subscription_id, scope_resource_group_id, scope_is_inferred, scope_note = _derive_scope(
+        purchase.get("applied_scope_type") or "",
+        purchase.get("applied_scope_subscription_id"),
+        purchase.get("applied_scope_resource_group_id"),
+    )
+    if scope_note:
+        note = f"{note} {scope_note}" if note else scope_note
+    is_inferred = is_inferred or scope_is_inferred
+
     return {
         "commitment_type":     "Reserved Instance" if resource_type in ("VirtualMachines", "DedicatedHost", "RedisCache", "AppService") else "Reserved Capacity",
         "scope_sku":           scope_sku,
@@ -290,6 +359,8 @@ def derive_reservation_commitment_fields(purchase: dict) -> Optional[dict]:
         "scope_region":        region,
         "scope_os":            scope_os,
         "scope_redundancy":    scope_redundancy,
+        "scope_subscription_id":   scope_subscription_id,
+        "scope_resource_group_id": scope_resource_group_id,
         "reserved_qty":        reserved_qty,
         "term":                term_display,
         "expiry_date":         purchase.get("expiry_date"),
@@ -325,6 +396,15 @@ def derive_savings_plan_commitment_fields(purchase: dict) -> dict:
     amount = purchase.get("commitment_amount")
     hourly_rate = amount if grain == "Hourly" and amount is not None else None
 
+    scope_subscription_id, scope_resource_group_id, scope_is_inferred, scope_note = _derive_scope(
+        purchase.get("applied_scope_type") or "",
+        purchase.get("applied_scope_subscription_id"),
+        purchase.get("applied_scope_resource_group_id"),
+    )
+    if scope_note:
+        note = f"{note} {scope_note}" if note else scope_note
+    is_inferred = is_inferred or scope_is_inferred
+
     expiry_date_time = purchase.get("expiry_date_time") or ""
     return {
         "commitment_type":       commitment_type,
@@ -333,6 +413,8 @@ def derive_savings_plan_commitment_fields(purchase: dict) -> dict:
         "scope_region":          "Global",
         "scope_os":              "Any" if commitment_type == "Savings Plan for Compute" else "N/A",
         "scope_redundancy":      "N/A",
+        "scope_subscription_id":   scope_subscription_id,
+        "scope_resource_group_id": scope_resource_group_id,
         "hourly_usd_commitment": hourly_rate,
         "reserved_qty":          0,
         "term":                  "3-year" if term_iso == "P3Y" else "1-year",

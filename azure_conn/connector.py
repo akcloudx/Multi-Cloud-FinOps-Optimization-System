@@ -1052,6 +1052,13 @@ def fetch_live_inventory(creds: AzureCredentials) -> pd.DataFrame:
             "PAYG Hourly Cost USD":    0.0,   # populated by pricing module
             "Avg Daily Running Hours": 24,    # default; update via Activity Log
             "Subscription":            r.get("subscriptionId", ""),
+            # Real Resource Graph 'resourceGroup' (bare name) - added
+            # 2026-08-23 so a Reservation/Savings Plan purchased with
+            # "Single resource group" scope can be matched against exactly
+            # the resources it covers (see pricing/commitment_mapping.py).
+            # Was already projected by the query but never read into a row
+            # before now.
+            "Resource Group":         r.get("resourceGroup", "") or "",
             "Provider":                "Azure",
             "Is Orphaned":             False,
         })
@@ -1178,6 +1185,12 @@ def fetch_live_reservations(creds: AzureCredentials) -> pd.DataFrame:
             "applied_scope_type":            props.applied_scope_type if props else "",
             "applied_scope_display_name":    scope_props.display_name if scope_props else None,
             "applied_scope_subscription_id": scope_props.subscription_id if scope_props else None,
+            # Real AppliedScopeProperties field (confirmed against the
+            # installed SDK model, 2026-08-23) - only set when this
+            # reservation was purchased with "Single resource group" scope
+            # (a real, distinct scoping option beyond subscription-level
+            # Single scope - see pricing/commitment_mapping.py).
+            "applied_scope_resource_group_id": scope_props.resource_group_id if scope_props else None,
             "billing_plan":                  props.billing_plan if props else "",
             "term":                          props.term if props else "",
             "quantity":                      props.quantity if props and props.quantity is not None else 0,
@@ -1248,6 +1261,13 @@ def fetch_live_savings_plans(creds: AzureCredentials) -> pd.DataFrame:
             "commitment_currency_code": commitment.currency_code if commitment else "",
             "commitment_amount":        commitment.amount if commitment and commitment.amount is not None else 0.0,
             "applied_scope_type":       s.applied_scope_type or "",
+            # Real, flattened SavingsPlanModel fields (confirmed against the
+            # installed azure-mgmt-billingbenefits SDK, 2026-08-23) - were
+            # previously not captured at all. Same "Single subscription" /
+            # "Single resource group" scoping Reservations support - see
+            # pricing/commitment_mapping.py.
+            "applied_scope_subscription_id":   s.applied_scope_properties.subscription_id if s.applied_scope_properties else None,
+            "applied_scope_resource_group_id": s.applied_scope_properties.resource_group_id if s.applied_scope_properties else None,
             "display_name":             s.display_name,
             "term":                     s.term or "",
             "provisioning_state":       s.provisioning_state or "",

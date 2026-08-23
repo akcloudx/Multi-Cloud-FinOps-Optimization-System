@@ -264,6 +264,7 @@ def run_ingestion_pipeline(provider: str = "Azure", creds=None, force_mock: bool
                         payg_hourly_usd=r.get("PAYG Hourly Cost USD", 0.0),
                         avg_daily_running_hours=r.get("Avg Daily Running Hours", 24),
                         subscription=r.get("Subscription", ""),
+                        resource_group=r.get("Resource Group", "") or "",
                         provider=provider,
                         is_orphaned=r.get("Is Orphaned", False),
                         tenant_id=tenant_db_id,

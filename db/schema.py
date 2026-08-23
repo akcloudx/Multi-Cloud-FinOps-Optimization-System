@@ -307,6 +307,15 @@ def init_db(provider: str = "Azure", mode: str = "demo"):
     # Multi-AZ does) and for AWS EC2 rows (redundancy is N/A there too).
     _ensure_column(engine, schema_name, "retail_prices", "resource_type", "VARCHAR(255)")
     _ensure_column(engine, schema_name, "retail_prices", "redundancy", "VARCHAR(255)")
+    # Real Reservation/Savings Plan scope restriction (Single subscription /
+    # Single resource group) - added 2026-08-23, see Commitment.scope_subscription_id's
+    # own comment for why this was a real, not hypothetical, coverage-matching gap.
+    _ensure_column(engine, schema_name, "cloud_inventory", "resource_group", "VARCHAR(255)")
+    _ensure_column(engine, schema_name, "commitments", "scope_subscription_id", "VARCHAR(255)")
+    _ensure_column(engine, schema_name, "commitments", "scope_resource_group_id", "VARCHAR(255)")
+    _ensure_column(engine, schema_name, "reservation_purchases", "applied_scope_resource_group_id", "VARCHAR(255)")
+    _ensure_column(engine, schema_name, "savings_plan_purchases", "applied_scope_subscription_id", "VARCHAR(255)")
+    _ensure_column(engine, schema_name, "savings_plan_purchases", "applied_scope_resource_group_id", "VARCHAR(255)")
     return engine
 
 
@@ -348,6 +357,13 @@ class CloudInventory(Base):
     payg_hourly_usd          = Column(Float, nullable=False)
     avg_daily_running_hours  = Column(Integer, nullable=False)
     subscription             = Column(String(255), nullable=True)
+    # Real Resource Graph 'resourceGroup' value (bare name, e.g. "rg-prod").
+    # Added 2026-08-23 alongside Commitment.scope_resource_group_id - needed
+    # to match a Reservation/Savings Plan purchased with "Single resource
+    # group" scope (a real, distinct Azure scoping option - see
+    # pricing/commitment_mapping.py) against the specific resources it
+    # actually covers, not just subscription/region/SKU.
+    resource_group            = Column(String(255), nullable=True)
     provider                 = Column(String(255), default="Azure")
     is_orphaned              = Column(Boolean, default=False)
     # NULL = demo/seed data. Non-NULL = live-ingested, scoped to that cloud_tenants.id.
@@ -398,6 +414,24 @@ class Commitment(Base):
     # demo/seed rows and every unambiguous real mapping.
     is_inferred_mapping     = Column(Boolean, default=False)
     mapping_note            = Column(String(500), nullable=True)
+    # Real Azure scope restriction, carried through from ReservationPurchase/
+    # SavingsPlanPurchase's applied_scope_subscription_id/
+    # applied_scope_resource_group_id (see pricing/commitment_mapping.py).
+    # NULL means unrestricted (Shared scope, or demo/seed data) - matches
+    # tenant-wide, the ONLY behavior this app had before 2026-08-23. A
+    # non-NULL value means this commitment was purchased with "Single
+    # subscription" or "Single resource group" scope and Azure itself will
+    # only ever apply its discount to resources inside that scope - real
+    # Reservations/Savings Plans default to Single-subscription scope unless
+    # the buyer deliberately picks Shared, so this was a real, not
+    # hypothetical, gap: analysis/engine.py's coverage matching used to
+    # ignore scope entirely and match ANY tenant resource with the right
+    # SKU/region, overstating coverage for every Single-scoped commitment in
+    # a multi-subscription tenant. Bare values (not fully-qualified ARM IDs)
+    # to match CloudInventory.subscription/resource_group's own format -
+    # normalized on the way in, see commitment_mapping.py's _bare_subscription_id/_bare_resource_group.
+    scope_subscription_id   = Column(String(255), nullable=True)
+    scope_resource_group_id = Column(String(255), nullable=True)
     # "standard" | "convertible" | None. EC2 Reserved Instances only - AWS's
     # own docs confirm RDS/ElastiCache/Redshift Reservations have no such
     # offering-class split, and Azure Reservations don't either. Doesn't
@@ -536,6 +570,13 @@ class ReservationPurchase(Base):
     applied_scope_type              = Column(String(50), nullable=False)
     applied_scope_display_name      = Column(String(255), nullable=True)
     applied_scope_subscription_id   = Column(String(255), nullable=True)
+    # Fully-qualified resource group ID (real AppliedScopeProperties field -
+    # confirmed against the installed azure-mgmt-reservations SDK model,
+    # 2026-08-23). Only set when applied_scope_type == "Single" AND the
+    # reservation was further narrowed to "Single resource group" scope (a
+    # real, distinct Azure scoping option beyond subscription-level Single
+    # scope) - see pricing/commitment_mapping.py.
+    applied_scope_resource_group_id = Column(String(255), nullable=True)
     billing_plan                    = Column(String(50), nullable=False)
     term                            = Column(String(10), nullable=False)   # ISO-8601: P1Y | P3Y | P5Y
     quantity                        = Column(Integer, nullable=False)
@@ -662,6 +703,15 @@ class SavingsPlanPurchase(Base):
     commitment_currency_code    = Column(String(10), nullable=False)
     commitment_amount           = Column(Float, nullable=False)
     applied_scope_type          = Column(String(50), nullable=False)
+    # Added 2026-08-23 - previously missing entirely (unlike
+    # ReservationPurchase, which already captured applied_scope_subscription_id).
+    # Real, flattened SavingsPlanModel fields (confirmed against the
+    # installed azure-mgmt-billingbenefits SDK: s.applied_scope_properties.
+    # subscription_id / .resource_group_id) - same "Single subscription" /
+    # "Single resource group" scoping Reservations support. See
+    # pricing/commitment_mapping.py.
+    applied_scope_subscription_id   = Column(String(255), nullable=True)
+    applied_scope_resource_group_id = Column(String(255), nullable=True)
     display_name                = Column(String(255), nullable=True)
     term                        = Column(String(10), nullable=False)   # ISO-8601: P1Y | P3Y | P5Y
     provisioning_state          = Column(String(50), nullable=False)

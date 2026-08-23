@@ -63,11 +63,17 @@ def get_compute_inventory(provider: str = "Azure", mode: str = "demo", tenant_id
             "PAYG Hourly Cost USD":     r.payg_hourly_usd,
             "Avg Daily Running Hours":  r.avg_daily_running_hours,
             "Subscription":             r.subscription,
+            # Real Resource Graph resource group name - added 2026-08-23,
+            # needed to match a Reservation/Savings Plan purchased with
+            # "Single resource group" scope (see analysis/engine.py's
+            # _scope_matches_resource / pricing/commitment_mapping.py).
+            "Resource Group":           r.resource_group,
             "Provider":                 r.provider,
             "Is Orphaned":              r.is_orphaned,
         }
         for r in rows
     ]
     columns = ["Resource ID", "Resource Name", "Resource Type", "Resource State", "Region", "OS",
-               "SKU", "Redundancy", "HA Replicas", "PAYG Hourly Cost USD", "Avg Daily Running Hours", "Subscription", "Provider", "Is Orphaned"]
+               "SKU", "Redundancy", "HA Replicas", "PAYG Hourly Cost USD", "Avg Daily Running Hours",
+               "Subscription", "Resource Group", "Provider", "Is Orphaned"]
     return pd.DataFrame(data, columns=columns)

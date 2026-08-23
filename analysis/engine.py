@@ -96,6 +96,35 @@ def _is_running_at_hour(resource_state: str, avg_daily_hrs: int, hour: int) -> b
     return False
 
 
+def _scope_matches_resource(commitment_sub, commitment_rg, resource_sub, resource_rg) -> bool:
+    """True if a Reservation/Savings Plan's real Azure scope restriction (if
+    any) permits it to cover a given resource. Added 2026-08-23 - Azure
+    Reservations/Savings Plans default to "Single subscription" scope unless
+    the buyer deliberately picks "Shared" (confirmed via Microsoft Learn's
+    "Buy an Azure reservation" doc), and can be narrowed further to "Single
+    resource group" - this app previously ignored scope entirely and matched
+    ANY tenant resource with the right SKU/region, which overstates coverage
+    for any Single-scoped commitment in a multi-subscription tenant (a real,
+    not hypothetical, gap for a live tenant - db/seed.py's own demo
+    Reservation records are all Single-scoped).
+
+    commitment_sub/commitment_rg of None means unrestricted (Shared scope,
+    the ManagementGroup-membership-unresolved fallback - see
+    pricing/commitment_mapping.py's _derive_scope - or demo/seed data with
+    no scope concept at all) - always matches, this app's original behavior
+    for the common case. A non-None commitment_rg additionally requires
+    resource_group to match (the tightest restriction); a non-None
+    commitment_sub with no rg requires only subscription to match.
+    Case-insensitive - Azure subscription GUIDs and resource group names are
+    both compared case-insensitively by ARM convention."""
+    if commitment_rg:
+        return (str(resource_sub or "").lower() == str(commitment_sub or "").lower() and
+                str(resource_rg or "").lower() == str(commitment_rg or "").lower())
+    if commitment_sub:
+        return str(resource_sub or "").lower() == str(commitment_sub or "").lower()
+    return True
+
+
 # ── Pass 1: Reserved Instance Allocation ──────────────────────────────────────
 
 def _apply_ri_pass(workload_demand: list[dict], ri_df: pd.DataFrame) -> tuple[list[dict], dict]:
@@ -117,6 +146,8 @@ def _apply_ri_pass(workload_demand: list[dict], ri_df: pd.DataFrame) -> tuple[li
             "scope_sku":    ri["scope_sku"],
             "scope_region": ri["scope_region"],
             "scope_os":     ri["scope_os"],
+            "scope_subscription_id":   ri.get("scope_subscription_id"),
+            "scope_resource_group_id": ri.get("scope_resource_group_id"),
             "remaining":    ri["hourly_usd_commitment"] * ri["reserved_qty"],  # total pool
             "per_unit_rate": ri["hourly_usd_commitment"],
         }
@@ -127,7 +158,9 @@ def _apply_ri_pass(workload_demand: list[dict], ri_df: pd.DataFrame) -> tuple[li
                 res["Region"] == pool["scope_region"] and
                 res["OS"]     == pool["scope_os"]     and
                 res["Remaining PAYG Cost"] > 0         and
-                pool["remaining"] > 0):
+                pool["remaining"] > 0                  and
+                _scope_matches_resource(pool["scope_subscription_id"], pool["scope_resource_group_id"],
+                                         res.get("Subscription"), res.get("Resource Group"))):
 
                 # Allocate the RI committed rate (not the full PAYG rate)
                 allocated = min(res["Remaining PAYG Cost"], pool["per_unit_rate"], pool["remaining"])
@@ -144,22 +177,41 @@ def _apply_sp_pass(workload_demand: list[dict], sp_df: pd.DataFrame) -> tuple[li
     """
     Pass 2 — Flexible Savings Plan absorption.
     No SKU or region constraint — absorbs any remaining Compute/DB PAYG overage
-    from the global $/hr commitment pool.
+    from whichever SP pool(s) this resource's real Azure scope makes it
+    eligible for (Single subscription / Single resource group / Shared - see
+    _scope_matches_resource). Per-commitment pools, same shape as
+    _apply_ri_pass's ri_pools - added 2026-08-23; previously a single global
+    scalar pool with no scope awareness at all, which let a Single-scoped SP
+    absorb PAYG overage from resources outside its real scope.
 
     Returns:
       - Updated workload_demand with SP allocations applied
-      - sp_remaining: remaining SP pool balance after this hour
+      - sp_remaining: remaining SP pool balance (summed across all pools) after this hour
     """
-    sp_total = float(sp_df["hourly_usd_commitment"].sum()) if not sp_df.empty else 0.0
-    sp_remaining = sp_total
+    sp_pools = [
+        {
+            "scope_subscription_id":   sp.get("scope_subscription_id"),
+            "scope_resource_group_id": sp.get("scope_resource_group_id"),
+            "remaining":               sp["hourly_usd_commitment"],
+        }
+        for _, sp in sp_df.iterrows()
+    ] if not sp_df.empty else []
 
     for res in workload_demand:
-        if res["Remaining PAYG Cost"] > 0 and sp_remaining > 0:
-            allocated = min(res["Remaining PAYG Cost"], sp_remaining)
-            sp_remaining               -= allocated
+        if res["Remaining PAYG Cost"] <= 0:
+            continue
+        for pool in sp_pools:
+            if res["Remaining PAYG Cost"] <= 0 or pool["remaining"] <= 0:
+                continue
+            if not _scope_matches_resource(pool["scope_subscription_id"], pool["scope_resource_group_id"],
+                                            res.get("Subscription"), res.get("Resource Group")):
+                continue
+            allocated = min(res["Remaining PAYG Cost"], pool["remaining"])
+            pool["remaining"]          -= allocated
             res["Remaining PAYG Cost"] -= allocated
             res["Covered By SP"]       += allocated
 
+    sp_remaining = sum(p["remaining"] for p in sp_pools)
     return workload_demand, sp_remaining
 
 
@@ -212,6 +264,8 @@ def run_waterfall(
                     "SKU":                 res["SKU"],
                     "Region":              res["Region"],
                     "OS":                  res["OS"],
+                    "Subscription":        res.get("Subscription"),
+                    "Resource Group":      res.get("Resource Group"),
                     "Resource State":      res["Resource State"],
                     "Avg Running Hrs":     res["Avg Daily Running Hours"],
                     "Remaining PAYG Cost": hourly_cost,
@@ -247,7 +301,9 @@ def run_waterfall(
                     for _, ri in ri_df.iterrows():
                         if (ri["scope_sku"]    == res["SKU"] and
                             ri["scope_region"] == res["Region"] and
-                            ri["scope_os"]     == res["OS"]):
+                            ri["scope_os"]     == res["OS"]     and
+                            _scope_matches_resource(ri.get("scope_subscription_id"), ri.get("scope_resource_group_id"),
+                                                     res.get("Subscription"), res.get("Resource Group"))):
                             res["RI Leakage"] += ri["hourly_usd_commitment"]
 
             # Total RI utilized this hour
@@ -324,6 +380,12 @@ def run_waterfall(
                 (ri_df["scope_region"] == row["Region"]) &
                 (ri_df["scope_os"]     == row["OS"])
             ]
+            if not match.empty and ("scope_subscription_id" in match.columns):
+                match = match[match.apply(
+                    lambda ri: _scope_matches_resource(ri.get("scope_subscription_id"), ri.get("scope_resource_group_id"),
+                                                         row.get("Subscription"), row.get("Resource Group")),
+                    axis=1,
+                )]
             return float(match["hourly_usd_commitment"].sum()) if not match.empty else 0.0
         orphaned["RI Drain per Hour (USD)"] = orphaned.apply(_calc_orphan_drain, axis=1)
         orphaned["RI Drain per Day (USD)"]  = orphaned["RI Drain per Hour (USD)"] * 24
@@ -389,8 +451,45 @@ def savings_plan_analysis(
     baseline_hr = float(steady_state["PAYG Hourly Cost USD"].sum())
 
     existing_commitment_hr = float(sp_df["hourly_usd_commitment"].sum()) if not sp_df.empty else 0.0
-    leakage_hr   = max(0.0, existing_commitment_hr - baseline_hr)
-    uncovered_hr = max(0.0, baseline_hr - existing_commitment_hr)
+
+    # leakage_hr/uncovered_hr can't be a simple global net of the two totals
+    # above once ANY commitment carries a real scope restriction (Single
+    # subscription / Single resource group - see pricing/commitment_mapping.py)
+    # - a scoped SP's surplus can't offset an out-of-scope resource's gap,
+    # and an out-of-scope resource's overage can't drain a scoped SP's pool.
+    # Resolved via the same greedy per-resource/per-pool allocation
+    # _apply_sp_pass uses for the hourly waterfall (added 2026-08-23,
+    # previously this function ignored scope entirely). baseline_hr/
+    # existing_commitment_hr above stay simple global sums - still honest,
+    # useful headline totals - only the netted leakage/uncovered figures
+    # need scope-aware allocation.
+    if not sp_df.empty:
+        sp_pools = [
+            {
+                "scope_subscription_id":   sp.get("scope_subscription_id"),
+                "scope_resource_group_id": sp.get("scope_resource_group_id"),
+                "remaining":               float(sp["hourly_usd_commitment"]),
+            }
+            for _, sp in sp_df.iterrows()
+        ]
+    else:
+        sp_pools = []
+    total_uncovered = 0.0
+    for _, res in steady_state.iterrows():
+        remaining_cost = float(res["PAYG Hourly Cost USD"])
+        for pool in sp_pools:
+            if remaining_cost <= 0 or pool["remaining"] <= 0:
+                continue
+            if not _scope_matches_resource(pool["scope_subscription_id"], pool["scope_resource_group_id"],
+                                            res.get("Subscription"), res.get("Resource Group")):
+                continue
+            allocated = min(remaining_cost, pool["remaining"])
+            pool["remaining"] -= allocated
+            remaining_cost    -= allocated
+        total_uncovered += remaining_cost
+
+    uncovered_hr = round(max(0.0, total_uncovered), 4)
+    leakage_hr   = round(max(0.0, sum(p["remaining"] for p in sp_pools)), 4)
     recommended  = round(baseline_hr * safety_buffer, 4)
 
     # Business-hours anomaly warning: which VMs cause off-hour SP waste?
@@ -422,6 +521,37 @@ def savings_plan_analysis(
 
 
 # ── Reserved Instance Analysis ────────────────────────────────────────────────
+
+def _finalize_coverage_layer(merged: pd.DataFrame) -> pd.DataFrame:
+    """Shared eligibility/coverage-model/gap-zeroing finalization applied to
+    a demand-supply merged DataFrame, regardless of which layer produced it
+    (main tenant-wide, Global-scope, or the Single subscription/resource
+    group scoped layers added 2026-08-23) - factored out so each layer's own
+    join logic (which genuinely differs - different key columns per layer)
+    doesn't have to duplicate this identical ~20-line finalization block."""
+    if merged.empty:
+        merged["is_eligible"] = pd.Series(dtype=bool)
+        merged["eligibility_reason"] = pd.Series(dtype=str)
+        merged["coverage_model"] = pd.Series(dtype=str)
+        return merged
+    elig = merged.apply(lambda r: check_eligibility(r["Resource Type"], r["SKU"]), axis=1)
+    merged["is_eligible"]        = elig.apply(lambda t: t[0])
+    merged["eligibility_reason"] = elig.apply(lambda t: t[1])
+    merged.loc[~merged["is_eligible"], "gap"] = 0
+    # "capacity" services (Cosmos DB, SQL DB/MI, Databricks, Synapse) apply
+    # a reservation automatically across ALL matching resources in scope by
+    # pooled capacity/throughput, not per-instance - see
+    # analysis/ri_eligibility.py for sources. Their resource-count gap is a
+    # rough signal only, never zeroed, but flagged for the UI.
+    # "unmeasurable" services (Storage, Files) are pooled too, but sold in
+    # blocks (100 TB+ / 10 TiB+) that dwarf a single resource, and we don't
+    # track actual data volume - a resource-count gap would be actively
+    # misleading here, so it's zeroed just like an ineligible row.
+    merged["coverage_model"] = merged["Resource Type"].apply(get_coverage_model)
+    merged.loc[merged["coverage_model"] == "unmeasurable", "gap"] = 0
+    merged.loc[merged["coverage_model"] == "unmeasurable", "excess"] = 0
+    return merged
+
 
 def reservation_analysis(
     inventory_df: pd.DataFrame,
@@ -457,17 +587,16 @@ def reservation_analysis(
     if "Redundancy" not in running_resources.columns:
         running_resources["Redundancy"] = "N/A"
     running_resources["Redundancy"] = running_resources["Redundancy"].fillna("N/A")
-    demand = (
-        running_resources.groupby(["Resource Type", "SKU", "Region", "OS", "Redundancy"])
-        .size()
-        .reset_index(name="running_count")
-    )
+    for _col in ("Subscription", "Resource Group"):
+        if _col not in running_resources.columns:
+            running_resources[_col] = ""
+        running_resources[_col] = running_resources[_col].fillna("")
 
     # Split off globally-scoped commitments (scope_region == "Global") before
-    # building supply - Azure Cosmos DB Reservations are the first (and so
-    # far only) commitment type in this app with no region lock at all,
-    # confirmed 2026-08-23 directly against Azure's real Retail Prices API
-    # (every real Cosmos DB reservation price item carries
+    # building demand/supply - Azure Cosmos DB Reservations are the first
+    # (and so far only) commitment type in this app with no region lock at
+    # all, confirmed 2026-08-23 directly against Azure's real Retail Prices
+    # API (every real Cosmos DB reservation price item carries
     # "armRegionName": "Global", unlike every other Reservation type here,
     # which are all region-scoped meters). The exact-tuple merge below
     # requires a literal Region match, which "Global" can never satisfy
@@ -483,14 +612,66 @@ def reservation_analysis(
         ri_df_regional = ri_df[~is_global_scope]
         ri_df_global = ri_df[is_global_scope]
 
-    # Supply side: all RI / Reserved Capacity commitments
+    # Regional commitments split further by real Azure scope restriction
+    # (Single subscription / Single resource group vs Shared - see
+    # pricing/commitment_mapping.py's _derive_scope) - added 2026-08-23. A
+    # scoped commitment's reserved_qty must NOT be pooled into the main
+    # tenant-wide merge below, or it would silently cover demand from
+    # subscriptions/resource groups it doesn't actually apply to (the exact
+    # gap this scope work closes) - it gets its own dedicated layer further
+    # down instead, same "split off, handle separately, concat back"
+    # pattern already used for Global scope above. Unscoped (scope_subscription_id
+    # null - Shared, or the ManagementGroup-membership-unresolved fallback)
+    # commitments keep pooling against ALL matching demand tenant-wide
+    # exactly as before.
     if ri_df_regional.empty:
+        ri_df_unscoped = ri_df_regional
+        ri_df_scoped = ri_df_regional
+    else:
+        has_scope = ri_df_regional["scope_subscription_id"].notna() & (ri_df_regional["scope_subscription_id"] != "")
+        ri_df_scoped = ri_df_regional[has_scope]
+        ri_df_unscoped = ri_df_regional[~has_scope]
+
+    # Resources whose exact profile (Resource Type/SKU/Region/OS/Redundancy
+    # AND Subscription[/Resource Group]) is targeted by a scope-restricted
+    # commitment are excluded from the MAIN tenant-wide demand pool below and
+    # handled exclusively in their own dedicated scoped layer further down -
+    # otherwise the same physical resource's demand would be double-counted
+    # (once as unmet in the pooled tenant-wide gap, once - correctly - as met
+    # in its scoped layer), overstating total gap. A resource NOT targeted by
+    # any scoped commitment is unaffected and still pools normally below.
+    if not ri_df_scoped.empty:
+        excluded = running_resources.apply(
+            lambda row: any(
+                row["Resource Type"] == ri["scope_resource_type"] and
+                row["SKU"]           == ri["scope_sku"] and
+                row["Region"]        == ri["scope_region"] and
+                row["OS"]            == ri["scope_os"] and
+                row["Redundancy"]    == (ri["scope_redundancy"] or "N/A") and
+                _scope_matches_resource(ri["scope_subscription_id"], ri["scope_resource_group_id"],
+                                         row["Subscription"], row["Resource Group"])
+                for _, ri in ri_df_scoped.iterrows()
+            ),
+            axis=1,
+        )
+        main_pool_resources = running_resources[~excluded]
+    else:
+        main_pool_resources = running_resources
+
+    demand = (
+        main_pool_resources.groupby(["Resource Type", "SKU", "Region", "OS", "Redundancy"])
+        .size()
+        .reset_index(name="running_count")
+    )
+
+    # Supply side: all RI / Reserved Capacity commitments
+    if ri_df_unscoped.empty:
         supply = pd.DataFrame(columns=[
             "Resource Type", "SKU", "Region", "OS", "Redundancy", "reserved_qty",
             "commitment_id", "hourly_usd_commitment", "term", "expiry_date"
         ])
     else:
-        supply = ri_df_regional.rename(columns={
+        supply = ri_df_unscoped.rename(columns={
             "scope_sku":            "SKU",
             "scope_resource_type":  "Resource Type",
             "scope_region":         "Region",
@@ -537,27 +718,7 @@ def reservation_analysis(
     # isn't a "gap", it's simply out of scope for this program. Zeroing gap here
     # also keeps generate_recommendations() from suggesting a purchase that
     # Azure wouldn't actually let you make.
-    if merged.empty:
-        merged["is_eligible"] = pd.Series(dtype=bool)
-        merged["eligibility_reason"] = pd.Series(dtype=str)
-        merged["coverage_model"] = pd.Series(dtype=str)
-    else:
-        elig = merged.apply(lambda r: check_eligibility(r["Resource Type"], r["SKU"]), axis=1)
-        merged["is_eligible"]        = elig.apply(lambda t: t[0])
-        merged["eligibility_reason"] = elig.apply(lambda t: t[1])
-        merged.loc[~merged["is_eligible"], "gap"] = 0
-        # "capacity" services (Cosmos DB, SQL DB/MI, Databricks, Synapse) apply
-        # a reservation automatically across ALL matching resources in scope by
-        # pooled capacity/throughput, not per-instance - see
-        # analysis/ri_eligibility.py for sources. Their resource-count gap is a
-        # rough signal only, never zeroed, but flagged for the UI.
-        # "unmeasurable" services (Storage, Files) are pooled too, but sold in
-        # blocks (100 TB+ / 10 TiB+) that dwarf a single resource, and we don't
-        # track actual data volume - a resource-count gap would be actively
-        # misleading here, so it's zeroed just like an ineligible row.
-        merged["coverage_model"] = merged["Resource Type"].apply(get_coverage_model)
-        merged.loc[merged["coverage_model"] == "unmeasurable", "gap"] = 0
-        merged.loc[merged["coverage_model"] == "unmeasurable", "excess"] = 0
+    merged = _finalize_coverage_layer(merged)
 
     # Globally-scoped commitments (split off above) - Cosmos DB Reservations
     # have no per-region purchase concept at all (real quantity is a
@@ -571,11 +732,10 @@ def reservation_analysis(
     # is not part of the join key (there's no real regional split to key
     # on) and is set to the literal "Global" string afterward so the
     # coverage table reads honestly, not as if it were one specific region.
-    # Deliberately mirrors the exact-tuple path above's gap/excess/
-    # eligibility logic verbatim (not refactored into a shared helper - the
-    # join key genuinely differs, and duplicating ~15 lines here is safer
-    # than parametrizing the well-exercised path above for a case that, so
-    # far, only ever fires for one resource type). Also deliberately does
+    # The join key genuinely differs from the exact-tuple path above (no
+    # Region dimension), so the merge itself is duplicated rather than
+    # parametrized - only the post-merge eligibility/coverage-model
+    # finalization is shared, via _finalize_coverage_layer(). Also deliberately does
     # NOT deduplicate/sum multiple commitments sharing one profile beyond
     # what the exact-tuple path above already does (or doesn't) for the
     # identical scenario - consistent with existing behavior, not a new
@@ -615,21 +775,93 @@ def reservation_analysis(
         global_merged["reserved_qty"]  = global_merged["reserved_qty"].astype(int)
         global_merged["gap"]           = (global_merged["running_count"] - global_merged["reserved_qty"]).clip(lower=0)
         global_merged["excess"]        = (global_merged["reserved_qty"] - global_merged["running_count"]).clip(lower=0)
-
-        if global_merged.empty:
-            global_merged["is_eligible"] = pd.Series(dtype=bool)
-            global_merged["eligibility_reason"] = pd.Series(dtype=str)
-            global_merged["coverage_model"] = pd.Series(dtype=str)
-        else:
-            gelig = global_merged.apply(lambda r: check_eligibility(r["Resource Type"], r["SKU"]), axis=1)
-            global_merged["is_eligible"]        = gelig.apply(lambda t: t[0])
-            global_merged["eligibility_reason"] = gelig.apply(lambda t: t[1])
-            global_merged.loc[~global_merged["is_eligible"], "gap"] = 0
-            global_merged["coverage_model"] = global_merged["Resource Type"].apply(get_coverage_model)
-            global_merged.loc[global_merged["coverage_model"] == "unmeasurable", "gap"] = 0
-            global_merged.loc[global_merged["coverage_model"] == "unmeasurable", "excess"] = 0
+        global_merged = _finalize_coverage_layer(global_merged)
 
         merged = pd.concat([merged, global_merged], ignore_index=True)
+
+    # Single subscription / Single resource group scoped commitments (split
+    # off as ri_df_scoped above) - added 2026-08-23, same "split off, handle
+    # separately, concat back" pattern as Global scope above, but keyed on
+    # Subscription (and Resource Group, for the tighter restriction) instead
+    # of dropping Region. A scoped commitment only covers demand from
+    # resources actually inside its scope - pooling it into the main
+    # tenant-wide merge above would silently cover out-of-scope resources
+    # too (the real, previously-unhandled gap this closes; see
+    # analysis/engine.py's _scope_matches_resource and
+    # pricing/commitment_mapping.py's _derive_scope for the full context).
+    # This table is already documented (see "capacity"-model coverage_model
+    # comment above) as a rough per-profile signal, not a strict ledger, for
+    # pooled-capacity services - the same discipline applies here: a
+    # resource simultaneously in reach of BOTH an unscoped AND a scoped
+    # commitment for the identical profile may show up in two separate rows
+    # (one per layer) rather than one perfectly netted number, same
+    # "disclosed imprecision over a bigger allocation-engine rewrite"
+    # trade-off already made for Global scope.
+    if not ri_df_scoped.empty:
+        no_rg_scope = ri_df_scoped["scope_resource_group_id"].isna() | (ri_df_scoped["scope_resource_group_id"] == "")
+        ri_df_sub_scoped = ri_df_scoped[no_rg_scope]
+        ri_df_rg_scoped  = ri_df_scoped[~no_rg_scope]
+
+        if not ri_df_sub_scoped.empty:
+            sub_demand = (
+                running_resources[running_resources["Subscription"].isin(ri_df_sub_scoped["scope_subscription_id"].unique())]
+                .groupby(["Resource Type", "SKU", "Region", "OS", "Redundancy", "Subscription"])
+                .size()
+                .reset_index(name="running_count")
+            )
+            sub_supply = ri_df_sub_scoped.rename(columns={
+                "scope_sku":              "SKU",
+                "scope_resource_type":    "Resource Type",
+                "scope_region":           "Region",
+                "scope_os":               "OS",
+                "scope_redundancy":       "Redundancy",
+                "scope_subscription_id":  "Subscription",
+            })[[
+                "commitment_id", "SKU", "Resource Type", "Region", "OS", "Redundancy", "Subscription",
+                "reserved_qty", "hourly_usd_commitment", "term", "expiry_date",
+            ]].copy()
+            sub_supply["Redundancy"] = sub_supply["Redundancy"].fillna("N/A")
+
+            sub_merged = sub_demand.merge(
+                sub_supply, on=["Resource Type", "SKU", "Region", "OS", "Redundancy", "Subscription"], how="outer"
+            ).fillna(0)
+            sub_merged["running_count"] = sub_merged["running_count"].astype(int)
+            sub_merged["reserved_qty"]  = sub_merged["reserved_qty"].astype(int)
+            sub_merged["gap"]           = (sub_merged["running_count"] - sub_merged["reserved_qty"]).clip(lower=0)
+            sub_merged["excess"]        = (sub_merged["reserved_qty"] - sub_merged["running_count"]).clip(lower=0)
+            sub_merged = _finalize_coverage_layer(sub_merged)
+            merged = pd.concat([merged, sub_merged], ignore_index=True)
+
+        if not ri_df_rg_scoped.empty:
+            rg_demand = (
+                running_resources[running_resources["Resource Group"].isin(ri_df_rg_scoped["scope_resource_group_id"].unique())]
+                .groupby(["Resource Type", "SKU", "Region", "OS", "Redundancy", "Subscription", "Resource Group"])
+                .size()
+                .reset_index(name="running_count")
+            )
+            rg_supply = ri_df_rg_scoped.rename(columns={
+                "scope_sku":               "SKU",
+                "scope_resource_type":     "Resource Type",
+                "scope_region":            "Region",
+                "scope_os":                "OS",
+                "scope_redundancy":        "Redundancy",
+                "scope_subscription_id":   "Subscription",
+                "scope_resource_group_id": "Resource Group",
+            })[[
+                "commitment_id", "SKU", "Resource Type", "Region", "OS", "Redundancy", "Subscription", "Resource Group",
+                "reserved_qty", "hourly_usd_commitment", "term", "expiry_date",
+            ]].copy()
+            rg_supply["Redundancy"] = rg_supply["Redundancy"].fillna("N/A")
+
+            rg_merged = rg_demand.merge(
+                rg_supply, on=["Resource Type", "SKU", "Region", "OS", "Redundancy", "Subscription", "Resource Group"], how="outer"
+            ).fillna(0)
+            rg_merged["running_count"] = rg_merged["running_count"].astype(int)
+            rg_merged["reserved_qty"]  = rg_merged["reserved_qty"].astype(int)
+            rg_merged["gap"]           = (rg_merged["running_count"] - rg_merged["reserved_qty"]).clip(lower=0)
+            rg_merged["excess"]        = (rg_merged["reserved_qty"] - rg_merged["running_count"]).clip(lower=0)
+            rg_merged = _finalize_coverage_layer(rg_merged)
+            merged = pd.concat([merged, rg_merged], ignore_index=True)
 
     # Orphaned RI drain: Stopped VMs/resources whose profile is covered by an RI
     stopped = inventory_df[inventory_df["Resource State"] == "Stopped (deallocated)"]
@@ -653,6 +885,12 @@ def reservation_analysis(
                 (ri_df["scope_os"]     == sres["OS"]) &
                 (ri_df["scope_redundancy"].fillna("N/A") == (sres_redundancy or "N/A"))
             ]
+            if not match.empty and "scope_subscription_id" in match.columns:
+                match = match[match.apply(
+                    lambda ri: _scope_matches_resource(ri.get("scope_subscription_id"), ri.get("scope_resource_group_id"),
+                                                         sres.get("Subscription"), sres.get("Resource Group")),
+                    axis=1,
+                )]
             if not match.empty:
                 for _, ri in match.iterrows():
                     orphan_rows.append({

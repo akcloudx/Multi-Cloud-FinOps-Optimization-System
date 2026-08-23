@@ -71,6 +71,13 @@ def get_all_commitments(provider: str = "Azure", mode: str = "demo", tenant_id=N
             "scope_region":          r.scope_region,
             "scope_os":              r.scope_os,
             "scope_redundancy":      r.scope_redundancy or "N/A",
+            # Real Azure scope restriction (Single subscription / Single
+            # resource group) - added 2026-08-23, see db/schema.py's
+            # Commitment.scope_subscription_id comment. None for Shared/
+            # ManagementGroup-fallback/demo data - matches tenant-wide,
+            # unchanged from this app's original behavior.
+            "scope_subscription_id":   r.scope_subscription_id,
+            "scope_resource_group_id": r.scope_resource_group_id,
             "hourly_usd_commitment": r.hourly_usd_commitment,
             "reserved_qty":          r.reserved_qty,
             "term":                  r.term,
@@ -83,6 +90,7 @@ def get_all_commitments(provider: str = "Azure", mode: str = "demo", tenant_id=N
         for r in rows
     ]
     columns = ["commitment_id", "commitment_type", "scope_sku", "scope_resource_type", "scope_region", "scope_os", "scope_redundancy",
+               "scope_subscription_id", "scope_resource_group_id",
                "hourly_usd_commitment", "reserved_qty", "term", "expiry_date", "provider", "is_inferred_mapping", "mapping_note", "offering_class"]
     return pd.DataFrame(data, columns=columns)
 

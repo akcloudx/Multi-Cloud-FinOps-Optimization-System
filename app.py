@@ -2123,9 +2123,9 @@ def load_live_data(provider: str, tenant_id: int, days: int, buffer: float, sp_e
 
 if is_live_mode and not is_live_configured:
     # Strict Live Mode with NO Connection: return empty data state
-    cols = ["Resource ID", "Resource Name", "Resource Type", "Resource State", "Region", "OS", "SKU", "PAYG Hourly Cost USD", "Avg Daily Running Hours", "Subscription", "Provider", "Is Orphaned"]
+    cols = ["Resource ID", "Resource Name", "Resource Type", "Resource State", "Region", "OS", "SKU", "PAYG Hourly Cost USD", "Avg Daily Running Hours", "Subscription", "Resource Group", "Provider", "Is Orphaned"]
     inv_raw = pd.DataFrame(columns=cols)
-    sp_df = pd.DataFrame(columns=["commitment_id", "commitment_type", "scope_sku", "scope_region", "scope_os", "hourly_usd_commitment", "reserved_qty", "term", "expiry_date", "provider"])
+    sp_df = pd.DataFrame(columns=["commitment_id", "commitment_type", "scope_sku", "scope_resource_type", "scope_region", "scope_os", "scope_redundancy", "scope_subscription_id", "scope_resource_group_id", "hourly_usd_commitment", "reserved_qty", "term", "expiry_date", "provider"])
     compute_sp_df = sp_df.copy()
     db_sp_df = sp_df.copy()
     sagemaker_sp_df = sp_df.copy()
