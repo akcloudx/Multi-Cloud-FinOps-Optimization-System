@@ -143,6 +143,22 @@ def _is_hourly(item: dict) -> bool:
     return _normalize_name(item.get("unitOfMeasure", "")) in _HOURLY_UNITS
 
 
+_MONTHLY_UNITS = {"1/month"}
+
+
+def _is_monthly(item: dict) -> bool:
+    """Azure Disk Storage's Consumption meters (2026-08) are the first
+    service this app prices that genuinely bills on a different cadence,
+    not just a different spelling of hourly - Managed Disks are a flat
+    monthly rate ('1/Month'), confirmed via Microsoft's own docs: "Billing
+    for any provisioned disk is prorated hourly by using the monthly
+    price." Kept as its own function/set rather than folded into
+    _HOURLY_UNITS, since conflating a genuinely different billing cadence
+    into a set literally named "hourly" would be misleading for every
+    future reader of that set."""
+    return _normalize_name(item.get("unitOfMeasure", "")) in _MONTHLY_UNITS
+
+
 def _query_retail_items(price_type: str, region: str, plan: SkuQueryPlan, match_value: str) -> list:
     """Fetches Retail Prices API items for one price_type ('Consumption' or
     'Reservation'), scoped by the query plan. armSkuName matches are pushed
@@ -217,7 +233,7 @@ def _fetch_one_meter_rates(plan: SkuQueryPlan, region: str, os_: str, redundancy
         items = _query_retail_items("Consumption", region, plan, match_value)
     except Exception:
         return result
-    items = [i for i in items if _is_hourly(i)]
+    items = [i for i in items if (_is_monthly(i) if plan.consumption_unit == "monthly" else _is_hourly(i))]
     items = _exclude_noise_meters(items)
     items = _filter_by_redundancy(items, redundancy)
     if not items:
@@ -228,7 +244,12 @@ def _fetch_one_meter_rates(plan: SkuQueryPlan, region: str, os_: str, redundancy
     # distinction at all (databases, storage, ...).
     os_matched = _compute_only_items(items, plan, os_)
     payg_item = min(os_matched, key=lambda i: float(i["retailPrice"]))
-    result["payg"] = float(payg_item["retailPrice"]) * multiplier
+    payg_rate = float(payg_item["retailPrice"])
+    if plan.consumption_unit == "monthly":
+        # Prorated hourly from the monthly price, same rule Microsoft's own
+        # docs state Azure itself uses for disk billing - not a guess.
+        payg_rate = payg_rate / MONTH_HOURS
+    result["payg"] = payg_rate * multiplier
 
     # Savings Plan rates attach to a specific meter - search within the SAME
     # compute-only subset first, so PAYG and the committed rate always come

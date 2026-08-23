@@ -601,7 +601,23 @@ Resources
     // available here at all - it's a separate getStatus() RPC call, not a
     // stored ARM property Resource Graph can see - see
     // _fetch_ssis_ir_states() below, called separately after this query.
-    'microsoft.datafactory/factories/integrationruntimes'
+    'microsoft.datafactory/factories/integrationruntimes',
+    // Managed Disks (Microsoft.Compute/disks) - a standalone-VM-independent
+    // resource type, billed separately from the VM it's attached to (or not
+    // attached at all - billing is identical either way, confirmed via
+    // Microsoft's own disk-types docs, 2026-08: "billed regardless of the
+    // amount of data written to the disk," no discount for unattached
+    // state). Captures EVERY disk, attached or not - unlike VMs, there's no
+    // "already counted elsewhere" double-counting risk here, since Compute
+    // (VM) inventory rows only ever price the VM's own compute meter, never
+    // its disks. sku.name is top-level (e.g. "Premium_LRS", "StandardSSD_"
+    // "ZRS", "UltraSSD_LRS" - confirmed via Microsoft's own ARM template
+    // reference, 2026-08), same generic shape as Dedicated Host/Redis
+    // Enterprise, but this app ALSO needs the real diskSizeGB (a top-level
+    // properties field) to derive the P30/E20/S60-style tier label Azure's
+    // own billing and Retail Prices API use - see connector.py's diskSku
+    // below and pricing/sku_mapping.py's _plan_disk_storage.
+    'microsoft.compute/disks'
 )
 // Every Azure SQL logical server auto-creates a "master" system database -
 // it's not billable and not user-managed, so exclude it from inventory.
@@ -686,6 +702,16 @@ Resources
     // field name for this service.
     ssisEdition     = tostring(properties.typeProperties.ssisProperties.edition),
     ssisLicenseType = tostring(properties.typeProperties.ssisProperties.licenseType),
+    // Real ARM fields (confirmed via Microsoft's own ARM template
+    // reference, 2026-08): sku.name is the disk family + redundancy
+    // ("Premium_LRS", "StandardSSD_ZRS", "UltraSSD_LRS", "PremiumV2_LRS" -
+    // does NOT encode size at all), diskSizeGB is a separate top-level
+    // properties int. Azure derives the "P30"/"E20"/"S60"-style tier label
+    // shown in billing/the Retail Prices API from diskSizeGB (rounded UP to
+    // the nearest offered size), not from any single ARM field directly -
+    // pricing/sku_mapping.py's _plan_disk_storage does that derivation.
+    diskSkuName = tostring(sku.name),
+    diskSizeGB  = toint(properties.diskSizeGB),
     topSku     = tostring(sku.name),
     redisSkuName  = tostring(properties.sku.name),
     redisFamily   = tostring(properties.sku.family),
@@ -812,6 +838,15 @@ Resources
             strcat(ssisNodeSize, "_", ssisNodeCount, "_", ssisEdition, "_", ssisLicenseType),
         ""
     ),
+    // "{sku.name}_{diskSizeGB}" (e.g. "Premium_LRS_1024") - the convention
+    // pricing/sku_mapping.py's _plan_disk_storage parses, deriving the real
+    // P30/E20/S60-style tier label from diskSizeGB itself (round up to the
+    // nearest offered size, per Microsoft's own documented billing rule).
+    diskSku = case(
+        type == 'microsoft.compute/disks' and isnotempty(diskSkuName) and isnotnull(diskSizeGB),
+            strcat(diskSkuName, "_", tostring(diskSizeGB)),
+        ""
+    ),
     // "{CapacityMode}_{ServiceTier}" (e.g. "Provisioned_GeneralPurpose") -
     // the convention pricing/sku_mapping.py's _plan_cosmos_db parses.
     // "Provisioned" (not "Standard"/"Autoscale") is deliberate - see that
@@ -849,6 +884,7 @@ Resources
         isnotempty(aciSku), aciSku,
         isnotempty(adxSku), adxSku,
         isnotempty(ssisSku), ssisSku,
+        isnotempty(diskSku), diskSku,
         isnotempty(topSku), topSku,
         'N/A'
     ),
@@ -1016,6 +1052,7 @@ def _map_resource_type(azure_type: str) -> str:
         "microsoft.fabric/capacities":                   "Microsoft Fabric",
         "microsoft.kusto/clusters":                      "Azure Data Explorer",
         "microsoft.datafactory/factories/integrationruntimes": "Azure-SSIS Integration Runtime",
+        "microsoft.compute/disks":                       "Azure Disk Storage",
     }
     return mapping.get(azure_type, azure_type)
 

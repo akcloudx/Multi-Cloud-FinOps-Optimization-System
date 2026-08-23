@@ -31,6 +31,21 @@ class SkuQueryPlan:
     reason: str = ""                     # why unsupported, when supported=False
     service_name: Optional[str] = None   # Retail API serviceName to scope the query ($filter)
     match_field: str = "armSkuName"      # "armSkuName" | "skuName" - response field to match in Python after fetching
+    consumption_unit: str = "hourly"     # "hourly" | "monthly" - the Consumption meter's real billing cadence.
+                                          # Added 2026-08 for Azure Disk Storage - Managed Disks are billed a flat
+                                          # monthly rate (unitOfMeasure "1/Month"), prorated hourly from that
+                                          # monthly price (Microsoft's own docs: "Billing for any provisioned disk
+                                          # is prorated hourly by using the monthly price"), NOT a native $/hr
+                                          # meter like every other service this app has priced so far. "monthly"
+                                          # tells _fetch_one_meter_rates() to accept "1/Month"-tagged items
+                                          # (instead of the normal hourly-unit filter) and divide by MONTH_HOURS
+                                          # before consumption_multiplier is applied - kept separate from
+                                          # consumption_multiplier itself so that field can stay a pure quantity
+                                          # (instance/node count) without being overloaded to also mean unit
+                                          # conversion. Reservation pricing is unaffected - _fetch_azure_ri_rates
+                                          # already treats every Reservation item as a lump total-term price
+                                          # regardless of its labeled unitOfMeasure, real Azure convention for
+                                          # Reservations generally, not something this field needs to touch.
     consumption_match_value: str = ""    # value to match for Consumption/SavingsPlan lookup
     reservation_match_value: str = ""    # value to match for Reservation lookup (can differ from consumption side)
     product_contains: str = ""           # optional productName substring to disambiguate tiers sharing a skuName
@@ -1495,6 +1510,130 @@ def _plan_ssis_ir(sku: str) -> SkuQueryPlan:
     )
 
 
+# ── Azure Disk Storage (Managed Disks) ──────────────────────────────────────
+_DISK_SKU_RE = re.compile(r"^(Premium|StandardSSD|Standard|UltraSSD|PremiumV2)_(LRS|ZRS)_(\d+)$")
+
+# Real, official Azure disk-size tables (Microsoft's own disks-types docs,
+# 2026-08) - (max GiB, tier label) pairs, smallest-to-largest. Azure bills by
+# rounding the provisioned diskSizeGB UP to the nearest offered size ("if you
+# provisioned a 200-GiB Standard SSD, it maps to the disk size offer of E15
+# (256 GiB)" - the docs' own example) - _round_up_disk_tier below does
+# exactly that. Premium and Standard SSD share identical size boundaries
+# (just P-vs-E letter prefixes); Standard HDD's smallest offered size is S4
+# (32 GiB) - there is no S1/S2/S3, genuinely different from the other two
+# families, not an oversight.
+_PREMIUM_TIERS = [(4, "P1"), (8, "P2"), (16, "P3"), (32, "P4"), (64, "P6"), (128, "P10"), (256, "P15"),
+                   (512, "P20"), (1024, "P30"), (2048, "P40"), (4096, "P50"), (8192, "P60"),
+                   (16384, "P70"), (32767, "P80")]
+_STANDARD_SSD_TIERS = [(4, "E1"), (8, "E2"), (16, "E3"), (32, "E4"), (64, "E6"), (128, "E10"), (256, "E15"),
+                        (512, "E20"), (1024, "E30"), (2048, "E40"), (4096, "E50"), (8192, "E60"),
+                        (16384, "E70"), (32767, "E80")]
+_STANDARD_HDD_TIERS = [(32, "S4"), (64, "S6"), (128, "S10"), (256, "S15"), (512, "S20"), (1024, "S30"),
+                        (2048, "S40"), (4096, "S50"), (8192, "S60"), (16384, "S70"), (32767, "S80")]
+# Premium disk Reservations are only sold from P30 up ("Azure disk
+# reservations offer a one-year commitment plan for Premium SSD SKUs from
+# P30 (1 TiB) to P80 (32 TiB)" - Microsoft's own docs) - matches
+# analysis/ri_eligibility.py's existing _disk_eligibility rule exactly.
+_RESERVABLE_PREMIUM_TIERS = {"P30", "P40", "P50", "P60", "P70", "P80"}
+
+
+def _round_up_disk_tier(size_gb: int, tiers: list) -> str:
+    for max_gb, label in tiers:
+        if size_gb <= max_gb:
+            return label
+    return tiers[-1][1]
+
+
+def disk_reservation_eligible(sku: str) -> Optional[bool]:
+    """Public helper for analysis/ri_eligibility.py - the real P30+ size
+    check needs the SAME diskSizeGB round-up table this module's pricing
+    resolver uses, so it's exposed here rather than duplicated (and risking
+    drift) in ri_eligibility.py. Returns True/False for a real, parseable
+    Premium disk SKU, or None if the SKU is unparseable/not a Premium disk
+    at all (caller should fall back to its own family-level check for
+    Standard/Ultra/V2, which don't need the size table)."""
+    match = _DISK_SKU_RE.match((sku or "").strip())
+    if not match or match.group(1) != "Premium":
+        return None
+    tier = _round_up_disk_tier(int(match.group(3)), _PREMIUM_TIERS)
+    return tier in _RESERVABLE_PREMIUM_TIERS
+
+
+def _plan_disk_storage(sku: str) -> SkuQueryPlan:
+    # Added 2026-08-23 - Azure Disk Storage was previously entirely
+    # unpriced (live inventory didn't reach it at all - see
+    # azure_conn/connector.py). This app's SKU convention is
+    # "{family}_{redundancy}_{diskSizeGB}" (e.g. "Premium_LRS_1024"), built
+    # directly from the real top-level ARM fields sku.name and diskSizeGB -
+    # sku.name alone (e.g. "Premium_LRS") does NOT encode size at all,
+    # confirmed via Microsoft's own ARM template reference, 2026-08 - a
+    # real, confirmed correction of this app's own earlier (pre-live-data)
+    # guess that armSkuName would look like "Premium_SSD_Managed_Disks_P30".
+    #
+    # Verified live against the Retail Prices API + Microsoft's own
+    # disks-types docs: Managed Disks are billed a genuinely different
+    # cadence than every other service this app prices - a flat MONTHLY
+    # rate (unitOfMeasure "1/Month"), prorated hourly from that monthly
+    # price by Azure itself ("Billing for any provisioned disk is prorated
+    # hourly by using the monthly price") - see SkuQueryPlan.consumption_unit
+    # and commitment_pricing.py's _is_monthly for the shared mechanism this
+    # needed. Each disk size also carries a SEPARATE "Disk Mount" meter (a
+    # real, smaller fee - confirmed live, exists for Premium AND Standard
+    # SSD, NOT confirmed present for every Standard HDD size) - deliberately
+    # NOT priced here, same "track the dominant cost, disclose what's
+    # excluded" discipline already used for Databricks/Cosmos DB's
+    # underlying-VM-cost exclusions, rather than risk the existing
+    # consumption_multiplier_2 all-or-nothing mechanism (built for services
+    # where a second meter ALWAYS exists, e.g. Container Instances) silently
+    # blanking out disk types where the mount meter genuinely doesn't exist.
+    #
+    # Ultra Disk (UltraSSD_LRS) and Premium SSD v2 (PremiumV2_LRS) are
+    # deliberately unsupported, not guessed at - confirmed via Microsoft's
+    # own docs they bill per-GiB continuously with NO discrete size-tier
+    # concept at all (plus separately configurable/billed IOPS and
+    # throughput, fields this app's live inventory query doesn't capture) -
+    # a genuinely different pricing model, not a missing lookup entry.
+    # analysis/ri_eligibility.py's _disk_eligibility already excludes both
+    # from Reservations for the same real reason.
+    match = _DISK_SKU_RE.match((sku or "").strip())
+    if not match:
+        return SkuQueryPlan(supported=False, reason=f"SKU '{sku}' doesn't match the expected '{{family}}_{{redundancy}}_{{diskSizeGB}}' pattern.")
+    family, redundancy, size_gb_str = match.group(1), match.group(2), match.group(3)
+    size_gb = int(size_gb_str)
+
+    if family == "UltraSSD":
+        return SkuQueryPlan(supported=False, reason="Ultra Disk bills per-GiB continuously with no discrete size-tier concept at all (plus separately billed IOPS/throughput) - a genuinely different pricing model this app doesn't model, verified via Microsoft's own docs, not a missing lookup entry.")
+    if family == "PremiumV2":
+        return SkuQueryPlan(supported=False, reason="Premium SSD v2 bills per-GiB continuously with no discrete size-tier concept at all (plus separately billed IOPS/throughput) - a genuinely different pricing model this app doesn't model, verified via Microsoft's own docs, not a missing lookup entry.")
+
+    if family == "Premium":
+        tier, product = _round_up_disk_tier(size_gb, _PREMIUM_TIERS), "Premium SSD Managed Disks"
+    elif family == "StandardSSD":
+        tier, product = _round_up_disk_tier(size_gb, _STANDARD_SSD_TIERS), "Standard SSD Managed Disks"
+    else:  # "Standard" = Standard HDD
+        tier, product = _round_up_disk_tier(size_gb, _STANDARD_HDD_TIERS), "Standard HDD Managed Disks"
+
+    plan_kwargs = dict(
+        supported=True, service_name="Storage", match_field="meterName",
+        consumption_match_value=f"{tier} {redundancy} Disk", product_contains=product,
+        consumption_unit="monthly",
+    )
+    if family == "Premium" and tier in _RESERVABLE_PREMIUM_TIERS:
+        # Reservation items ARE genuinely priced as a lump total-term value
+        # (see _fetch_azure_ri_rates) despite ALSO carrying a "1/Month"
+        # unitOfMeasure label - that function already ignores unitOfMeasure
+        # entirely for Reservations, so no consumption_unit-style handling
+        # is needed on this side, only the match values below.
+        plan_kwargs["reservation_match_value"] = f"{tier} {redundancy} Disk"
+    else:
+        plan_kwargs["reservation_unsupported_reason"] = (
+            "Standard SSD/HDD disks have no Reservation offering at all (verified live, zero Reservation-priceType items for either service)."
+            if family in ("StandardSSD", "Standard") else
+            f"Premium SSD disks smaller than P30 ('{tier}') have no Reservation offering - Azure only sells Disk Reservations from P30 (1 TiB) up, verified live and via Microsoft's own docs."
+        )
+    return SkuQueryPlan(**plan_kwargs)
+
+
 def _plan_unmeasurable_storage(sku: str) -> SkuQueryPlan:
     # Blob Storage / Files reservations are sold in 100 TB+/10 TiB+ blocks
     # far larger than any single resource - already marked "unmeasurable" in
@@ -1553,12 +1692,7 @@ _PLAN_RESOLVERS = {
     "Azure Files":                   _plan_unmeasurable_storage,
     "Azure Database for PostgreSQL": _plan_postgresql,
     "Azure Database for MySQL":      _plan_mysql,
-    "Azure Disk Storage": _plan_deferred(
-        "Live Resource Graph ingestion doesn't capture standalone Disk resources yet (a separate, pre-existing "
-        "gap, not a pricing issue) - mapping logic is ready (armSkuName 'Premium_SSD_Managed_Disks_{tier}', "
-        "e.g. P30) but nothing live currently reaches it. Note also: Azure sells Disk reservations in 1-Year "
-        "and 10-Year terms, not the 1yr/3yr this app models - 3yr will correctly show as unavailable."
-    ),
+    "Azure Disk Storage":            _plan_disk_storage,
     "Azure SQL Managed Instance Pool": _plan_deferred(
         "SQL Managed Instance Pools are now captured by live Resource Graph ingestion (azure_conn/connector.py, "
         "2026-08) and DO have real Reservation/Savings Plan discounts per the Azure pricing calculator "

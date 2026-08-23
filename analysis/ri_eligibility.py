@@ -211,9 +211,11 @@ def _synapse_ri(sku: str) -> Tuple[bool, str]:
 
 
 def _disk_eligibility(sku: str) -> Tuple[bool, str]:
-    # https://learn.microsoft.com/en-us/azure/virtual-machines/disks-reserved-capacity
-    # Only Premium SSD disks at size P30 and larger (P30-P80) are eligible.
-    # Standard SSD/HDD, Ultra Disk, and Premium SSD v2 are not eligible.
+    # https://learn.microsoft.com/en-us/azure/virtual-machines/disks-types
+    # ("Azure disk reservations offer a one-year commitment plan for
+    # Premium SSD SKUs from P30 (1 TiB) to P80 (32 TiB)") - only Premium
+    # SSD disks at size P30 and larger are eligible. Standard SSD/HDD,
+    # Ultra Disk, and Premium SSD v2 are not eligible at any size.
     s = (sku or "").upper()
     if not s or s == "N/A":
         return True, "Assumed Premium SSD P30+ (exact disk SKU/size not captured for this resource)."
@@ -221,7 +223,23 @@ def _disk_eligibility(sku: str) -> Tuple[bool, str]:
         return False, "Ultra Disk and Premium SSD v2 are not eligible for Azure Disk Storage reservations."
     if "STANDARD" in s and "PREMIUM" not in s:
         return False, "Standard SSD/HDD disks are not eligible - only Premium SSD disks at size P30 and larger qualify."
-    return True, "Premium SSD - eligible for Azure Disk Storage reservations if size is P30 or larger."
+    # Corrected 2026-08-23 - this branch previously defaulted to True for
+    # ANY Premium disk regardless of size, contradicting its own stated
+    # "if size is P30 or larger" condition - the real size check wasn't
+    # possible until live inventory + a real diskSizeGB round-up table
+    # existed (see pricing/sku_mapping.py's disk_reservation_eligible,
+    # added alongside this fix). Falls back to the old (defaulted-True)
+    # behavior only when the SKU isn't in this app's own
+    # "{family}_{redundancy}_{diskSizeGB}" convention at all - e.g. the
+    # legacy demo-only "P30_Premium_SSD" string, or a genuinely uncaptured
+    # SKU - since there's no size to check in that case either way.
+    from pricing.sku_mapping import disk_reservation_eligible
+    eligible = disk_reservation_eligible(sku)
+    if eligible is None:
+        return True, "Premium SSD - eligible for Azure Disk Storage reservations if size is P30 or larger (exact size not in this app's parseable SKU convention for this resource)."
+    if eligible:
+        return True, "Premium SSD, P30 or larger - eligible for Azure Disk Storage reservations."
+    return False, f"Premium SSD smaller than P30 ('{sku}') - Azure only sells Disk Reservations from P30 (1 TiB) up."
 
 
 _RULES = {

@@ -334,11 +334,30 @@ RI_ONLY_INVENTORY = [
 
     # Azure Disk Storage — Reserved (P30+ Premium SSD only)
     # RI covers: Premium SSD P30 and larger. NOT: other disk types or smaller sizes.
+    # SKU convention: "{family}_{redundancy}_{diskSizeGB}" - real ARM fields
+    # (sku.name does NOT encode size at all; diskSizeGB is separate - see
+    # pricing/sku_mapping.py's _plan_disk_storage). 1024 GiB = P30 exactly.
+    # Real live-fetched australiaeast rate: $135.17/mo capacity meter only
+    # (Disk Mount fee deliberately excluded, see resolver comment) / 730 =
+    # $0.1852/hr.
     {"resource_id": "DISK-Prod-01", "resource_name": "prod-vm-disk-p30",
      "resource_type": "Azure Disk Storage",
      "resource_state": "Running",
-     "region": "australiaeast", "os": "N/A", "sku": "P30_Premium_SSD",
-     "payg_hourly_usd": 0.140, "avg_daily_running_hours": 24,
+     "region": "australiaeast", "os": "N/A", "sku": "Premium_LRS_1024",
+     "payg_hourly_usd": 0.1852, "avg_daily_running_hours": 24,
+     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+
+    # A second, smaller Premium disk below the P30 Reservation threshold -
+    # demonstrates the real "PAYG-priceable but not RI-eligible" split this
+    # round's ri_eligibility.py fix now correctly derives from diskSizeGB
+    # (previously defaulted to eligible=True for ANY Premium disk regardless
+    # of size - a real, self-caught bug, see analysis/ri_eligibility.py).
+    # 256 GiB = P15. Real live-fetched australiaeast rate: $38.01/mo / 730.
+    {"resource_id": "DISK-Prod-02", "resource_name": "prod-vm-disk-p15",
+     "resource_type": "Azure Disk Storage",
+     "resource_state": "Running",
+     "region": "australiaeast", "os": "N/A", "sku": "Premium_LRS_256",
+     "payg_hourly_usd": 0.0521, "avg_daily_running_hours": 24,
      "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
 ]
 
