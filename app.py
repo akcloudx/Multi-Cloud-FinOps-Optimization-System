@@ -1144,47 +1144,84 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str, show_type_col: 
             lambda sid: f"{active_tenant.tenant_name} ({sid})" if sid else active_tenant.tenant_name
         )
 
-    # Azure-Portal-style filter bar (mentor feedback, 2026-08-23): Power
-    # State/Region already existed; OS was requested explicitly and was
-    # previously view-only (a column you could show, not filter). Also adds
-    # a 4th filter for whichever of Resource Group (Azure) / Availability
-    # Zone (AWS) actually has real data in this section - both columns
-    # exist on every row regardless of provider (data/inventory_loader.py),
-    # but only one is ever populated for a given provider, so which label/
-    # values to show is decided from the DATA itself rather than a
-    # provider global, staying correct even if a live tenant hasn't synced
-    # that field yet (falls back to omitting the filter entirely).
+    # Azure-Portal-style filter bar (mentor feedback, 2026-08-23, extended
+    # after a follow-up "should this cover all columns where possible?").
+    # Deliberately NOT every column - matches what Azure Portal itself
+    # filters on, not a literal "every column" interpretation:
+    #   - Status/Region/Subscription/OS/SKU: bounded, categorical, real
+    #     filter candidates. Status uses the derived 3-way Running/Stopped/
+    #     Orphaned column (not the raw 2-way Resource State) - "Orphaned"
+    #     is a genuine FinOps waste signal worth isolating on its own,
+    #     already computed above, just not filterable until now.
+    #   - Resource Group (Azure) / Availability Zone (AWS): whichever
+    #     actually has real data in this section, decided from the DATA
+    #     itself (not a provider global) so it's correct even if a live
+    #     tenant hasn't synced that field yet.
+    #   - Resource ID/Name deliberately excluded - unbounded, unique per
+    #     row; the dataframe's own built-in Search (toolbar button) already
+    #     covers free-text lookup, a checklist filter would be useless here.
+    #   - The two cost columns deliberately excluded - numeric, not
+    #     categorical; sorting (click the column header, already built in)
+    #     is the right tool, not a multi-select filter.
     extra_col, extra_label = None, None
     for col, label in (("Resource Group", "Resource Group"), ("Availability Zone", "Availability Zone")):
         if col in disp.columns and disp[col].fillna("").astype(str).str.strip().ne("").any():
             extra_col, extra_label = col, label
             break
 
-    state_opts = disp["Resource State"].unique().tolist()
-    region_opts = disp["Region"].unique().tolist()
-    os_opts = disp["OS"].unique().tolist()
-    filter_cols = st.columns(4 if extra_col else 3)
-    with filter_cols[0]:
-        fs = st.multiselect("Power State", state_opts, default=state_opts, key=f"{key_prefix}_state")
-    with filter_cols[1]:
-        fr = st.multiselect("Region", region_opts, default=region_opts, key=f"{key_prefix}_region")
-    with filter_cols[2]:
-        fo = st.multiselect("OS", os_opts, default=os_opts, key=f"{key_prefix}_os")
-    active_fs = fs if fs else state_opts
-    active_fr = fr if fr else region_opts
-    active_fo = fo if fo else os_opts
-    mask = disp["Resource State"].isin(active_fs) & disp["Region"].isin(active_fr) & disp["OS"].isin(active_fo)
+    filter_specs = [("Status", "Status"), ("Region", "Region"), ("Subscription", "Subscription"),
+                     ("OS", "OS"), ("SKU", "SKU")]
     if extra_col:
-        with filter_cols[3]:
-            # NaN-safe: most rows won't have this field populated (only the
-            # provider it applies to, and even then not every resource type
-            # sets it), so unique() mixes real strings with float NaN -
-            # sorted() can't compare those directly (real crash, caught
-            # live). Normalize to string and drop blanks/NaN before sorting.
-            extra_opts = sorted({str(v).strip() for v in disp[extra_col].dropna().tolist() if str(v).strip()})
-            fe = st.multiselect(extra_label, extra_opts, default=extra_opts, key=f"{key_prefix}_extra")
-        active_fe = fe if fe else extra_opts
-        mask &= disp[extra_col].isin(active_fe)
+        filter_specs.append((extra_col, extra_label))
+
+    # Real bug caught while adding Subscription/SKU (2026-08-23): the
+    # original Resource Group/AZ filter fell back to "only the known
+    # non-blank option values" whenever nothing was explicitly picked. That
+    # looked like "no filter applied" in the widget (multiselect's `default`
+    # pre-selects every option, so an untouched widget and a fully
+    # re-selected one are INDISTINGUISHABLE from its return value alone),
+    # but the underlying .isin() check still excluded every row with no
+    # value in that column - a real, live, already-shipped bug: 31 of 33
+    # Azure demo resources (everything except the 2 with a Resource Group
+    # set) would silently vanish from the table the moment this filter
+    # rendered, invisible in a plain page-text check since the dataframe
+    # grid itself isn't captured that way - only caught now by directly
+    # testing the mask against real inventory data.
+    #
+    # Fixed with a "(Not set)" sentinel: any blank/NaN cell normalizes to
+    # that literal string before building options and the mask, so it's
+    # just another selectable category - included by default (matching
+    # "no filter" behavior for every other column) and, as a bonus over a
+    # plain isin() fix, lets someone explicitly filter for "only resources
+    # with no Resource Group/SKU/etc set" if they want to, the same as
+    # picking any other option.
+    def _norm(v):
+        return str(v).strip() if pd.notna(v) and str(v).strip() else "(Not set)"
+
+    # Default to NOTHING pre-selected, not "every value" (2026-08-23, user
+    # feedback: "too much cluttered... difficult to read", comparing
+    # against a real Azure Portal screenshot) - Azure Portal's own filter
+    # pills default to a collapsed "Field equals all" and only expand once
+    # you actually pick values; st.multiselect can't replicate a collapsed
+    # pill exactly, but pre-selecting every option (the previous behavior)
+    # was the opposite of that - it rendered every single value as a
+    # removable chip on first load, for every filter, before the user had
+    # filtered anything at all. An empty default (placeholder="All", same
+    # wording Azure Portal uses) gives the same "unfiltered" MEANING with
+    # none of the visual noise; the mask logic already treats an empty
+    # selection as "no restriction" (`active = chosen if chosen else opts`
+    # below), so this is a pure display change, not a behavior change.
+    mask = pd.Series(True, index=disp.index)
+    row1 = st.columns(3)
+    row2 = st.columns(3)
+    widget_cols = row1 + row2
+    for (col, label), widget_col in zip(filter_specs, widget_cols):
+        normalized = disp[col].apply(_norm)
+        opts = sorted(normalized.unique().tolist())
+        with widget_col:
+            chosen = st.multiselect(label, opts, default=[], placeholder="All", key=f"{key_prefix}_{col.lower().replace(' ', '_')}")
+        active = chosen if chosen else opts
+        mask &= normalized.isin(active)
     focus_view = st.toggle("🔭 FOCUS View", key=f"{key_prefix}_focus", help="Show columns mapped to the FinOps Open Cost & Usage Specification (FOCUS) instead of the app's internal display names.")
     filtered = disp[mask]
 
