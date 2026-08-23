@@ -1023,21 +1023,6 @@ def page_users():
                     st.error(str(e))
 
 
-_TYPE_ICONS = {
-    "Compute": "🖥️", "Amazon EC2": "🖥️", "Azure SQL Database": "🗄️", "Azure SQL Managed Instance": "🗄️",
-    "Azure SQL Managed Instance Pool": "🗃️",
-    "Azure Database for MySQL": "🐬", "Azure Database for PostgreSQL": "🐘",
-    "Azure Cosmos DB": "🌐", "Azure Blob Storage": "📦", "Azure Files": "📁",
-    "Azure Cache for Redis": "⚡", "Azure Cache for Redis Enterprise": "⚡",
-    "Azure Synapse Analytics": "📊",
-    "Azure Databricks": "🧱", "App Service": "🌍", "Azure Disk Storage": "💽",
-    "Azure Dedicated Host": "🖲️", "Azure Container Instances": "📦",
-    "Azure Container Apps": "🐳", "Azure Spring Apps Enterprise": "🌱",
-    "Azure DocumentDB": "🍃", "Azure Database Migration Service": "🚚",
-    "Microsoft Fabric": "🧵", "Azure Data Explorer": "🔦", "Azure-SSIS Integration Runtime": "🔀",
-}
-
-
 def _split_sp_eligible(df_24x7: pd.DataFrame, azure_provider: bool):
     """Splits a 24x7-running slice into (eligible_df, excluded_df) using the
     real per-SKU Savings Plan rules (analysis/sp_eligibility.py) - e.g. an
@@ -1200,65 +1185,133 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
     def _norm(v):
         return str(v).strip() if pd.notna(v) and str(v).strip() else "(Not set)"
 
-    # Icon-prefixed Resource Type display - the per-type tab strip this
-    # replaces used to carry these icons as its own visual cue; keeping
-    # them here (rather than dropping _TYPE_ICONS entirely) preserves that
-    # at-a-glance service recognition in the unified table.
-    disp["Resource Type"] = disp["Resource Type"].apply(lambda t: f"{_TYPE_ICONS.get(t, '🔹')} {t}")
-
     all_cols = ["Resource ID", "Resource Name", "Subscription", "Resource Type",
                 "Status", "Region", "Resource Group", "Availability Zone", "OS", "SKU",
                 "Est. Monthly PAYG Cost", "PAYG Cost/hr"]
     all_cols = [c for c in all_cols if c in disp.columns]
-    default_cols = [c for c in all_cols if c != "Resource ID"]  # Resource ID hidden by default - toggle back on if needed
+    # Resource ID hidden by default (toggle back on if needed); of Resource
+    # Group/Availability Zone, only the one actually populated for this
+    # provider (extra_col, computed above) defaults on - the other is a
+    # different cloud's concept and would just be a column of blanks.
+    _other_scope_col = ({"Resource Group", "Availability Zone"} - {extra_col}) if extra_col else set()
+    default_cols = [c for c in all_cols if c != "Resource ID" and c not in _other_scope_col]
 
-    # "Add filter" kept deliberately NARROW (2026-08-23 feedback: the
-    # previous version spanned half the row) - a small first column, with
-    # a wide trailing spacer so it doesn't stretch to fill the row the way
-    # a bare st.columns([2,1,1]) split did.
-    add_row = st.columns([1.1, 0.9, 0.9, 3.1])
-    with add_row[0]:
-        active_labels = st.multiselect(
-            "Filters", list(label_to_col.keys()), default=[], placeholder="➕ Add filter",
-            key=f"{key_prefix}_active_filters", label_visibility="collapsed",
+    # Real "Filter results" panel, rebuilt properly this round (2026-08-23)
+    # after direct confirmation - on BOTH local and the deployed app, ruling
+    # out a stale-deployment explanation - that the previous inline-
+    # multiselect version still gave no working way to pick a filter's
+    # values. Uses st.form so a filter only takes effect on an explicit
+    # "Apply" click, matching Azure's own Filter/Value/Apply-Cancel modal
+    # structurally, not just visually - state lives explicitly in
+    # st.session_state as a list of {label, values} dicts, mutated ONLY
+    # inside a form's submit handler followed by st.rerun(), so there's no
+    # ambiguity about whether a selection "took" the way a bare reactive
+    # widget's return value could leave open.
+    def _filter_opts(label):
+        col = label_to_col[label]
+        normalized = disp[col].apply(_norm)
+        return normalized, sorted(normalized.unique().tolist())
+
+    filters_state_key = f"{key_prefix}_active_filters_state"
+    if filters_state_key not in st.session_state:
+        st.session_state[filters_state_key] = []
+    active_filters = st.session_state[filters_state_key]
+
+    # st.columns() reserves each column's full ratio-of-row width even when
+    # its content (a small popover button) is far narrower, which is what
+    # produced the wide dead gaps between pills the user flagged live. This
+    # CSS override makes every column in this bar shrink to its content's
+    # actual width instead, so pills/buttons pack together left-aligned -
+    # like Azure Portal's own filter bar - with the column ratios passed to
+    # st.columns() below no longer mattering.
+    with st.container(key=f"{key_prefix}_filter_bar"):
+        st.markdown(
+            f"""<style>
+            div.st-key-{key_prefix}_filter_bar div[data-testid="stHorizontalBlock"] {{ gap: 0.5rem; }}
+            div.st-key-{key_prefix}_filter_bar div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] {{
+                width: fit-content !important; flex: 0 0 auto !important; min-width: 0 !important;
+            }}
+            </style>""",
+            unsafe_allow_html=True,
         )
-    with add_row[1]:
-        focus_view = st.toggle("🔭 FOCUS View", key=f"{key_prefix}_focus", help="Show columns mapped to the FinOps Open Cost & Usage Specification (FOCUS) instead of the app's internal display names.")
-    chosen_cols = default_cols
-    if not focus_view:
-        # No effect on FOCUS view (that mode uses its own fixed column
-        # set below), so skip rendering a picker that would do nothing.
-        with add_row[2]:
-            with st.popover("⚙️ Columns"):
-                # Real checkbox list (2026-08-23 feedback: a multiselect's
-                # chip wall was exactly the clutter problem being fixed,
-                # just moved behind a button) - matches Azure Portal's own
-                # "Edit columns" panel, a checkbox per field, not chips.
-                st.caption("Columns to display")
-                cb_cols = st.columns(3)
-                picked = []
-                for i, c in enumerate(all_cols):
-                    with cb_cols[i % 3]:
-                        if st.checkbox(c, value=(c in default_cols), key=f"{key_prefix}_colcb_{c}"):
-                            picked.append(c)
-        if picked:
-            chosen_cols = picked
+
+        n_pills = len(active_filters)
+        filter_row = st.columns(n_pills + 1)
+        with filter_row[0]:
+            with st.popover("➕ Add filter"):
+                available = [l for l in label_to_col if l not in [f["label"] for f in active_filters]]
+                if not available:
+                    st.caption("All filterable fields are already added.")
+                else:
+                    st.markdown("**Filter results**")
+                    # The field selector must stay OUTSIDE the form: st.form
+                    # only reports its contents on submit, so a selectbox
+                    # inside the form would leave the Value list showing
+                    # stale options until a second Apply click - a real bug
+                    # caught in review before shipping this round. Keeping
+                    # it reactive here means picking a field immediately
+                    # refreshes the Value options below, matching Azure's
+                    # own live-updating modal.
+                    pending_key = f"{key_prefix}_pending_filter_field"
+                    if st.session_state.get(pending_key) not in available:
+                        st.session_state[pending_key] = available[0]
+                    new_label = st.selectbox("Filter", available, key=pending_key)
+                    _, opts = _filter_opts(new_label)
+                    with st.form(key=f"{key_prefix}_addfilterform_{new_label}", border=False):
+                        new_values = st.multiselect("Value", opts, key=f"{key_prefix}_addfilter_values_{new_label}")
+                        fc1, fc2 = st.columns(2)
+                        apply_clicked = fc1.form_submit_button("Apply", type="primary", width="stretch")
+                        fc2.form_submit_button("Cancel", width="stretch")
+                        if apply_clicked:
+                            active_filters.append({"label": new_label, "values": new_values})
+                            st.rerun()
+
+        for i, f in enumerate(list(active_filters)):
+            with filter_row[i + 1]:
+                summary = "all" if not f["values"] else (f["values"][0] if len(f["values"]) == 1 else f"{len(f['values'])} selected")
+                with st.popover(f"{f['label']} equals {summary}"):
+                    _, opts = _filter_opts(f["label"])
+                    with st.form(key=f"{key_prefix}_editfilterform_{i}", border=False):
+                        st.markdown("**Filter results**")
+                        new_values = st.multiselect("Value", opts, default=f["values"], key=f"{key_prefix}_editfilter_values_{i}")
+                        fc1, fc2 = st.columns(2)
+                        apply_clicked = fc1.form_submit_button("Apply", type="primary", width="stretch")
+                        remove_clicked = fc2.form_submit_button("Remove filter", width="stretch")
+                        if apply_clicked:
+                            f["values"] = new_values
+                            st.rerun()
+                        if remove_clicked:
+                            active_filters.pop(i)
+                            st.rerun()
+
+        settings_row = st.columns(2)
+        with settings_row[0]:
+            focus_view = st.toggle("🔭 FOCUS View", key=f"{key_prefix}_focus", help="Show columns mapped to the FinOps Open Cost & Usage Specification (FOCUS) instead of the app's internal display names.")
+        chosen_cols = default_cols
+        if not focus_view:
+            # No effect on FOCUS view (that mode uses its own fixed column
+            # set below), so skip rendering a picker that would do nothing.
+            with settings_row[1]:
+                with st.popover("⚙️ Columns"):
+                    # Real checkbox list (2026-08-23 feedback: a multiselect's
+                    # chip wall was exactly the clutter problem being fixed,
+                    # just moved behind a button) - matches Azure Portal's own
+                    # "Edit columns" panel, a checkbox per field, not chips.
+                    st.caption("Columns to display")
+                    cb_cols = st.columns(3)
+                    picked = []
+                    for i, c in enumerate(all_cols):
+                        with cb_cols[i % 3]:
+                            if st.checkbox(c, value=(c in default_cols), key=f"{key_prefix}_colcb_{c}"):
+                                picked.append(c)
+            if picked:
+                chosen_cols = picked
 
     mask = pd.Series(True, index=disp.index)
-    if active_labels:
-        # Inline, not popover - see the comment above for why. A wide
-        # trailing spacer keeps each value-picker narrow rather than
-        # stretched across the full row, same reasoning as add_row above.
-        val_cols = st.columns([1] * len(active_labels) + [max(1, 4 - len(active_labels))])
-        for val_col, label in zip(val_cols, active_labels):
-            col = label_to_col[label]
-            normalized = disp[col].apply(_norm)
-            opts = sorted(normalized.unique().tolist())
-            with val_col:
-                chosen = st.multiselect(label, opts, default=[], placeholder="All",
-                                         key=f"{key_prefix}_val_{col}")
-            active = chosen if chosen else opts
-            mask &= normalized.isin(active)
+    for f in active_filters:
+        normalized, opts = _filter_opts(f["label"])
+        active_vals = f["values"] if f["values"] else opts
+        mask &= normalized.isin(active_vals)
     filtered = disp[mask]
 
     if focus_view:
@@ -1286,8 +1339,19 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
         )
         return
 
+    # Blank/NaN cells (e.g. Resource Group on an AWS row, or vice versa)
+    # otherwise render as a bare "None" - matches the "N/A" placeholder OS
+    # already uses elsewhere in this same table instead of leaving it to
+    # pandas' default. Scoped to this display copy only, not `disp`/
+    # `filtered`, so it can't interfere with the filter/mask logic above,
+    # which relies on real NaN to detect "(Not set)".
+    show_df = filtered[chosen_cols].copy()
+    for _blank_col in ("Resource Group", "Availability Zone"):
+        if _blank_col in show_df.columns:
+            show_df[_blank_col] = show_df[_blank_col].apply(lambda v: str(v).strip() if pd.notna(v) and str(v).strip() else "N/A")
+
     st.dataframe(
-        filtered[chosen_cols], hide_index=True, width="stretch",
+        show_df, hide_index=True, width="stretch",
         column_config={
             "Resource Type":          st.column_config.TextColumn("Service"),
             "Status":                 st.column_config.TextColumn("Power State"),
