@@ -1144,15 +1144,27 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str, show_type_col: 
             lambda sid: f"{active_tenant.tenant_name} ({sid})" if sid else active_tenant.tenant_name
         )
 
-    # Azure-Portal-style filter bar (mentor feedback, 2026-08-23, extended
-    # after a follow-up "should this cover all columns where possible?").
+    # Azure-Portal-style filter bar (mentor feedback, 2026-08-23; redesigned
+    # again the same day after the user compared it against a real Azure
+    # Portal screenshot and said the always-visible 6-widget grid used "too
+    # much space... too many cells... difficult to read"). Real Azure
+    # Portal shows filters as small pills, plus a "+ Add filter" button
+    # that only THEN lets you pick which field to configure - it doesn't
+    # show every possible filter dimension open at once. Rebuilt to match
+    # that structure with Streamlit's own primitives:
+    #   1. One compact "+ Add filter" multiselect of FIELD NAMES only
+    #      (default empty) - picking a field is step 1, same as Azure's
+    #      own flow, and nothing else renders until you do.
+    #   2. Each field you've added becomes a small st.popover "pill"
+    #      (Streamlit's closest real equivalent to a clickable filter
+    #      chip) - click it to choose values, same two-step interaction
+    #      Azure Portal uses, collapsed to one line when closed.
     # Deliberately NOT every column - matches what Azure Portal itself
     # filters on, not a literal "every column" interpretation:
     #   - Status/Region/Subscription/OS/SKU: bounded, categorical, real
     #     filter candidates. Status uses the derived 3-way Running/Stopped/
     #     Orphaned column (not the raw 2-way Resource State) - "Orphaned"
-    #     is a genuine FinOps waste signal worth isolating on its own,
-    #     already computed above, just not filterable until now.
+    #     is a genuine FinOps waste signal worth isolating on its own.
     #   - Resource Group (Azure) / Availability Zone (AWS): whichever
     #     actually has real data in this section, decided from the DATA
     #     itself (not a provider global) so it's correct even if a live
@@ -1173,56 +1185,81 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str, show_type_col: 
                      ("OS", "OS"), ("SKU", "SKU")]
     if extra_col:
         filter_specs.append((extra_col, extra_label))
+    label_to_col = {label: col for col, label in filter_specs}
 
-    # Real bug caught while adding Subscription/SKU (2026-08-23): the
-    # original Resource Group/AZ filter fell back to "only the known
-    # non-blank option values" whenever nothing was explicitly picked. That
-    # looked like "no filter applied" in the widget (multiselect's `default`
-    # pre-selects every option, so an untouched widget and a fully
-    # re-selected one are INDISTINGUISHABLE from its return value alone),
-    # but the underlying .isin() check still excluded every row with no
-    # value in that column - a real, live, already-shipped bug: 31 of 33
-    # Azure demo resources (everything except the 2 with a Resource Group
-    # set) would silently vanish from the table the moment this filter
-    # rendered, invisible in a plain page-text check since the dataframe
-    # grid itself isn't captured that way - only caught now by directly
-    # testing the mask against real inventory data.
-    #
-    # Fixed with a "(Not set)" sentinel: any blank/NaN cell normalizes to
-    # that literal string before building options and the mask, so it's
-    # just another selectable category - included by default (matching
-    # "no filter" behavior for every other column) and, as a bonus over a
-    # plain isin() fix, lets someone explicitly filter for "only resources
-    # with no Resource Group/SKU/etc set" if they want to, the same as
-    # picking any other option.
+    # NaN-safe normalization (real bug caught 2026-08-23: a blank/NaN cell
+    # in a sparse column like Resource Group used to silently disappear
+    # from the table entirely, since NaN never matches .isin() against a
+    # list of real values, even in a filter's "untouched" default state -
+    # confirmed live, 31 of 33 Azure demo resources would vanish the moment
+    # that filter rendered). Normalizes blanks to a literal "(Not set)"
+    # sentinel so they're just another selectable category - included by
+    # default, and lets someone explicitly filter for "only resources
+    # missing this field" if they want to, same as picking any other value.
     def _norm(v):
         return str(v).strip() if pd.notna(v) and str(v).strip() else "(Not set)"
 
-    # Default to NOTHING pre-selected, not "every value" (2026-08-23, user
-    # feedback: "too much cluttered... difficult to read", comparing
-    # against a real Azure Portal screenshot) - Azure Portal's own filter
-    # pills default to a collapsed "Field equals all" and only expand once
-    # you actually pick values; st.multiselect can't replicate a collapsed
-    # pill exactly, but pre-selecting every option (the previous behavior)
-    # was the opposite of that - it rendered every single value as a
-    # removable chip on first load, for every filter, before the user had
-    # filtered anything at all. An empty default (placeholder="All", same
-    # wording Azure Portal uses) gives the same "unfiltered" MEANING with
-    # none of the visual noise; the mask logic already treats an empty
-    # selection as "no restriction" (`active = chosen if chosen else opts`
-    # below), so this is a pure display change, not a behavior change.
+    # Columns picker moved here too, alongside "Add filter" (2026-08-23,
+    # same feedback round) - Azure Portal reaches "Edit columns" via a
+    # small button/panel, not an always-open inline strip. Uses disp.columns
+    # rather than filtered.columns since filtering rows never changes which
+    # columns exist - lets this render before `filtered` itself does,
+    # without changing what's actually offered.
+    all_cols = ["Resource ID", "Resource Name", "Subscription"]
+    if show_type_col:
+        all_cols.append("Resource Type")
+    # Resource Group (Azure) / Availability Zone (AWS) - both columns exist
+    # for every row, only the provider-relevant one ever has real values,
+    # so both are offered here and simply render blank for the other
+    # provider rather than being hidden entirely.
+    all_cols += ["Status", "Region", "Resource Group", "Availability Zone", "OS", "SKU", "Est. Monthly PAYG Cost", "PAYG Cost/hr"]
+    all_cols = [c for c in all_cols if c in disp.columns]
+    default_cols = [c for c in all_cols if c != "Resource ID"]  # Resource ID hidden by default - toggle back on if needed
+
+    add_row = st.columns([2, 1, 1])
+    with add_row[0]:
+        active_labels = st.multiselect(
+            "Filters", list(label_to_col.keys()), default=[], placeholder="➕ Add filter",
+            key=f"{key_prefix}_active_filters", label_visibility="collapsed",
+        )
+    with add_row[1]:
+        focus_view = st.toggle("🔭 FOCUS View", key=f"{key_prefix}_focus", help="Show columns mapped to the FinOps Open Cost & Usage Specification (FOCUS) instead of the app's internal display names.")
+    chosen_cols = default_cols
+    if not focus_view:
+        # No effect on FOCUS view (that mode uses its own fixed column
+        # set below), so skip rendering a picker that would do nothing.
+        with add_row[2]:
+            with st.popover("⚙️ Columns"):
+                picked = st.multiselect("Columns to display", all_cols, default=default_cols, key=f"{key_prefix}_cols")
+        if picked:
+            chosen_cols = picked
+
     mask = pd.Series(True, index=disp.index)
-    row1 = st.columns(3)
-    row2 = st.columns(3)
-    widget_cols = row1 + row2
-    for (col, label), widget_col in zip(filter_specs, widget_cols):
-        normalized = disp[col].apply(_norm)
-        opts = sorted(normalized.unique().tolist())
-        with widget_col:
-            chosen = st.multiselect(label, opts, default=[], placeholder="All", key=f"{key_prefix}_{col.lower().replace(' ', '_')}")
-        active = chosen if chosen else opts
-        mask &= normalized.isin(active)
-    focus_view = st.toggle("🔭 FOCUS View", key=f"{key_prefix}_focus", help="Show columns mapped to the FinOps Open Cost & Usage Specification (FOCUS) instead of the app's internal display names.")
+    if active_labels:
+        pill_cols = st.columns(len(active_labels))
+        for pill_col, label in zip(pill_cols, active_labels):
+            col = label_to_col[label]
+            normalized = disp[col].apply(_norm)
+            opts = sorted(normalized.unique().tolist())
+            val_key = f"{key_prefix}_val_{col}"
+            # Pill text reflects the PREVIOUS render's selection (has to be
+            # computed before the popover button itself, which needs its
+            # label up front) - a one-rerun-cycle lag is normal/expected
+            # for a popover trigger button in Streamlit and self-corrects
+            # immediately after any change, since picking a value always
+            # triggers its own rerun.
+            preview = st.session_state.get(val_key, [])
+            if not preview:
+                pill_text = f"{label} equals **all**"
+            elif len(preview) == 1:
+                pill_text = f"{label} equals **{preview[0]}**"
+            else:
+                pill_text = f"{label} equals **{len(preview)} selected**"
+            with pill_col:
+                with st.popover(pill_text):
+                    chosen = st.multiselect(f"Filter by {label}", opts, default=preview, key=val_key)
+            active = chosen if chosen else opts
+            mask &= normalized.isin(active)
     filtered = disp[mask]
 
     if focus_view:
@@ -1249,22 +1286,6 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str, show_type_col: 
             },
         )
         return
-
-    all_cols = ["Resource ID", "Resource Name", "Subscription"]
-    if show_type_col:
-        all_cols.append("Resource Type")
-    # Resource Group (Azure) / Availability Zone (AWS) - added alongside the
-    # matching filters above (mentor feedback, 2026-08-23); both columns
-    # exist for every row, only the provider-relevant one ever has real
-    # values, so both are offered here and simply render blank for the
-    # other provider rather than being hidden entirely.
-    all_cols += ["Status", "Region", "Resource Group", "Availability Zone", "OS", "SKU", "Est. Monthly PAYG Cost", "PAYG Cost/hr"]
-    all_cols = [c for c in all_cols if c in filtered.columns]
-    default_cols = [c for c in all_cols if c != "Resource ID"]  # Resource ID hidden by default - toggle back on if needed
-
-    chosen_cols = st.multiselect("Columns to display", all_cols, default=default_cols, key=f"{key_prefix}_cols")
-    if not chosen_cols:
-        chosen_cols = default_cols
 
     st.dataframe(
         filtered[chosen_cols], hide_index=True, width="stretch",
