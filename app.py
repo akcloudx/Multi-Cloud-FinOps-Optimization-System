@@ -1144,19 +1144,49 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str, show_type_col: 
             lambda sid: f"{active_tenant.tenant_name} ({sid})" if sid else active_tenant.tenant_name
         )
 
+    # Azure-Portal-style filter bar (mentor feedback, 2026-08-23): Power
+    # State/Region already existed; OS was requested explicitly and was
+    # previously view-only (a column you could show, not filter). Also adds
+    # a 4th filter for whichever of Resource Group (Azure) / Availability
+    # Zone (AWS) actually has real data in this section - both columns
+    # exist on every row regardless of provider (data/inventory_loader.py),
+    # but only one is ever populated for a given provider, so which label/
+    # values to show is decided from the DATA itself rather than a
+    # provider global, staying correct even if a live tenant hasn't synced
+    # that field yet (falls back to omitting the filter entirely).
+    extra_col, extra_label = None, None
+    for col, label in (("Resource Group", "Resource Group"), ("Availability Zone", "Availability Zone")):
+        if col in disp.columns and disp[col].fillna("").astype(str).str.strip().ne("").any():
+            extra_col, extra_label = col, label
+            break
+
     state_opts = disp["Resource State"].unique().tolist()
     region_opts = disp["Region"].unique().tolist()
-    f1, f2, f3 = st.columns([1, 1, 0.9])
-    with f1:
+    os_opts = disp["OS"].unique().tolist()
+    filter_cols = st.columns(4 if extra_col else 3)
+    with filter_cols[0]:
         fs = st.multiselect("Power State", state_opts, default=state_opts, key=f"{key_prefix}_state")
-    with f2:
+    with filter_cols[1]:
         fr = st.multiselect("Region", region_opts, default=region_opts, key=f"{key_prefix}_region")
-    with f3:
-        st.write("")
-        focus_view = st.toggle("🔭 FOCUS View", key=f"{key_prefix}_focus", help="Show columns mapped to the FinOps Open Cost & Usage Specification (FOCUS) instead of the app's internal display names.")
+    with filter_cols[2]:
+        fo = st.multiselect("OS", os_opts, default=os_opts, key=f"{key_prefix}_os")
     active_fs = fs if fs else state_opts
     active_fr = fr if fr else region_opts
-    filtered = disp[disp["Resource State"].isin(active_fs) & disp["Region"].isin(active_fr)]
+    active_fo = fo if fo else os_opts
+    mask = disp["Resource State"].isin(active_fs) & disp["Region"].isin(active_fr) & disp["OS"].isin(active_fo)
+    if extra_col:
+        with filter_cols[3]:
+            # NaN-safe: most rows won't have this field populated (only the
+            # provider it applies to, and even then not every resource type
+            # sets it), so unique() mixes real strings with float NaN -
+            # sorted() can't compare those directly (real crash, caught
+            # live). Normalize to string and drop blanks/NaN before sorting.
+            extra_opts = sorted({str(v).strip() for v in disp[extra_col].dropna().tolist() if str(v).strip()})
+            fe = st.multiselect(extra_label, extra_opts, default=extra_opts, key=f"{key_prefix}_extra")
+        active_fe = fe if fe else extra_opts
+        mask &= disp[extra_col].isin(active_fe)
+    focus_view = st.toggle("🔭 FOCUS View", key=f"{key_prefix}_focus", help="Show columns mapped to the FinOps Open Cost & Usage Specification (FOCUS) instead of the app's internal display names.")
+    filtered = disp[mask]
 
     if focus_view:
         raw_filtered = df.loc[filtered.index]
@@ -1186,7 +1216,12 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str, show_type_col: 
     all_cols = ["Resource ID", "Resource Name", "Subscription"]
     if show_type_col:
         all_cols.append("Resource Type")
-    all_cols += ["Status", "Region", "OS", "SKU", "Est. Monthly PAYG Cost", "PAYG Cost/hr"]
+    # Resource Group (Azure) / Availability Zone (AWS) - added alongside the
+    # matching filters above (mentor feedback, 2026-08-23); both columns
+    # exist for every row, only the provider-relevant one ever has real
+    # values, so both are offered here and simply render blank for the
+    # other provider rather than being hidden entirely.
+    all_cols += ["Status", "Region", "Resource Group", "Availability Zone", "OS", "SKU", "Est. Monthly PAYG Cost", "PAYG Cost/hr"]
     all_cols = [c for c in all_cols if c in filtered.columns]
     default_cols = [c for c in all_cols if c != "Resource ID"]  # Resource ID hidden by default - toggle back on if needed
 
