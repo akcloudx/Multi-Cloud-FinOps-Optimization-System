@@ -617,7 +617,18 @@ Resources
     // properties field) to derive the P30/E20/S60-style tier label Azure's
     // own billing and Retail Prices API use - see connector.py's diskSku
     // below and pricing/sku_mapping.py's _plan_disk_storage.
-    'microsoft.compute/disks'
+    'microsoft.compute/disks',
+    // Azure DocumentDB (Microsoft.DocumentDB/mongoClusters) - a genuinely
+    // SEPARATE ARM resource type from the RU/s-based Cosmos DB accounts
+    // already tracked above (microsoft.documentdb/databaseaccounts, maps to
+    // "Azure Cosmos DB") - this is the vCore-based product, real tier names
+    // like "M30" at the top-level properties.compute.tier, plus a real
+    // properties.sharding.shardCount int (confirmed via Microsoft's own ARM
+    // template reference, 2026-08). Retail Prices API's serviceName for
+    // this is "Azure Cosmos DB" (shared with the RU/s product) but
+    // productName is the distinct "Azure DocumentDB" - see
+    // pricing/sku_mapping.py's _plan_documentdb for how that's scoped.
+    'microsoft.documentdb/mongoclusters'
 )
 // Every Azure SQL logical server auto-creates a "master" system database -
 // it's not billable and not user-managed, so exclude it from inventory.
@@ -712,6 +723,13 @@ Resources
     // pricing/sku_mapping.py's _plan_disk_storage does that derivation.
     diskSkuName = tostring(sku.name),
     diskSizeGB  = toint(properties.diskSizeGB),
+    // Real top-level ARM fields (confirmed via Microsoft's own ARM template
+    // reference, 2026-08): properties.compute.tier (e.g. "M30") and
+    // properties.sharding.shardCount (int, real physical shard count -
+    // each shard is an independently-billed, identically-sized node, per
+    // Microsoft's own sharding architecture docs, 2026-08).
+    documentDbTier       = tostring(properties.compute.tier),
+    documentDbShardCount = toint(properties.sharding.shardCount),
     topSku     = tostring(sku.name),
     redisSkuName  = tostring(properties.sku.name),
     redisFamily   = tostring(properties.sku.family),
@@ -847,6 +865,16 @@ Resources
             strcat(diskSkuName, "_", tostring(diskSizeGB)),
         ""
     ),
+    // "{tier}_{shardCount}" (e.g. "M30_1") - the convention
+    // pricing/sku_mapping.py's _plan_documentdb parses. shardCount is a
+    // real billing multiplier (each physical shard is an independently-
+    // billed node at the same tier), same "count folded into the SKU
+    // string" pattern as Cosmos DB/Data Explorer/SSIS IR above.
+    documentDbSku = case(
+        type == 'microsoft.documentdb/mongoclusters' and isnotempty(documentDbTier) and isnotnull(documentDbShardCount),
+            strcat(documentDbTier, "_", tostring(documentDbShardCount)),
+        ""
+    ),
     // "{CapacityMode}_{ServiceTier}" (e.g. "Provisioned_GeneralPurpose") -
     // the convention pricing/sku_mapping.py's _plan_cosmos_db parses.
     // "Provisioned" (not "Standard"/"Autoscale") is deliberate - see that
@@ -885,6 +913,7 @@ Resources
         isnotempty(adxSku), adxSku,
         isnotempty(ssisSku), ssisSku,
         isnotempty(diskSku), diskSku,
+        isnotempty(documentDbSku), documentDbSku,
         isnotempty(topSku), topSku,
         'N/A'
     ),
@@ -1053,6 +1082,7 @@ def _map_resource_type(azure_type: str) -> str:
         "microsoft.kusto/clusters":                      "Azure Data Explorer",
         "microsoft.datafactory/factories/integrationruntimes": "Azure-SSIS Integration Runtime",
         "microsoft.compute/disks":                       "Azure Disk Storage",
+        "microsoft.documentdb/mongoclusters":            "Azure DocumentDB",
     }
     return mapping.get(azure_type, azure_type)
 

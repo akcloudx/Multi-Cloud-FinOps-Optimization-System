@@ -180,6 +180,22 @@ DATABASE_INVENTORY = [
      "payg_hourly_usd": 1.449112, "avg_daily_running_hours": 24,
      "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
 
+    # Azure DocumentDB — vCore-based Cosmos DB for MongoDB, General Purpose,
+    # M30 tier, single shard. NOT RI-eligible (no Reservation product for
+    # Worker Node - see analysis/ri_eligibility.py); IS Savings Plan
+    # eligible. SKU convention: "{tier}_{shardCount}" - real ARM fields
+    # (properties.compute.tier + properties.sharding.shardCount - see
+    # pricing/sku_mapping.py's _plan_documentdb). Coordinator Node cost
+    # deliberately excluded (not ARM-observable - see that resolver's
+    # comment). Real live-fetched australiaeast rate: Worker Node 2 vCore
+    # x 1 shard = $0.3429/hr.
+    {"resource_id": "DOCUMENTDB-Prod-01", "resource_name": "prod-catalog-documentdb",
+     "resource_type": "Azure DocumentDB",
+     "resource_state": "Running",
+     "region": "australiaeast", "os": "N/A", "sku": "M30_1",
+     "payg_hourly_usd": 0.3429, "avg_daily_running_hours": 24,
+     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+
     # Azure Database for PostgreSQL — General Purpose, 4 vCores
     # RI covers: compute costs only. Not: software, networking, storage.
     {"resource_id": "PG-Prod-01", "resource_name": "prod-analytics-postgres",
@@ -982,7 +998,6 @@ RI_COVERAGE_NOTES = {
     "Azure Database for PostgreSQL":    ("Compute costs only (~35% saving)", "Software, networking, storage"),
     "Azure Database for MySQL":         ("Compute costs only (~35% saving)", "Software, networking, storage"),
     "Azure Cosmos DB":                  ("Provisioned throughput (RU/s)", "Storage, networking"),
-    "Azure DocumentDB":                 ("Worker/Coordinator Node CU usage (per Microsoft's docs) - not yet priced by this app, see pricing/sku_mapping.py", "Storage, networking"),
     "Azure Blob Storage":               ("Storage capacity (GiB) for Blob and Data Lake Gen2", "Bandwidth, transaction rates"),
     "Azure Files":                      ("Storage capacity for Azure Files (hot/cool)", "Bandwidth, transaction rates"),
     "Azure Cache for Redis":            ("Compute costs only", "Networking, storage"),

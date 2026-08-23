@@ -270,7 +270,18 @@ _RULES = {
     "Azure Container Instances":     lambda sku: (False, "Azure Container Instances has no Reservation offering at all - verified live, it's a pure consumption service with no capacity to reserve. (It IS eligible for Savings Plan for Compute - see sp_eligibility.py.)"),
     "Azure Container Apps":          lambda sku: (False, "Azure Container Apps has no Reservation offering at all - verified live, zero Reservation entries exist for any workload profile. (The Dedicated profile IS eligible for Savings Plan for Compute - see sp_eligibility.py.)"),
     "Azure Spring Apps Enterprise":  lambda sku: (False, "Azure Spring Apps Enterprise has no Reservation offering at all - verified live, zero Reservation entries exist. (It IS eligible for Savings Plan for Compute - see sp_eligibility.py.)"),
-    "Azure DocumentDB":              lambda sku: (True, "Eligible for Reserved Instances - verified live, real Reservation catalog entries exist (Coordinator Node 1 vCore, confirmed 1yr/3yr pricing). This app doesn't price DocumentDB yet (see sp_eligibility.py/pricing/sku_mapping.py for the real, disclosed reason), but the underlying Azure product genuinely does sell reservations for it."),
+    # Corrected 2026-08-23, once this app started pricing DocumentDB's
+    # Worker Node cost (see pricing/sku_mapping.py's _plan_documentdb): the
+    # PREVIOUS "True" here was accurate about the underlying Azure product
+    # ("real Reservation catalog entries exist... Coordinator Node 1 vCore")
+    # but that's genuinely NOT eligible for what THIS app tracks and would
+    # show a gap - "buy more Worker Node RIs" - for a purchase that doesn't
+    # exist. Verified live: zero Reservation entries exist for Worker Node
+    # at any size; the only real Reservation product targets the
+    # Coordinator Node, which this app can't price at all (no ARM-
+    # observable field for it - see _plan_documentdb's own comment) and so
+    # was never eligible for a per-resource gap here in the first place.
+    "Azure DocumentDB":              lambda sku: (False, "No Reservation product exists for Worker Node (the cost this app tracks) at any size - verified live, zero Reservation entries. The only real Reservation product for this service targets the Coordinator Node, which isn't exposed as an ARM-observable property this app could size or track a purchase against."),
     "Azure Database Migration Service": lambda sku: (False, "Azure Database Migration Service has no Reservation offering at all - verified live, zero Reservation entries exist across all three tiers. (It IS eligible for Savings Plan for Databases - see sp_eligibility.py.)"),
     "Azure Data Factory": lambda sku: (True, "Eligible for Reserved Capacity, but it's a pure subscription-wide 'buy N cores of a compute type' spend commitment with no per-resource allocation at all - Microsoft's own docs confirm a reservation 'does not pre-allocate or reserve specific infrastructure' and applies automatically to ANY matching data flow, existing or future. Not eligible for Savings Plan for Compute or Databases (not on either official coverage list)."),
     "Azure Data Explorer": lambda sku: (

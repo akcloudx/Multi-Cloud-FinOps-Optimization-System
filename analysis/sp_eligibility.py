@@ -32,8 +32,9 @@ Savings plan for Databases (1-yr ONLY) covers:
   Server), Azure Cosmos DB provisioned throughput (NOT Serverless capacity
   mode), Azure Database Migration Service (all three tiers - Basic/General
   Purpose/Premium), Azure DocumentDB (eligible per Microsoft's official
-  coverage list and real live pricing/savingsPlan data confirmed - but this
-  app deliberately doesn't price it yet, see pricing/sku_mapping.py for the
+  coverage list and real live pricing/savingsPlan data confirmed - priced
+  since 2026-08-23 for Worker Node cost only, see pricing/sku_mapping.py's
+  _plan_documentdb for how the Coordinator Node exclusion is handled and the
   real, disclosed reason).
 
   CORRECTED 2026-08: an earlier version of this file claimed legacy DTU-tier
@@ -233,7 +234,7 @@ _DATABASE_SP_RULES = {
     "Azure Database for MySQL":      _flexible_server_sp,
     "Azure Database for PostgreSQL": _flexible_server_sp,
     "Azure Cosmos DB":               _cosmos_db_sp,
-    "Azure DocumentDB":              lambda sku: (True, "Eligible for Savings Plan for Databases per Microsoft's official coverage list - real Retail API pricing/savingsPlan data confirmed live, but this app deliberately doesn't price it yet (see pricing/sku_mapping.py for the real, disclosed reason: an unconfirmed M-tier-to-vCore mapping and an unconfirmed Coordinator Node billing threshold)."),
+    "Azure DocumentDB":              lambda sku: (True, "Eligible for Savings Plan for Databases per Microsoft's official coverage list - verified live, Worker Node carries a real nested savingsPlan array (~20% off, 1-Year term only) at every General Purpose tier (M30-M200)."),
     "Azure Database Migration Service": lambda sku: (True, "Eligible for Savings Plan for Databases - verified live, real savingsPlan data exists on all three tiers (Basic/General Purpose/Premium)."),
 }
 

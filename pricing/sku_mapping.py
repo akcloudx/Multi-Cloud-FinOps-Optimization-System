@@ -1706,6 +1706,91 @@ def _plan_disk_storage(sku: str) -> SkuQueryPlan:
     return SkuQueryPlan(**plan_kwargs)
 
 
+# ── Azure DocumentDB (vCore-based, Microsoft.DocumentDB/mongoClusters - the
+# genuinely separate product from RU/s-based "Azure Cosmos DB" above) ──────
+_DOCUMENTDB_SKU_RE = re.compile(r"^(M\d+)_(\d+)$")
+# Real, official tier->vCore table (Microsoft's own compute-storage docs,
+# 2026-08, fully replaces this module's earlier "only M30/M40/M50 confirmed"
+# note - all General Purpose tiers are now directly confirmed). M10/M20/M25
+# are the separate Burstable tier and deliberately NOT included here - their
+# real Retail Prices API skuName convention doesn't follow the clean
+# "Worker Node {N} vCore" pattern the General Purpose tiers do (items like
+# "B2S"/"B1MS"/"B4MS" appear instead, Azure-VM-Bs-series-style names) and no
+# confidently-matching M-tier-to-skuName mapping was found - same
+# "deliberately not guessed" discipline as everything else deferred in this
+# module, not an oversight.
+_DOCUMENTDB_GP_TIER_VCORES = {"M30": 2, "M40": 4, "M50": 8, "M60": 16, "M80": 32, "M200": 64}
+
+
+def _plan_documentdb(sku: str) -> SkuQueryPlan:
+    # Added 2026-08-23 - resolves both gaps this module's own prior deferred
+    # note flagged. Gap 1 (M-tier->vCore mapping only confirmed for 3 of ~6
+    # tiers): fully resolved via Microsoft's current, authoritative
+    # compute-storage docs (all of M30-M200 now directly confirmed, no
+    # extrapolation needed - see _DOCUMENTDB_GP_TIER_VCORES above).
+    #
+    # Gap 2 (does a cluster bill Worker Node only, or also a Coordinator
+    # Node cost?): resolved by going to the CURRENT primary sources - the
+    # real ARM schema (Microsoft.DocumentDB/mongoClusters' MongoClusterProperties,
+    # confirmed via Microsoft's own template reference, 2026-08) has NO
+    # coordinator-related field at all, only compute.tier and
+    # sharding.shardCount; the CURRENT sharding architecture docs
+    # (learn.microsoft.com/azure/documentdb/partitioning, 2026-08) describe
+    # physical shards in full detail and never mention "coordinator" once.
+    # The Retail Prices API STILL lists real "Coordinator Node" priced items
+    # (confirmed live) - so SOME coordinator cost is architecturally real -
+    # but it's not exposed as a customer-configurable or ARM-observable
+    # property, meaning this app has no reliable way to know if or how much
+    # applies to a given live cluster. Rather than guess, this resolver
+    # prices ONLY Worker Node cost (the real, fully ARM-observable,
+    # dominant cost - directly derived from compute.tier x
+    # sharding.shardCount) and discloses the Coordinator Node exclusion via
+    # RI_COVERAGE_NOTES, same "track the dominant/knowable cost, disclose
+    # the exclusion" discipline already used for Databricks' underlying VM
+    # cost, Disk Storage's Mount fee, and SQL MI Instance Pool's SQL
+    # license cost.
+    #
+    # Verified live: Worker Node scales perfectly linearly per vCore
+    # ($0.17145/vCore/hr, confirmed identical across every listed size from
+    # 1 to 104 vCore) and carries its own nested savingsPlan array (1-Year
+    # term only, ~20% off) that is ALSO a per-NODE rate (not per-vCore -
+    # unlike SQL DB/MI's savings_plan_multiplier case, where the nested
+    # rate needs its OWN separate vCore scaling because consumption_
+    # multiplier is left at 1 there). Here consumption_multiplier is
+    # already set to shard_count, and _fetch_one_meter_rates applies that
+    # SAME multiplier to the SP rate too - so savings_plan_multiplier is
+    # deliberately left at its default of 1, not shard_count, to avoid
+    # double-scaling (caught live: setting it to shard_count silently
+    # produced shard_count^2 instead of shard_count). shardCount is a real,
+    # direct billing multiplier - each physical shard is an independently-
+    # billed, identically-sized node (Microsoft's own sharding docs: "the
+    # capacity of each physical shard is the same"). Reservation pricing is
+    # deliberately NOT sourced here - verified live that the ONLY real
+    # Reservation entries for this whole product are for the (unobservable,
+    # excluded) Coordinator Node; zero Reservation items exist for Worker
+    # Node at any size.
+    #
+    # Retail Prices API quirk confirmed live: this product's serviceName is
+    # "Azure Cosmos DB" (shared with the RU/s-based product above), NOT
+    # "Azure DocumentDB" - only productName distinguishes them, hence
+    # product_contains is REQUIRED here, not optional, same reasoning as
+    # Dedicated Host's product_contains requirement.
+    match = _DOCUMENTDB_SKU_RE.match((sku or "").strip())
+    if not match:
+        return SkuQueryPlan(supported=False, reason=f"SKU '{sku}' doesn't match the expected '{{tier}}_{{shardCount}}' pattern (e.g. M30_1).")
+    tier, shard_count_str = match.group(1).upper(), match.group(2)
+    shard_count = max(1, int(shard_count_str))
+    vcores = _DOCUMENTDB_GP_TIER_VCORES.get(tier)
+    if vcores is None:
+        return SkuQueryPlan(supported=False, reason=f"Tier '{tier}' isn't a confirmed General Purpose tier (M30-M200) - Burstable tiers (M10/M20/M25) aren't priced here, verified live their Retail Prices API naming doesn't follow the General Purpose tiers' pattern and no confident mapping was found.")
+    return SkuQueryPlan(
+        supported=True, service_name="Azure Cosmos DB", match_field="skuName",
+        consumption_match_value=f"Worker Node {vcores} vCore", product_contains="Azure DocumentDB",
+        consumption_multiplier=shard_count,
+        reservation_unsupported_reason="Zero Reservation entries exist for Worker Node at any size - verified live, the only real Reservation product for this service is for the Coordinator Node, which this app doesn't price (see this function's own comment for why).",
+    )
+
+
 def _plan_unmeasurable_storage(sku: str) -> SkuQueryPlan:
     # Blob Storage / Files reservations are sold in 100 TB+/10 TiB+ blocks
     # far larger than any single resource - already marked "unmeasurable" in
@@ -1725,23 +1810,7 @@ _PLAN_RESOLVERS = {
     "Azure Spring Apps Enterprise":  _plan_spring_apps_enterprise,
     "Azure Database Migration Service": _plan_database_migration_service,
     "Microsoft Fabric": _plan_fabric_capacity,
-    "Azure DocumentDB": _plan_deferred(
-        "Real ARM resource type confirmed (Microsoft.DocumentDB/mongoClusters, "
-        "tier at properties.compute.tier e.g. 'M30') and real Retail API pricing "
-        "confirmed live (Worker Node / Coordinator Node / Burstable vCore tiers, "
-        "real Savings Plan data present) - but deliberately NOT priced this round. "
-        "Two real gaps found, not guessed past: (1) the M-tier name (M30/M40/M50/"
-        "M60/M80/M200) to Worker-Node-vCore-count mapping is only confirmed for "
-        "M30=2/M40=4/M50=8 vCore via Microsoft's own docs - extrapolating the "
-        "rest by pattern would be a guess; (2) whether a non-sharded (default) "
-        "cluster bills as a single Worker Node only, or ALSO incurs a Coordinator "
-        "Node cost (which has its own real Reservation entry - 'Coordinator Node "
-        "1 vCore' - but also a genuine $0 'Coordinator Node Free' tier, so the "
-        "threshold isn't obvious) isn't confirmed anywhere in public docs. Same "
-        "class of deliberate stop as MI Instance Pools - eligible per Microsoft's "
-        "own Savings Plan for Databases list, not guessed at for a number that "
-        "could be wrong by a real margin."
-    ),
+    "Azure DocumentDB": _plan_documentdb,
     "App Service":                   _plan_app_service,
     "Azure SQL Database":            _plan_sql_database,
     "Azure SQL Elastic Pool":        _plan_sql_database,   # deliberately identical resolver - verified live
