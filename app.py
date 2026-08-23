@@ -1025,6 +1025,7 @@ def page_users():
 
 _TYPE_ICONS = {
     "Compute": "🖥️", "Amazon EC2": "🖥️", "Azure SQL Database": "🗄️", "Azure SQL Managed Instance": "🗄️",
+    "Azure SQL Managed Instance Pool": "🗃️",
     "Azure Database for MySQL": "🐬", "Azure Database for PostgreSQL": "🐘",
     "Azure Cosmos DB": "🌐", "Azure Blob Storage": "📦", "Azure Files": "📁",
     "Azure Cache for Redis": "⚡", "Azure Cache for Redis Enterprise": "⚡",

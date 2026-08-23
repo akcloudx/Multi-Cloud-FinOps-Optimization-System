@@ -724,6 +724,78 @@ def _plan_sql_managed_instance(sku: str, redundancy: str = "N/A") -> SkuQueryPla
     return _plan_sql_family(sku, "SQLMI", "SQL Managed Instance", redundancy)
 
 
+# Real hardware-generation codes on Microsoft.Sql/instancePools' (and
+# managedInstances') top-level sku.name field (confirmed via Microsoft's own
+# REST API reference, 2026-08: "Allowed values for sku.name: GP_Gen5,
+# GP_G8IM, GP_G8IH, BC_Gen5, BC_G8IM, BC_G8IH"). G8IM = Premium-series,
+# G8IH = Premium-series memory optimized - confirmed via two independent
+# Azure CLI/community-doc searches agreeing (not a single official primary-
+# source table naming the codes directly, flagged honestly rather than
+# treated as certain as the REST API's own sku.name enum above).
+_MI_POOL_HARDWARE_PRODUCTS = {
+    "GEN5": "SQL Managed Instance General Purpose - Compute Gen5",
+    "G8IM": "SQL Managed Instance General Purpose - Premium Series Compute",
+    "G8IH": "SQL Managed Instance General Purpose - Premium Series Memory Optimized Compute",
+}
+
+
+def _plan_mi_instance_pool(sku: str) -> SkuQueryPlan:
+    # Added 2026-08-23 - resolves the gap flagged in this module's own prior
+    # deferred note: a standalone Managed Instance's per-vCore rate scaled
+    # to a pool's vCore count was off by ~3x from the real pool total, and
+    # neither the flat per-vCore meter nor an initially-tried sized-skuName
+    # variant seemed to match at the time. Re-verified live against the
+    # ACTUAL Azure Pricing Calculator (not just the Retail API) with two
+    # independent configs (GP/Premium-series/80 vCore AND GP/Standard-series
+    # Gen5/40 vCore, both Norway West, AHB license) - both matched a
+    # "{vCores} vCore" SIZED skuName meter (e.g. "80 vCore") to within
+    # ~0.2%, the SAME product used by standalone MI but a GENUINELY
+    # DIFFERENT, non-linear meter from that product's flat "vCore" meter
+    # (verified: 80 vCore sized item is $21.959/hr, NOT 80 x the flat
+    # meter's $0.176/hr = $14.08/hr - these are two separate, differently-
+    # priced catalog entries under the same product, not one scaled from
+    # the other). Reservation pricing, by contrast, has NO sized-meter
+    # variant at all (verified live - only the flat "vCore" armSkuName
+    # carries Reservation entries) - so Reservation uses that flat rate x
+    # reservation_multiplier=vCores, same convention as every other per-
+    # vCore service this app prices. Savings Plan pricing comes from the
+    # SAME sized Consumption item's own nested savingsPlan array (already
+    # confirmed present, 2026-08) - per-vCore like every other SQL DB/MI
+    # savingsPlan entry (see _plan_sql_family's savings_plan_multiplier
+    # comment), hence savings_plan_multiplier=vCores here too.
+    #
+    # SQL license cost is deliberately excluded from PAYG here (this app's
+    # established convention for every other license-bearing service, e.g.
+    # Compute's os_license_is_separable) - the calculator confirms a real,
+    # separate, more-expensive "License Included" total exists, but no
+    # discrete additional Retail API meter for it was found on this
+    # product; tracking the base/AHB-equivalent compute-only rate matches
+    # how every other SQL DB/MI resolver in this app already handles
+    # license cost.
+    #
+    # Only General Purpose is a real pool tier - Business Critical isn't
+    # offered for instance pools at all (Microsoft's own instance-pools
+    # overview docs: "Pool limits... Service tier: General Purpose" only) -
+    # a BC_* sku here would be a genuinely unexpected/future state, not
+    # guessed at.
+    parts = (sku or "").strip().split("_")
+    if len(parts) != 3 or not parts[2].isdigit():
+        return SkuQueryPlan(supported=False, reason=f"SKU '{sku}' doesn't match the expected 'GP_{{generation}}_{{vCores}}' pattern.")
+    tier, generation, vcores_str = parts[0].upper(), parts[1].upper(), parts[2]
+    if tier != "GP":
+        return SkuQueryPlan(supported=False, reason=f"SQL Managed Instance Pools only support the General Purpose tier - Business Critical isn't offered for pools at all (Microsoft's own docs). Got tier '{tier}'.")
+    product = _MI_POOL_HARDWARE_PRODUCTS.get(generation)
+    if not product:
+        return SkuQueryPlan(supported=False, reason=f"Unrecognized hardware generation '{generation}' for a SQL Managed Instance Pool - expected Gen5, G8IM, or G8IH.")
+    vcores = int(vcores_str)
+    return SkuQueryPlan(
+        supported=True, service_name="SQL Managed Instance", match_field="skuName",
+        consumption_match_value=f"{vcores} vCore", product_contains=product,
+        reservation_match_value="vCore", reservation_multiplier=vcores,
+        savings_plan_multiplier=vcores,
+    )
+
+
 # ── Azure Synapse Analytics ─────────────────────────────────────────────────
 import re
 
@@ -1693,22 +1765,7 @@ _PLAN_RESOLVERS = {
     "Azure Database for PostgreSQL": _plan_postgresql,
     "Azure Database for MySQL":      _plan_mysql,
     "Azure Disk Storage":            _plan_disk_storage,
-    "Azure SQL Managed Instance Pool": _plan_deferred(
-        "SQL Managed Instance Pools are now captured by live Resource Graph ingestion (azure_conn/connector.py, "
-        "2026-08) and DO have real Reservation/Savings Plan discounts per the Azure pricing calculator "
-        "(~35%/~55% Reservation, ~23% Savings Plan confirmed live for a General Purpose/Premium-series/80 "
-        "vCore/Norway West test) - this is a real, priceable service, not a policy gap like PostgreSQL/MySQL "
-        "above. But it does NOT bill via the same per-vCore meter as a standalone Managed Instance: the "
-        "calculator's total for that exact config ($32,003.20/mo) doesn't match a standalone instance's "
-        "per-vCore rate scaled to the same vCore count (off by roughly 3x), and no confidently-matching Retail "
-        "Prices API meter was found after checking several plausible candidates (the flat per-vCore meter, a "
-        "sized-skuName variant, the Gen5 hardware pattern - none landed on the calculator's real number). "
-        "Deliberately left unpriced rather than guessing a rate that could be wrong by a large margin - needs "
-        "either a live tenant's actual billed rate to reverse-engineer against, or deeper Azure pricing "
-        "documentation than the public Retail API surfaces. Eligibility (ri_eligibility.py/sp_eligibility.py) "
-        "correctly still marks this eligible, matching the priceability-vs-eligibility split used for "
-        "Fsv2-series SQL Database."
-    ),
+    "Azure SQL Managed Instance Pool": _plan_mi_instance_pool,
 }
 
 

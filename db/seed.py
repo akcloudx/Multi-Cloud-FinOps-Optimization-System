@@ -163,6 +163,23 @@ DATABASE_INVENTORY = [
      "payg_hourly_usd": 0.844, "avg_daily_running_hours": 24,
      "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
 
+    # Azure SQL Managed Instance Pool — General Purpose, Standard-series
+    # (Gen5), 8 vCores. A genuinely different resource from standalone
+    # Managed Instance above, even though it shares this app's SKU
+    # convention: pools are billed via a SIZED "{vCores} vCore" meter, NOT
+    # the standalone instance's flat per-vCore rate scaled up (they only
+    # happen to coincide at this small vCore count - verified live they
+    # diverge sharply at larger sizes, e.g. 80 vCore Premium-series pool is
+    # priced at a real, separate, non-linear meter - see
+    # pricing/sku_mapping.py's _plan_mi_instance_pool). Real live-fetched
+    # australiaeast rate for the 8-vCore sized meter.
+    {"resource_id": "SQLMIPOOL-Prod-01", "resource_name": "prod-migration-mipool",
+     "resource_type": "Azure SQL Managed Instance Pool",
+     "resource_state": "Running",
+     "region": "australiaeast", "os": "N/A", "sku": "GP_Gen5_8",
+     "payg_hourly_usd": 1.449112, "avg_daily_running_hours": 24,
+     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+
     # Azure Database for PostgreSQL — General Purpose, 4 vCores
     # RI covers: compute costs only. Not: software, networking, storage.
     {"resource_id": "PG-Prod-01", "resource_name": "prod-analytics-postgres",
@@ -931,6 +948,7 @@ COMPUTE_SP_ELIGIBLE_TYPES = {
 
 DATABASE_SP_ELIGIBLE_TYPES = {
     "Azure SQL Database", "Azure SQL Elastic Pool", "Azure SQL Managed Instance",
+    "Azure SQL Managed Instance Pool",
     "Azure SQL Database Hyperscale", "Azure SQL Database Serverless",
     "Azure Database for PostgreSQL", "Azure Database for MySQL",
     "Azure Cosmos DB", "Azure DocumentDB",
@@ -960,6 +978,7 @@ RI_COVERAGE_NOTES = {
     "Azure SQL Database":               ("Compute costs only (~35% saving)", "Software license, networking, storage"),
     "Azure SQL Elastic Pool":           ("Pooled compute costs only (~35% saving) - same rule as Single Database", "Software license, networking, storage"),
     "Azure SQL Managed Instance":       ("Compute costs only (~35% saving)", "Software license, networking, storage"),
+    "Azure SQL Managed Instance Pool":  ("Compute costs only (~35%/~55% saving, 1yr/3yr) - billed as one pool-wide charge, not per pooled instance", "Software license, networking, storage"),
     "Azure Database for PostgreSQL":    ("Compute costs only (~35% saving)", "Software, networking, storage"),
     "Azure Database for MySQL":         ("Compute costs only (~35% saving)", "Software, networking, storage"),
     "Azure Cosmos DB":                  ("Provisioned throughput (RU/s)", "Storage, networking"),
