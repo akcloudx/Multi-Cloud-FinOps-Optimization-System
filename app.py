@@ -1086,8 +1086,12 @@ def _payg_blank_reason(resource_type: str, sku: str) -> str:
     return "Pricing data not available for this resource yet"
 
 
-def _render_inventory_section(df: pd.DataFrame, key_prefix: str, show_type_col: bool):
-    """Shared renderer for every per-service inventory sub-tab in the Inventory tab."""
+def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
+    """Renders the single, unified Inventory table (2026-08-23: previously
+    called once per resource-type tab - removed per user feedback that a
+    24+-tab horizontal scroll strip was harder to use than just filtering
+    by Resource Type, which the filter bar already does for every other
+    dimension; see the Resource Type entry in filter_specs below)."""
     if df.empty:
         st.caption("No resources in this category.")
         return
@@ -1144,23 +1148,20 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str, show_type_col: 
             lambda sid: f"{active_tenant.tenant_name} ({sid})" if sid else active_tenant.tenant_name
         )
 
-    # Azure-Portal-style filter bar (mentor feedback, 2026-08-23; redesigned
-    # again the same day after the user compared it against a real Azure
-    # Portal screenshot and said the always-visible 6-widget grid used "too
-    # much space... too many cells... difficult to read"). Real Azure
-    # Portal shows filters as small pills, plus a "+ Add filter" button
-    # that only THEN lets you pick which field to configure - it doesn't
-    # show every possible filter dimension open at once. Rebuilt to match
-    # that structure with Streamlit's own primitives:
-    #   1. One compact "+ Add filter" multiselect of FIELD NAMES only
-    #      (default empty) - picking a field is step 1, same as Azure's
-    #      own flow, and nothing else renders until you do.
-    #   2. Each field you've added becomes a small st.popover "pill"
-    #      (Streamlit's closest real equivalent to a clickable filter
-    #      chip) - click it to choose values, same two-step interaction
-    #      Azure Portal uses, collapsed to one line when closed.
-    # Deliberately NOT every column - matches what Azure Portal itself
-    # filters on, not a literal "every column" interpretation:
+    # Azure-Portal-style filter bar. Third iteration, 2026-08-23 - the
+    # previous round's nested st.popover "pill" (click a field chip to
+    # reveal its value-picker inside another popover) turned out to NOT be
+    # reliably discoverable in practice - real user testing found no way to
+    # actually pick values for an added filter. Simplified: an active
+    # filter's value-picker now renders INLINE, directly below "Add
+    # filter", with no extra click or nesting - guaranteed visible the
+    # moment a field is added, at the cost of being slightly less
+    # pixel-faithful to Azure's own collapsed-chip look.
+    #   - Resource Type - added this round, replacing the old per-type tab
+    #     strip (24+ tabs, "hard to scroll right and select" per direct
+    #     feedback) - Azure Portal's own "All resources" page uses a Type
+    #     FILTER, not per-type tabs, so this is closer to the reference,
+    #     not just a workaround.
     #   - Status/Region/Subscription/OS/SKU: bounded, categorical, real
     #     filter candidates. Status uses the derived 3-way Running/Stopped/
     #     Orphaned column (not the raw 2-way Resource State) - "Orphaned"
@@ -1181,8 +1182,8 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str, show_type_col: 
             extra_col, extra_label = col, label
             break
 
-    filter_specs = [("Status", "Status"), ("Region", "Region"), ("Subscription", "Subscription"),
-                     ("OS", "OS"), ("SKU", "SKU")]
+    filter_specs = [("Resource Type", "Resource Type"), ("Status", "Status"), ("Region", "Region"),
+                     ("Subscription", "Subscription"), ("OS", "OS"), ("SKU", "SKU")]
     if extra_col:
         filter_specs.append((extra_col, extra_label))
     label_to_col = {label: col for col, label in filter_specs}
@@ -1199,24 +1200,23 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str, show_type_col: 
     def _norm(v):
         return str(v).strip() if pd.notna(v) and str(v).strip() else "(Not set)"
 
-    # Columns picker moved here too, alongside "Add filter" (2026-08-23,
-    # same feedback round) - Azure Portal reaches "Edit columns" via a
-    # small button/panel, not an always-open inline strip. Uses disp.columns
-    # rather than filtered.columns since filtering rows never changes which
-    # columns exist - lets this render before `filtered` itself does,
-    # without changing what's actually offered.
-    all_cols = ["Resource ID", "Resource Name", "Subscription"]
-    if show_type_col:
-        all_cols.append("Resource Type")
-    # Resource Group (Azure) / Availability Zone (AWS) - both columns exist
-    # for every row, only the provider-relevant one ever has real values,
-    # so both are offered here and simply render blank for the other
-    # provider rather than being hidden entirely.
-    all_cols += ["Status", "Region", "Resource Group", "Availability Zone", "OS", "SKU", "Est. Monthly PAYG Cost", "PAYG Cost/hr"]
+    # Icon-prefixed Resource Type display - the per-type tab strip this
+    # replaces used to carry these icons as its own visual cue; keeping
+    # them here (rather than dropping _TYPE_ICONS entirely) preserves that
+    # at-a-glance service recognition in the unified table.
+    disp["Resource Type"] = disp["Resource Type"].apply(lambda t: f"{_TYPE_ICONS.get(t, '🔹')} {t}")
+
+    all_cols = ["Resource ID", "Resource Name", "Subscription", "Resource Type",
+                "Status", "Region", "Resource Group", "Availability Zone", "OS", "SKU",
+                "Est. Monthly PAYG Cost", "PAYG Cost/hr"]
     all_cols = [c for c in all_cols if c in disp.columns]
     default_cols = [c for c in all_cols if c != "Resource ID"]  # Resource ID hidden by default - toggle back on if needed
 
-    add_row = st.columns([2, 1, 1])
+    # "Add filter" kept deliberately NARROW (2026-08-23 feedback: the
+    # previous version spanned half the row) - a small first column, with
+    # a wide trailing spacer so it doesn't stretch to fill the row the way
+    # a bare st.columns([2,1,1]) split did.
+    add_row = st.columns([1.1, 0.9, 0.9, 3.1])
     with add_row[0]:
         active_labels = st.multiselect(
             "Filters", list(label_to_col.keys()), default=[], placeholder="➕ Add filter",
@@ -1230,34 +1230,33 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str, show_type_col: 
         # set below), so skip rendering a picker that would do nothing.
         with add_row[2]:
             with st.popover("⚙️ Columns"):
-                picked = st.multiselect("Columns to display", all_cols, default=default_cols, key=f"{key_prefix}_cols")
+                # Real checkbox list (2026-08-23 feedback: a multiselect's
+                # chip wall was exactly the clutter problem being fixed,
+                # just moved behind a button) - matches Azure Portal's own
+                # "Edit columns" panel, a checkbox per field, not chips.
+                st.caption("Columns to display")
+                cb_cols = st.columns(3)
+                picked = []
+                for i, c in enumerate(all_cols):
+                    with cb_cols[i % 3]:
+                        if st.checkbox(c, value=(c in default_cols), key=f"{key_prefix}_colcb_{c}"):
+                            picked.append(c)
         if picked:
             chosen_cols = picked
 
     mask = pd.Series(True, index=disp.index)
     if active_labels:
-        pill_cols = st.columns(len(active_labels))
-        for pill_col, label in zip(pill_cols, active_labels):
+        # Inline, not popover - see the comment above for why. A wide
+        # trailing spacer keeps each value-picker narrow rather than
+        # stretched across the full row, same reasoning as add_row above.
+        val_cols = st.columns([1] * len(active_labels) + [max(1, 4 - len(active_labels))])
+        for val_col, label in zip(val_cols, active_labels):
             col = label_to_col[label]
             normalized = disp[col].apply(_norm)
             opts = sorted(normalized.unique().tolist())
-            val_key = f"{key_prefix}_val_{col}"
-            # Pill text reflects the PREVIOUS render's selection (has to be
-            # computed before the popover button itself, which needs its
-            # label up front) - a one-rerun-cycle lag is normal/expected
-            # for a popover trigger button in Streamlit and self-corrects
-            # immediately after any change, since picking a value always
-            # triggers its own rerun.
-            preview = st.session_state.get(val_key, [])
-            if not preview:
-                pill_text = f"{label} equals **all**"
-            elif len(preview) == 1:
-                pill_text = f"{label} equals **{preview[0]}**"
-            else:
-                pill_text = f"{label} equals **{len(preview)} selected**"
-            with pill_col:
-                with st.popover(pill_text):
-                    chosen = st.multiselect(f"Filter by {label}", opts, default=preview, key=val_key)
+            with val_col:
+                chosen = st.multiselect(label, opts, default=[], placeholder="All",
+                                         key=f"{key_prefix}_val_{col}")
             active = chosen if chosen else opts
             mask &= normalized.isin(active)
     filtered = disp[mask]
@@ -1322,22 +1321,14 @@ def _render_inventory_tab():
 
     st.divider()
 
+    # Single unified table with a Resource Type filter, not a per-type tab
+    # strip (2026-08-23, direct feedback: 24+ tabs were "very hard to
+    # scroll right and select" - Azure Portal's own "All resources" page
+    # uses a Type filter for exactly this, not per-type tabs, so the
+    # filter bar already covers what the tabs did).
     mode_tag = env_mode.replace(" ", "_").replace("/", "_")
-    resource_types_present = sorted(inv_raw["Resource Type"].unique().tolist()) if not inv_raw.empty else []
-
-    tab_defs = [("📋", "All Resources", None)] + [
-        (_TYPE_ICONS.get(rtype, "🔹"), rtype, rtype) for rtype in resource_types_present
-    ]
-    type_tabs = st.tabs([
-        f"{icon} {label} ({len(inv_raw) if rtype is None else len(inv_raw[inv_raw['Resource Type'] == rtype])})"
-        for icon, label, rtype in tab_defs
-    ])
-
-    for tab_widget, (icon, label, rtype) in zip(type_tabs, tab_defs):
-        with tab_widget:
-            section_df = inv_raw if rtype is None else inv_raw[inv_raw["Resource Type"] == rtype]
-            key = f"{selected_provider}_{mode_tag}_{rtype or 'all'}".replace(" ", "_")
-            _render_inventory_section(section_df, key, show_type_col=(rtype is None))
+    key = f"{selected_provider}_{mode_tag}_all".replace(" ", "_")
+    _render_inventory_section(inv_raw, key)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
