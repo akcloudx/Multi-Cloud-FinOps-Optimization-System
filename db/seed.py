@@ -63,7 +63,7 @@ COMPUTE_INVENTORY = [
     # (sub-dev-002, same one VM-Dev-01 already uses below) - added 2026-08-23
     # specifically to exercise real Azure Reservation scope restriction (see
     # COMMITMENTS' RI-VM-D4DS-V5-AE-WIN below and analysis/engine.py's
-    # _scope_matches_resource): that RI is purchased with Single-subscription
+    # _azure_scope_matches): that RI is purchased with Single-subscription
     # scope against sub-prod-001 ONLY, so in real Azure it can NEVER cover
     # this VM despite the identical SKU/region/OS - proves the coverage
     # table correctly shows VM-Prod-01 as covered and this VM as its own,
@@ -489,7 +489,7 @@ COMMITMENTS = [
     # scope_subscription_id added 2026-08-23 so this RI does NOT also cover
     # VM-Dev-02 (identical SKU/region/OS, but a different subscription) the
     # way this app incorrectly let it before - see analysis/engine.py's
-    # _scope_matches_resource.
+    # _azure_scope_matches.
     {"commitment_id": "RI-VM-D4DS-V5-AE-WIN",
      "commitment_type": "Reserved Instance",
      "scope_sku": "Standard_D4ds_v5", "scope_resource_type": "Compute",

@@ -78,6 +78,11 @@ def get_all_commitments(provider: str = "Azure", mode: str = "demo", tenant_id=N
             # unchanged from this app's original behavior.
             "scope_subscription_id":   r.scope_subscription_id,
             "scope_resource_group_id": r.scope_resource_group_id,
+            # Real AWS "Zonal" EC2 Reserved Instance scope - added
+            # 2026-08-23, see db/schema.py's Commitment.scope_availability_zone
+            # comment. Always None for Azure rows and for "Regional"-scope
+            # AWS RIs (the more common case).
+            "scope_availability_zone": r.scope_availability_zone,
             "hourly_usd_commitment": r.hourly_usd_commitment,
             "reserved_qty":          r.reserved_qty,
             "term":                  r.term,
@@ -90,7 +95,7 @@ def get_all_commitments(provider: str = "Azure", mode: str = "demo", tenant_id=N
         for r in rows
     ]
     columns = ["commitment_id", "commitment_type", "scope_sku", "scope_resource_type", "scope_region", "scope_os", "scope_redundancy",
-               "scope_subscription_id", "scope_resource_group_id",
+               "scope_subscription_id", "scope_resource_group_id", "scope_availability_zone",
                "hourly_usd_commitment", "reserved_qty", "term", "expiry_date", "provider", "is_inferred_mapping", "mapping_note", "offering_class"]
     return pd.DataFrame(data, columns=columns)
 

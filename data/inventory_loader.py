@@ -66,8 +66,13 @@ def get_compute_inventory(provider: str = "Azure", mode: str = "demo", tenant_id
             # Real Resource Graph resource group name - added 2026-08-23,
             # needed to match a Reservation/Savings Plan purchased with
             # "Single resource group" scope (see analysis/engine.py's
-            # _scope_matches_resource / pricing/commitment_mapping.py).
+            # _azure_scope_matches / pricing/commitment_mapping.py).
             "Resource Group":           r.resource_group,
+            # Real EC2 Placement.AvailabilityZone - added 2026-08-23,
+            # AWS-only (always None for Azure rows), needed to match a
+            # "Zonal" EC2 Reserved Instance against the specific instances
+            # it actually covers (see Commitment.scope_availability_zone).
+            "Availability Zone":       r.availability_zone,
             "Provider":                 r.provider,
             "Is Orphaned":              r.is_orphaned,
         }
@@ -75,5 +80,5 @@ def get_compute_inventory(provider: str = "Azure", mode: str = "demo", tenant_id
     ]
     columns = ["Resource ID", "Resource Name", "Resource Type", "Resource State", "Region", "OS",
                "SKU", "Redundancy", "HA Replicas", "PAYG Hourly Cost USD", "Avg Daily Running Hours",
-               "Subscription", "Resource Group", "Provider", "Is Orphaned"]
+               "Subscription", "Resource Group", "Availability Zone", "Provider", "Is Orphaned"]
     return pd.DataFrame(data, columns=columns)

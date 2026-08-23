@@ -146,6 +146,21 @@ def derive_aws_reservation_commitment_fields(purchase: dict) -> Optional[dict]:
     else:
         return None   # unrecognized service - don't guess a category.
 
+    # "Zonal" scope (EC2 only - confirmed via boto3's DescribeReservedInstances
+    # Scope field: "Availability Zone" | "Region") is a real, tighter
+    # restriction than Region: a Zonal RI only covers instances in that
+    # specific AZ, not the whole region - added 2026-08-23, previously
+    # ignored entirely (scope/availability_zone were captured on the
+    # purchase record but never read here), which would have overstated
+    # coverage for any Zonal RI against same-instance-type demand in a
+    # DIFFERENT AZ of the same region. None for Regional-scope RIs (the more
+    # common case) and for every non-EC2 service (RDS/ElastiCache/Redshift/
+    # OpenSearch/MemoryDB Reservations have no AZ-scope concept at all,
+    # confirmed via each service's own boto3 model) - matches
+    # analysis/engine.py's _aws_scope_matches, which treats None as
+    # unrestricted at that dimension.
+    scope_availability_zone = purchase.get("availability_zone") if purchase.get("scope") == "Availability Zone" else None
+
     return {
         "commitment_type":       "Reserved Instance",
         "scope_sku":             purchase.get("instance_type") or "N/A",
@@ -153,6 +168,19 @@ def derive_aws_reservation_commitment_fields(purchase: dict) -> Optional[dict]:
         "scope_region":          purchase.get("region") or "",
         "scope_os":              scope_os,
         "scope_redundancy":      scope_redundancy,
+        "scope_availability_zone": scope_availability_zone,
+        # Real Account ID this purchase was fetched under (aws/connector.py's
+        # sts:GetCallerIdentity) - traceability only, NOT used to restrict
+        # matching. Unlike Azure (which defaults Reservations/Savings Plans
+        # to Single-subscription scope unless Shared is deliberately
+        # chosen), AWS shares unused RI/Savings Plan discount across an
+        # Organization's linked accounts BY DEFAULT once consolidated
+        # billing is active (confirmed via AWS's own Savings Plans user
+        # guide) - this app has no organizations/ram API access to detect
+        # the edge cases where that sharing is disabled for a specific
+        # account or restricted via Group Sharing, so account-level scope
+        # is deliberately left unrestricted rather than guessed at.
+        "scope_subscription_id": None,
         "hourly_usd_commitment": rate,
         "reserved_qty":          purchase.get("instance_count") or 0,
         "term":                  term,

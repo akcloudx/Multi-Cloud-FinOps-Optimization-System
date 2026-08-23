@@ -714,6 +714,15 @@ def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
                             "PAYG Hourly Cost USD":    0.0,
                             "Avg Daily Running Hours": 24,
                             "Subscription":            account_id,
+                            # Real Placement.AvailabilityZone (e.g.
+                            # "us-east-1a", confirmed via boto3's
+                            # DescribeInstances model - always present for a
+                            # non-terminated instance). Added 2026-08-23 to
+                            # match a "Zonal" EC2 Reserved Instance (scope=
+                            # "Availability Zone") against the specific
+                            # instances it actually covers - see
+                            # Commitment.scope_availability_zone.
+                            "Availability Zone":      inst.get("Placement", {}).get("AvailabilityZone", ""),
                             "Provider":                "AWS",
                             "Is Orphaned":             False,
                         })
@@ -1495,6 +1504,11 @@ def fetch_live_reservations(creds: AWSCredentials) -> pd.DataFrame:
         aws_secret_access_key=creds.secret_access_key,
         region_name=creds.region,
     )
+    # Same sts:GetCallerIdentity call fetch_live_inventory() already makes -
+    # tags every purchase record with the calling account's real Account ID
+    # (traceability only, see Commitment.scope_availability_zone's comment
+    # on why this app doesn't restrict matching by it).
+    account_id = session.client("sts").get_caller_identity().get("Account", "")
     regions = _discover_regions(session)
     records = []
 
@@ -1688,7 +1702,10 @@ def fetch_live_reservations(creds: AWSCredentials) -> pd.DataFrame:
         except (ClientError, BotoCoreError):
             pass
 
-    return pd.DataFrame(records)
+    df = pd.DataFrame(records)
+    if not df.empty:
+        df["account_id"] = account_id
+    return df
 
 
 def fetch_live_savings_plans(creds: AWSCredentials) -> pd.DataFrame:
@@ -1709,6 +1726,7 @@ def fetch_live_savings_plans(creds: AWSCredentials) -> pd.DataFrame:
         aws_secret_access_key=creds.secret_access_key,
         region_name=creds.region,
     )
+    account_id = session.client("sts").get_caller_identity().get("Account", "")
     records = []
     try:
         sp_client = session.client("savingsplans", region_name="us-east-1")
@@ -1736,4 +1754,7 @@ def fetch_live_savings_plans(creds: AWSCredentials) -> pd.DataFrame:
     except (ClientError, BotoCoreError):
         pass
 
-    return pd.DataFrame(records)
+    df = pd.DataFrame(records)
+    if not df.empty:
+        df["account_id"] = account_id
+    return df

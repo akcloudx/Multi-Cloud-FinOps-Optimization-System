@@ -39,13 +39,27 @@ AWS_COMPUTE_INVENTORY = [
      "resource_type": "Amazon EC2", "resource_state": "Running",
      "region": "us-east-1", "os": "Linux", "sku": "m5.large",
      "payg_hourly_usd": 0.096, "avg_daily_running_hours": 24,
-     "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
+     "subscription": "acc-aws-11223344", "availability_zone": "us-east-1a", "provider": "AWS", "is_orphaned": False},
 
     {"resource_id": "i-0123456789abcdef1", "resource_name": "aws-prod-web-02",
      "resource_type": "Amazon EC2", "resource_state": "Running",
      "region": "us-east-1", "os": "Linux", "sku": "m5.large",
      "payg_hourly_usd": 0.096, "avg_daily_running_hours": 24,
-     "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
+     "subscription": "acc-aws-11223344", "availability_zone": "us-east-1a", "provider": "AWS", "is_orphaned": False},
+
+    # Same SKU/region/OS as web-01/web-02 above, but a DIFFERENT Availability
+    # Zone - added 2026-08-23 specifically to exercise real AWS EC2 "Zonal"
+    # Reserved Instance scope (see AWS_COMMITMENTS' RI-EC2-M5-LARGE-USE1-LIN
+    # below and analysis/engine.py's _aws_scope_matches): that RI is
+    # purchased with Zonal scope against us-east-1a ONLY, so in real AWS
+    # billing it can NEVER cover this instance despite the identical
+    # SKU/region/OS - proves the coverage table correctly shows web-01/
+    # web-02 as covered and this instance as its own, separate uncovered gap.
+    {"resource_id": "i-0123456789abcdef4", "resource_name": "aws-prod-web-03",
+     "resource_type": "Amazon EC2", "resource_state": "Running",
+     "region": "us-east-1", "os": "Linux", "sku": "m5.large",
+     "payg_hourly_usd": 0.096, "avg_daily_running_hours": 24,
+     "subscription": "acc-aws-11223344", "availability_zone": "us-east-1b", "provider": "AWS", "is_orphaned": False},
 
     {"resource_id": "i-0123456789abcdef2", "resource_name": "aws-prod-app-01",
      "resource_type": "Amazon EC2", "resource_state": "Running",
@@ -361,9 +375,16 @@ AWS_INVENTORY = AWS_COMPUTE_INVENTORY + AWS_DATABASE_INVENTORY + AWS_RI_ONLY_INV
 
 AWS_COMMITMENTS = [
     # ── Reserved Instances — EC2 ────────────────────────────────────────────────
+    # Zonal scope (scope_availability_zone) - added 2026-08-23, matching a
+    # real "Zonal" EC2 RI purchase (boto3 DescribeReservedInstances'
+    # Scope="Availability Zone" - the tightest of AWS's Region/Zonal RI
+    # scope options, confirmed via AWS's own docs). Covers ONLY web-01/
+    # web-02 (both us-east-1a) - web-03 (us-east-1b, added the same day)
+    # deliberately falls outside this RI's real coverage.
     {"commitment_id": "RI-EC2-M5-LARGE-USE1-LIN",
      "commitment_type": "Reserved Instance",
      "scope_sku": "m5.large", "scope_region": "us-east-1", "scope_os": "Linux",
+     "scope_availability_zone": "us-east-1a",
      "hourly_usd_commitment": 0.060, "reserved_qty": 2,
      "term": "1-year", "expiry_date": "2026-12-01", "provider": "AWS",
      "offering_class": "standard"},

@@ -316,6 +316,12 @@ def init_db(provider: str = "Azure", mode: str = "demo"):
     _ensure_column(engine, schema_name, "reservation_purchases", "applied_scope_resource_group_id", "VARCHAR(255)")
     _ensure_column(engine, schema_name, "savings_plan_purchases", "applied_scope_subscription_id", "VARCHAR(255)")
     _ensure_column(engine, schema_name, "savings_plan_purchases", "applied_scope_resource_group_id", "VARCHAR(255)")
+    # AWS EC2 "Zonal" Reserved Instance scope + account traceability - added
+    # 2026-08-23, see Commitment.scope_availability_zone's own comment.
+    _ensure_column(engine, schema_name, "cloud_inventory", "availability_zone", "VARCHAR(100)")
+    _ensure_column(engine, schema_name, "commitments", "scope_availability_zone", "VARCHAR(100)")
+    _ensure_column(engine, schema_name, "aws_reservation_purchases", "account_id", "VARCHAR(50)")
+    _ensure_column(engine, schema_name, "aws_savings_plan_purchases", "account_id", "VARCHAR(50)")
     return engine
 
 
@@ -364,6 +370,14 @@ class CloudInventory(Base):
     # pricing/commitment_mapping.py) against the specific resources it
     # actually covers, not just subscription/region/SKU.
     resource_group            = Column(String(255), nullable=True)
+    # Real EC2 Placement.AvailabilityZone (e.g. "us-east-1a") - added
+    # 2026-08-23, AWS-only (always NULL for Azure rows). Needed to match a
+    # "Zonal" EC2 Reserved Instance (scope="Availability Zone", confirmed
+    # real via boto3's DescribeReservedInstances model - a genuinely
+    # tighter restriction than "Regional" scope RIs, which cover the whole
+    # region) against the specific instances it actually covers - see
+    # Commitment.scope_availability_zone and pricing/aws_commitment_mapping.py.
+    availability_zone         = Column(String(100), nullable=True)
     provider                 = Column(String(255), default="Azure")
     is_orphaned              = Column(Boolean, default=False)
     # NULL = demo/seed data. Non-NULL = live-ingested, scoped to that cloud_tenants.id.
@@ -432,6 +446,22 @@ class Commitment(Base):
     # normalized on the way in, see commitment_mapping.py's _bare_subscription_id/_bare_resource_group.
     scope_subscription_id   = Column(String(255), nullable=True)
     scope_resource_group_id = Column(String(255), nullable=True)
+    # Real EC2 Reserved Instance "Zonal" scope (AvailabilityZone, e.g.
+    # "us-east-1a") - added 2026-08-23, AWS-only (always NULL for Azure
+    # rows and for AWS "Regional"-scope RIs, which cover the whole region -
+    # confirmed via boto3's DescribeReservedInstances Scope field:
+    # "Availability Zone" | "Region"). A DIFFERENT restriction axis than
+    # scope_subscription_id/scope_resource_group_id above - AZ nests under
+    # Region, not under Account, and AWS RI/SP account-level sharing
+    # deliberately is NOT modeled as a matching restriction at all (see
+    # pricing/aws_commitment_mapping.py's module docstring: unlike Azure,
+    # AWS RIs/Savings Plans share unused discount across an Organization's
+    # linked accounts BY DEFAULT when consolidated billing is active - this
+    # app has no organizations/ram API access to detect the edge cases
+    # where that sharing is disabled or restricted via Group Sharing, so
+    # account-level scope is deliberately left unrestricted/tenant-wide
+    # rather than guessed).
+    scope_availability_zone = Column(String(100), nullable=True)
     # "standard" | "convertible" | None. EC2 Reserved Instances only - AWS's
     # own docs confirm RDS/ElastiCache/Redshift Reservations have no such
     # offering-class split, and Azure Reservations don't either. Doesn't
@@ -621,6 +651,12 @@ class AWSReservationPurchase(Base):
     __tablename__ = "aws_reservation_purchases"
 
     id                     = Column(Integer, primary_key=True, autoincrement=True)
+    # sts:GetCallerIdentity's Account - the SAME value already tagged onto
+    # this account's CloudInventory rows via the "Subscription" column (see
+    # aws/connector.py). Added 2026-08-23 for traceability only - NOT used
+    # to restrict coverage matching, see Commitment.scope_availability_zone's
+    # comment for why account-level scope is deliberately left unrestricted.
+    account_id              = Column(String(50), nullable=True)
     service                = Column(String(20), nullable=False)    # "EC2" | "RDS" | "ElastiCache" | "Redshift" | "OpenSearch" - originally String(10), too narrow for "ElastiCache" (11 chars) - SQLite never enforced it (silently fine locally) but would have broken on first write to production Azure SQL. Widened here and via _widen_column below for tables that already exist in the wild.
     reserved_instance_id   = Column(String(255), nullable=False)   # ReservedInstancesId (EC2) or ReservedDBInstanceId (RDS)
     instance_type          = Column(String(100), nullable=False)   # InstanceType (EC2) or DBInstanceClass (RDS)
@@ -660,6 +696,8 @@ class AWSSavingsPlanPurchase(Base):
     __tablename__ = "aws_savings_plan_purchases"
 
     id                          = Column(Integer, primary_key=True, autoincrement=True)
+    # Same traceability-only field as AWSReservationPurchase.account_id above.
+    account_id                  = Column(String(50), nullable=True)
     savings_plan_id             = Column(String(100), nullable=False)
     savings_plan_arn            = Column(String(255), nullable=True)
     description                 = Column(String(255), nullable=True)

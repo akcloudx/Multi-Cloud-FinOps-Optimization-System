@@ -96,8 +96,8 @@ def _is_running_at_hour(resource_state: str, avg_daily_hrs: int, hour: int) -> b
     return False
 
 
-def _scope_matches_resource(commitment_sub, commitment_rg, resource_sub, resource_rg) -> bool:
-    """True if a Reservation/Savings Plan's real Azure scope restriction (if
+def _azure_scope_matches(commitment_sub, commitment_rg, resource_sub, resource_rg) -> bool:
+    """True if an Azure Reservation/Savings Plan's real scope restriction (if
     any) permits it to cover a given resource. Added 2026-08-23 - Azure
     Reservations/Savings Plans default to "Single subscription" scope unless
     the buyer deliberately picks "Shared" (confirmed via Microsoft Learn's
@@ -116,12 +116,48 @@ def _scope_matches_resource(commitment_sub, commitment_rg, resource_sub, resourc
     resource_group to match (the tightest restriction); a non-None
     commitment_sub with no rg requires only subscription to match.
     Case-insensitive - Azure subscription GUIDs and resource group names are
-    both compared case-insensitively by ARM convention."""
+    both compared case-insensitively by ARM convention.
+
+    Deliberately Azure-only, kept separate from _aws_scope_matches() below
+    (2026-08-23) rather than one combined function with optional params for
+    both providers - Azure's scope hierarchy nests under Account (Subscription
+    -> Resource Group) while AWS's nests under Region (-> Availability Zone),
+    genuinely different restriction axes with different real-world defaults
+    (see _aws_scope_matches's own docstring) - conflating them into one
+    signature made it harder to see which params apply to which provider."""
     if commitment_rg:
         return (str(resource_sub or "").lower() == str(commitment_sub or "").lower() and
                 str(resource_rg or "").lower() == str(commitment_rg or "").lower())
     if commitment_sub:
         return str(resource_sub or "").lower() == str(commitment_sub or "").lower()
+    return True
+
+
+def _aws_scope_matches(commitment_az, resource_az) -> bool:
+    """True if an AWS EC2 Reserved Instance's real scope restriction (if any)
+    permits it to cover a given resource. Added 2026-08-23 for AWS's "Zonal"
+    scope (confirmed via boto3's DescribeReservedInstances Scope field:
+    "Availability Zone" | "Region") - a Zonal RI only covers instances in
+    that specific AZ, not the whole region; this app previously ignored it
+    entirely and matched any same-region instance (see
+    pricing/aws_commitment_mapping.py).
+
+    commitment_az of None means unrestricted at this dimension (a "Regional"-
+    scope RI, the more common case, or any non-EC2 AWS service, which has no
+    AZ-scope concept at all) - always matches. Case-insensitive.
+
+    Deliberately does NOT check account/subscription-level scope at all -
+    unlike Azure (which defaults Reservations/Savings Plans to Single-
+    subscription scope unless Shared is deliberately chosen), AWS shares
+    unused RI/Savings Plan discount across an Organization's linked accounts
+    BY DEFAULT once consolidated billing is active (confirmed via AWS's own
+    Savings Plans user guide) - this app has no organizations/ram API access
+    to detect the edge cases where that sharing is disabled for a specific
+    account or restricted via Group Sharing, so account-level scope is
+    deliberately left unrestricted rather than guessed at (see
+    db/schema.py's Commitment.scope_availability_zone comment)."""
+    if commitment_az:
+        return str(resource_az or "").lower() == str(commitment_az or "").lower()
     return True
 
 
@@ -148,6 +184,7 @@ def _apply_ri_pass(workload_demand: list[dict], ri_df: pd.DataFrame) -> tuple[li
             "scope_os":     ri["scope_os"],
             "scope_subscription_id":   ri.get("scope_subscription_id"),
             "scope_resource_group_id": ri.get("scope_resource_group_id"),
+            "scope_availability_zone": ri.get("scope_availability_zone"),
             "remaining":    ri["hourly_usd_commitment"] * ri["reserved_qty"],  # total pool
             "per_unit_rate": ri["hourly_usd_commitment"],
         }
@@ -159,8 +196,9 @@ def _apply_ri_pass(workload_demand: list[dict], ri_df: pd.DataFrame) -> tuple[li
                 res["OS"]     == pool["scope_os"]     and
                 res["Remaining PAYG Cost"] > 0         and
                 pool["remaining"] > 0                  and
-                _scope_matches_resource(pool["scope_subscription_id"], pool["scope_resource_group_id"],
-                                         res.get("Subscription"), res.get("Resource Group"))):
+                _azure_scope_matches(pool["scope_subscription_id"], pool["scope_resource_group_id"],
+                                      res.get("Subscription"), res.get("Resource Group")) and
+                _aws_scope_matches(pool["scope_availability_zone"], res.get("Availability Zone"))):
 
                 # Allocate the RI committed rate (not the full PAYG rate)
                 allocated = min(res["Remaining PAYG Cost"], pool["per_unit_rate"], pool["remaining"])
@@ -179,7 +217,7 @@ def _apply_sp_pass(workload_demand: list[dict], sp_df: pd.DataFrame) -> tuple[li
     No SKU or region constraint — absorbs any remaining Compute/DB PAYG overage
     from whichever SP pool(s) this resource's real Azure scope makes it
     eligible for (Single subscription / Single resource group / Shared - see
-    _scope_matches_resource). Per-commitment pools, same shape as
+    _azure_scope_matches). Per-commitment pools, same shape as
     _apply_ri_pass's ri_pools - added 2026-08-23; previously a single global
     scalar pool with no scope awareness at all, which let a Single-scoped SP
     absorb PAYG overage from resources outside its real scope.
@@ -203,8 +241,8 @@ def _apply_sp_pass(workload_demand: list[dict], sp_df: pd.DataFrame) -> tuple[li
         for pool in sp_pools:
             if res["Remaining PAYG Cost"] <= 0 or pool["remaining"] <= 0:
                 continue
-            if not _scope_matches_resource(pool["scope_subscription_id"], pool["scope_resource_group_id"],
-                                            res.get("Subscription"), res.get("Resource Group")):
+            if not _azure_scope_matches(pool["scope_subscription_id"], pool["scope_resource_group_id"],
+                                         res.get("Subscription"), res.get("Resource Group")):
                 continue
             allocated = min(res["Remaining PAYG Cost"], pool["remaining"])
             pool["remaining"]          -= allocated
@@ -266,6 +304,7 @@ def run_waterfall(
                     "OS":                  res["OS"],
                     "Subscription":        res.get("Subscription"),
                     "Resource Group":      res.get("Resource Group"),
+                    "Availability Zone":   res.get("Availability Zone"),
                     "Resource State":      res["Resource State"],
                     "Avg Running Hrs":     res["Avg Daily Running Hours"],
                     "Remaining PAYG Cost": hourly_cost,
@@ -302,8 +341,9 @@ def run_waterfall(
                         if (ri["scope_sku"]    == res["SKU"] and
                             ri["scope_region"] == res["Region"] and
                             ri["scope_os"]     == res["OS"]     and
-                            _scope_matches_resource(ri.get("scope_subscription_id"), ri.get("scope_resource_group_id"),
-                                                     res.get("Subscription"), res.get("Resource Group"))):
+                            _azure_scope_matches(ri.get("scope_subscription_id"), ri.get("scope_resource_group_id"),
+                                                  res.get("Subscription"), res.get("Resource Group")) and
+                            _aws_scope_matches(ri.get("scope_availability_zone"), res.get("Availability Zone"))):
                             res["RI Leakage"] += ri["hourly_usd_commitment"]
 
             # Total RI utilized this hour
@@ -382,8 +422,9 @@ def run_waterfall(
             ]
             if not match.empty and ("scope_subscription_id" in match.columns):
                 match = match[match.apply(
-                    lambda ri: _scope_matches_resource(ri.get("scope_subscription_id"), ri.get("scope_resource_group_id"),
-                                                         row.get("Subscription"), row.get("Resource Group")),
+                    lambda ri: _azure_scope_matches(ri.get("scope_subscription_id"), ri.get("scope_resource_group_id"),
+                                                     row.get("Subscription"), row.get("Resource Group"))
+                               and _aws_scope_matches(ri.get("scope_availability_zone"), row.get("Availability Zone")),
                     axis=1,
                 )]
             return float(match["hourly_usd_commitment"].sum()) if not match.empty else 0.0
@@ -480,8 +521,8 @@ def savings_plan_analysis(
         for pool in sp_pools:
             if remaining_cost <= 0 or pool["remaining"] <= 0:
                 continue
-            if not _scope_matches_resource(pool["scope_subscription_id"], pool["scope_resource_group_id"],
-                                            res.get("Subscription"), res.get("Resource Group")):
+            if not _azure_scope_matches(pool["scope_subscription_id"], pool["scope_resource_group_id"],
+                                         res.get("Subscription"), res.get("Resource Group")):
                 continue
             allocated = min(remaining_cost, pool["remaining"])
             pool["remaining"] -= allocated
@@ -521,6 +562,34 @@ def savings_plan_analysis(
 
 
 # ── Reserved Instance Analysis ────────────────────────────────────────────────
+
+def _resolve_missing_resource_type(supply: pd.DataFrame, inventory_df: pd.DataFrame) -> pd.DataFrame:
+    """Fills a supply DataFrame's "Resource Type" from a SKU->Resource Type
+    inventory lookup wherever it's missing/blank - factored out of the main
+    merge's original inline version (2026-08) so the Single subscription/
+    resource group/Availability Zone scoped layers (added 2026-08-23) share
+    the identical fallback instead of each silently producing an
+    unmatched-NaN-Resource-Type row that fails their own merge (a real bug
+    caught live: an AWS demo Commitment row with no explicit
+    scope_resource_type set produced two separate demand-only/supply-only
+    rows here instead of one merged one, until this fallback was applied to
+    the AZ-scoped layer too). scope_resource_type is still the authoritative
+    source when present - REQUIRED because scope_sku alone is genuinely
+    ambiguous across services/SKU collisions (e.g. "GP_Gen5_4" shared by
+    Azure SQL Database/PostgreSQL/MySQL Flexible Server) - this SKU-based
+    lookup is only a fallback for commitment rows that don't set it."""
+    missing_rtype = supply["Resource Type"].isna() | (supply["Resource Type"] == "")
+    if missing_rtype.any():
+        sku_to_rtype = (
+            inventory_df[["SKU", "Resource Type"]]
+            .drop_duplicates(subset=["SKU"])
+            .set_index("SKU")["Resource Type"]
+            .to_dict()
+        )
+        supply.loc[missing_rtype, "Resource Type"] = supply.loc[missing_rtype, "SKU"].map(sku_to_rtype)
+    supply["Resource Type"] = supply["Resource Type"].fillna("Unknown")
+    return supply
+
 
 def _finalize_coverage_layer(merged: pd.DataFrame) -> pd.DataFrame:
     """Shared eligibility/coverage-model/gap-zeroing finalization applied to
@@ -587,7 +656,7 @@ def reservation_analysis(
     if "Redundancy" not in running_resources.columns:
         running_resources["Redundancy"] = "N/A"
     running_resources["Redundancy"] = running_resources["Redundancy"].fillna("N/A")
-    for _col in ("Subscription", "Resource Group"):
+    for _col in ("Subscription", "Resource Group", "Availability Zone"):
         if _col not in running_resources.columns:
             running_resources[_col] = ""
         running_resources[_col] = running_resources[_col].fillna("")
@@ -624,13 +693,34 @@ def reservation_analysis(
     # null - Shared, or the ManagementGroup-membership-unresolved fallback)
     # commitments keep pooling against ALL matching demand tenant-wide
     # exactly as before.
+    # Also split off AWS "Zonal" EC2 Reserved Instances (scope_availability_zone
+    # set - see pricing/aws_commitment_mapping.py) - the SAME kind of gap as
+    # Azure's Single-subscription scope, just nested under Region instead of
+    # Account (a Zonal RI only covers instances in that specific AZ, not the
+    # whole region). Gets its own dedicated layer below, keyed by AZ rather
+    # than Subscription/Resource Group.
     if ri_df_regional.empty:
         ri_df_unscoped = ri_df_regional
         ri_df_scoped = ri_df_regional
+        ri_df_az_scoped = ri_df_regional
     else:
+        # Resolve scope_resource_type BEFORE splitting/excluding - the
+        # exclusion mask below and every scoped layer's own merge need a
+        # real Resource Type to match on, and a commitment row that doesn't
+        # set it explicitly (same "SKU-based fallback" case the main merge
+        # already handles) would otherwise never match anything here either
+        # (a real bug caught live: an AWS demo Zonal RI with no explicit
+        # scope_resource_type silently failed to exclude its covered
+        # instances from the main pool, double-counting them).
+        ri_df_regional = ri_df_regional.copy()
+        ri_df_regional["scope_resource_type"] = _resolve_missing_resource_type(
+            ri_df_regional.rename(columns={"scope_resource_type": "Resource Type", "scope_sku": "SKU"}), inventory_df
+        )["Resource Type"]
         has_scope = ri_df_regional["scope_subscription_id"].notna() & (ri_df_regional["scope_subscription_id"] != "")
+        has_az_scope = ri_df_regional["scope_availability_zone"].notna() & (ri_df_regional["scope_availability_zone"] != "")
         ri_df_scoped = ri_df_regional[has_scope]
-        ri_df_unscoped = ri_df_regional[~has_scope]
+        ri_df_az_scoped = ri_df_regional[has_az_scope & ~has_scope]
+        ri_df_unscoped = ri_df_regional[~has_scope & ~has_az_scope]
 
     # Resources whose exact profile (Resource Type/SKU/Region/OS/Redundancy
     # AND Subscription[/Resource Group]) is targeted by a scope-restricted
@@ -640,7 +730,8 @@ def reservation_analysis(
     # (once as unmet in the pooled tenant-wide gap, once - correctly - as met
     # in its scoped layer), overstating total gap. A resource NOT targeted by
     # any scoped commitment is unaffected and still pools normally below.
-    if not ri_df_scoped.empty:
+    _scoped_for_exclusion = pd.concat([ri_df_scoped, ri_df_az_scoped]) if not ri_df_az_scoped.empty else ri_df_scoped
+    if not _scoped_for_exclusion.empty:
         excluded = running_resources.apply(
             lambda row: any(
                 row["Resource Type"] == ri["scope_resource_type"] and
@@ -648,9 +739,10 @@ def reservation_analysis(
                 row["Region"]        == ri["scope_region"] and
                 row["OS"]            == ri["scope_os"] and
                 row["Redundancy"]    == (ri["scope_redundancy"] or "N/A") and
-                _scope_matches_resource(ri["scope_subscription_id"], ri["scope_resource_group_id"],
-                                         row["Subscription"], row["Resource Group"])
-                for _, ri in ri_df_scoped.iterrows()
+                _azure_scope_matches(ri["scope_subscription_id"], ri["scope_resource_group_id"],
+                                      row["Subscription"], row["Resource Group"]) and
+                _aws_scope_matches(ri["scope_availability_zone"], row["Availability Zone"])
+                for _, ri in _scoped_for_exclusion.iterrows()
             ),
             axis=1,
         )
@@ -693,16 +785,7 @@ def reservation_analysis(
         # ONLY as a fallback for commitment rows that genuinely predate this
         # field (should be rare/never for this app's demo-only Commitment
         # data, but avoids silently dropping coverage for old rows).
-        missing_rtype = supply["Resource Type"].isna() | (supply["Resource Type"] == "")
-        if missing_rtype.any():
-            sku_to_rtype = (
-                inventory_df[["SKU", "Resource Type"]]
-                .drop_duplicates(subset=["SKU"])
-                .set_index("SKU")["Resource Type"]
-                .to_dict()
-            )
-            supply.loc[missing_rtype, "Resource Type"] = supply.loc[missing_rtype, "SKU"].map(sku_to_rtype)
-        supply["Resource Type"] = supply["Resource Type"].fillna("Unknown")
+        supply = _resolve_missing_resource_type(supply, inventory_df)
 
     # Merge demand + supply on all 5 dimensions
     merged = demand.merge(
@@ -766,6 +849,7 @@ def reservation_analysis(
             "reserved_qty", "hourly_usd_commitment", "term", "expiry_date",
         ]].copy()
         global_supply["Redundancy"] = global_supply["Redundancy"].fillna("N/A")
+        global_supply = _resolve_missing_resource_type(global_supply, inventory_df)
 
         global_merged = global_demand.merge(
             global_supply, on=["Resource Type", "SKU", "OS", "Redundancy"], how="outer"
@@ -787,7 +871,7 @@ def reservation_analysis(
     # resources actually inside its scope - pooling it into the main
     # tenant-wide merge above would silently cover out-of-scope resources
     # too (the real, previously-unhandled gap this closes; see
-    # analysis/engine.py's _scope_matches_resource and
+    # analysis/engine.py's _azure_scope_matches and
     # pricing/commitment_mapping.py's _derive_scope for the full context).
     # This table is already documented (see "capacity"-model coverage_model
     # comment above) as a rough per-profile signal, not a strict ledger, for
@@ -821,6 +905,7 @@ def reservation_analysis(
                 "reserved_qty", "hourly_usd_commitment", "term", "expiry_date",
             ]].copy()
             sub_supply["Redundancy"] = sub_supply["Redundancy"].fillna("N/A")
+            sub_supply = _resolve_missing_resource_type(sub_supply, inventory_df)
 
             sub_merged = sub_demand.merge(
                 sub_supply, on=["Resource Type", "SKU", "Region", "OS", "Redundancy", "Subscription"], how="outer"
@@ -852,6 +937,7 @@ def reservation_analysis(
                 "reserved_qty", "hourly_usd_commitment", "term", "expiry_date",
             ]].copy()
             rg_supply["Redundancy"] = rg_supply["Redundancy"].fillna("N/A")
+            rg_supply = _resolve_missing_resource_type(rg_supply, inventory_df)
 
             rg_merged = rg_demand.merge(
                 rg_supply, on=["Resource Type", "SKU", "Region", "OS", "Redundancy", "Subscription", "Resource Group"], how="outer"
@@ -862,6 +948,44 @@ def reservation_analysis(
             rg_merged["excess"]        = (rg_merged["reserved_qty"] - rg_merged["running_count"]).clip(lower=0)
             rg_merged = _finalize_coverage_layer(rg_merged)
             merged = pd.concat([merged, rg_merged], ignore_index=True)
+
+    # AWS "Zonal" EC2 Reserved Instances (split off as ri_df_az_scoped above)
+    # - added 2026-08-23, same pattern as the Single subscription/resource
+    # group layers above, but keyed on Availability Zone (nested under
+    # Region, not Account - see pricing/aws_commitment_mapping.py). A Zonal
+    # RI only covers instances in that specific AZ; pooling it into the main
+    # tenant-wide merge would silently cover same-instance-type demand in a
+    # DIFFERENT AZ of the same region too.
+    if not ri_df_az_scoped.empty:
+        az_demand = (
+            running_resources[running_resources["Availability Zone"].isin(ri_df_az_scoped["scope_availability_zone"].unique())]
+            .groupby(["Resource Type", "SKU", "Region", "OS", "Redundancy", "Availability Zone"])
+            .size()
+            .reset_index(name="running_count")
+        )
+        az_supply = ri_df_az_scoped.rename(columns={
+            "scope_sku":                "SKU",
+            "scope_resource_type":      "Resource Type",
+            "scope_region":             "Region",
+            "scope_os":                 "OS",
+            "scope_redundancy":         "Redundancy",
+            "scope_availability_zone":  "Availability Zone",
+        })[[
+            "commitment_id", "SKU", "Resource Type", "Region", "OS", "Redundancy", "Availability Zone",
+            "reserved_qty", "hourly_usd_commitment", "term", "expiry_date",
+        ]].copy()
+        az_supply["Redundancy"] = az_supply["Redundancy"].fillna("N/A")
+        az_supply = _resolve_missing_resource_type(az_supply, inventory_df)
+
+        az_merged = az_demand.merge(
+            az_supply, on=["Resource Type", "SKU", "Region", "OS", "Redundancy", "Availability Zone"], how="outer"
+        ).fillna(0)
+        az_merged["running_count"] = az_merged["running_count"].astype(int)
+        az_merged["reserved_qty"]  = az_merged["reserved_qty"].astype(int)
+        az_merged["gap"]           = (az_merged["running_count"] - az_merged["reserved_qty"]).clip(lower=0)
+        az_merged["excess"]        = (az_merged["reserved_qty"] - az_merged["running_count"]).clip(lower=0)
+        az_merged = _finalize_coverage_layer(az_merged)
+        merged = pd.concat([merged, az_merged], ignore_index=True)
 
     # Orphaned RI drain: Stopped VMs/resources whose profile is covered by an RI
     stopped = inventory_df[inventory_df["Resource State"] == "Stopped (deallocated)"]
@@ -887,8 +1011,9 @@ def reservation_analysis(
             ]
             if not match.empty and "scope_subscription_id" in match.columns:
                 match = match[match.apply(
-                    lambda ri: _scope_matches_resource(ri.get("scope_subscription_id"), ri.get("scope_resource_group_id"),
-                                                         sres.get("Subscription"), sres.get("Resource Group")),
+                    lambda ri: _azure_scope_matches(ri.get("scope_subscription_id"), ri.get("scope_resource_group_id"),
+                                                     sres.get("Subscription"), sres.get("Resource Group"))
+                               and _aws_scope_matches(ri.get("scope_availability_zone"), sres.get("Availability Zone")),
                     axis=1,
                 )]
             if not match.empty:
