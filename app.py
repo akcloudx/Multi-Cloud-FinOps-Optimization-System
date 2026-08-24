@@ -1212,6 +1212,31 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
         normalized = disp[col].apply(_norm)
         return normalized, sorted(normalized.unique().tolist())
 
+    def _value_checklist(all_opts, key, defaults):
+        # A checkbox list, not st.multiselect - real bug seen live (video,
+        # 2026-08-24): a multiselect's dropdown is a floating overlay tall
+        # enough to cover the Apply/Cancel buttons beneath it (worse the
+        # more options a field has, e.g. Resource Type), and it doesn't
+        # close after a click, so there was no way to see what got picked
+        # without dismissing the dropdown first. Checkboxes render inline -
+        # nothing to overlap, and checked/unchecked state is visible
+        # immediately. Bounded height keeps a long list (SKU, Resource
+        # Type) from growing the popover indefinitely; the search box
+        # narrows it further, same as Azure's own "Search values" field.
+        query = st.text_input("Search values", key=f"{key}_search", placeholder="🔍 Search values", label_visibility="collapsed")
+        shown = [o for o in all_opts if query.strip().lower() in o.lower()] if query.strip() else all_opts
+        with st.container(height=220):
+            if not shown:
+                st.caption("No matches.")
+            for o in shown:
+                st.checkbox(o, value=(o in defaults), key=f"{key}_cb_{o}")
+        # Reads final selection from session_state across ALL options, not
+        # just the currently search-filtered ones - a checkbox's state
+        # persists in session_state even while hidden by the search text,
+        # so narrowing then widening the search can't silently drop a
+        # selection made before the search was typed.
+        return [o for o in all_opts if st.session_state.get(f"{key}_cb_{o}", o in defaults)]
+
     filters_state_key = f"{key_prefix}_active_filters_state"
     if filters_state_key not in st.session_state:
         st.session_state[filters_state_key] = []
@@ -1257,32 +1282,28 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
                         st.session_state[pending_key] = available[0]
                     new_label = st.selectbox("Filter", available, key=pending_key)
                     _, opts = _filter_opts(new_label)
-                    with st.form(key=f"{key_prefix}_addfilterform_{new_label}", border=False):
-                        new_values = st.multiselect("Value", opts, key=f"{key_prefix}_addfilter_values_{new_label}")
-                        fc1, fc2 = st.columns(2)
-                        apply_clicked = fc1.form_submit_button("Apply", type="primary", width="stretch")
-                        fc2.form_submit_button("Cancel", width="stretch")
-                        if apply_clicked:
-                            active_filters.append({"label": new_label, "values": new_values})
-                            st.rerun()
+                    new_values = _value_checklist(opts, key=f"{key_prefix}_addfilter_{new_label}", defaults=[])
+                    fc1, fc2 = st.columns(2)
+                    if fc1.button("Apply", type="primary", width="stretch", key=f"{key_prefix}_addfilter_apply_{new_label}"):
+                        active_filters.append({"label": new_label, "values": new_values})
+                        st.rerun()
+                    if fc2.button("Cancel", width="stretch", key=f"{key_prefix}_addfilter_cancel_{new_label}"):
+                        st.rerun()
 
         for i, f in enumerate(list(active_filters)):
             with filter_row[i + 1]:
                 summary = "all" if not f["values"] else (f["values"][0] if len(f["values"]) == 1 else f"{len(f['values'])} selected")
                 with st.popover(f"{f['label']} equals {summary}"):
                     _, opts = _filter_opts(f["label"])
-                    with st.form(key=f"{key_prefix}_editfilterform_{i}", border=False):
-                        st.markdown("**Filter results**")
-                        new_values = st.multiselect("Value", opts, default=f["values"], key=f"{key_prefix}_editfilter_values_{i}")
-                        fc1, fc2 = st.columns(2)
-                        apply_clicked = fc1.form_submit_button("Apply", type="primary", width="stretch")
-                        remove_clicked = fc2.form_submit_button("Remove filter", width="stretch")
-                        if apply_clicked:
-                            f["values"] = new_values
-                            st.rerun()
-                        if remove_clicked:
-                            active_filters.pop(i)
-                            st.rerun()
+                    st.markdown("**Filter results**")
+                    new_values = _value_checklist(opts, key=f"{key_prefix}_editfilter_{i}", defaults=f["values"])
+                    fc1, fc2 = st.columns(2)
+                    if fc1.button("Apply", type="primary", width="stretch", key=f"{key_prefix}_editfilter_apply_{i}"):
+                        f["values"] = new_values
+                        st.rerun()
+                    if fc2.button("Remove filter", width="stretch", key=f"{key_prefix}_editfilter_remove_{i}"):
+                        active_filters.pop(i)
+                        st.rerun()
 
         settings_row = st.columns(2)
         with settings_row[0]:
