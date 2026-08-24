@@ -34,6 +34,7 @@ for site_pkg in glob.glob("/home/site/wwwroot/antenv/lib/python*/site-packages")
     if os.path.exists(site_pkg) and site_pkg not in sys.path:
         sys.path.insert(0, site_pkg)
 
+import json
 import streamlit as st
 import pandas as pd
 
@@ -146,7 +147,7 @@ from analysis.engine import (
 from analysis.sp_eligibility import check_sp_eligibility
 from analysis.ri_eligibility import check_eligibility
 from pricing.sku_mapping import resolve_sku_query
-from analysis.focus_mapping import to_focus_view, FOCUS_COLUMN_DEFINITIONS, FOCUS_SPEC_VERSION, FOCUS_SPEC_URL
+from analysis.focus_mapping import to_focus_view, map_service_category, FOCUS_COLUMN_DEFINITIONS, FOCUS_SPEC_VERSION, FOCUS_SPEC_URL
 from analysis.maturity import run_maturity_assessment
 from analysis.commitment_economics import (
     savings_plan_term_comparison, ri_gap_pricing, combined_monthly_savings, TERM_LABELS,
@@ -1167,11 +1168,51 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
             extra_col, extra_label = col, label
             break
 
-    filter_specs = [("Resource Type", "Resource Type"), ("Status", "Status"), ("Region", "Region"),
-                     ("Subscription", "Subscription"), ("OS", "OS"), ("SKU", "SKU")]
+    normal_filter_specs = [("Resource Type", "Resource Type"), ("Status", "Status"), ("Region", "Region"),
+                            ("Subscription", "Subscription"), ("OS", "OS"), ("SKU", "SKU")]
     if extra_col:
-        filter_specs.append((extra_col, extra_label))
-    label_to_col = {label: col for col, label in filter_specs}
+        normal_filter_specs.append((extra_col, extra_label))
+
+    # FOCUS View swaps the table to real FOCUS v1.2 column names - the
+    # filter picker needs to offer fields matching what's actually on
+    # screen there instead of the app's internal names, or what you can
+    # filter by stops corresponding to what you can see (real report,
+    # 2026-08-24: toggling FOCUS View on left "Add filter" still showing
+    # internal names like Status/OS with nothing in the FOCUS table to
+    # match them against). ChargeCategory/PricingUnit are excluded as
+    # candidates since they're always a single constant value in this
+    # per-resource view - not a real choice, same reason OS/Resource Group
+    # are excluded from the normal list when they don't apply.
+    disp["Service Category"] = disp["Resource Type"].apply(map_service_category)
+    focus_filter_specs = [
+        ("Resource Type", "ServiceName"), ("Service Category", "ServiceCategory"),
+        ("SKU", "ResourceType"), ("Region", "RegionId"), ("Subscription", "BillingAccountId"),
+    ]
+
+    # Restore FOCUS View from the URL on a fresh session/refresh, before its
+    # own session_state key exists - Azure Portal keeps a filtered/FOCUS-ed
+    # view alive across a refresh; this app's toggle otherwise lives only in
+    # st.session_state, which a hard reload wipes (confirmed live - every
+    # refresh logs the whole session out too, not just this toggle).
+    # Treated as a simple shared preference like currency, not scoped to
+    # key_prefix - landing back in FOCUS View regardless of which provider
+    # you refreshed on is the more coherent behavior, not a leak.
+    focus_widget_key = f"{key_prefix}_focus"
+    if focus_widget_key not in st.session_state:
+        try:
+            _raw_focus = st.query_params.get("inv_focus")
+            if _raw_focus is not None:
+                st.session_state[focus_widget_key] = (_raw_focus == "1")
+        except Exception:
+            pass
+
+    focus_view_now = st.session_state.get(f"{key_prefix}_focus", False)
+    filter_specs = focus_filter_specs if focus_view_now else normal_filter_specs
+    # Spans BOTH vocabularies, not just the currently-active one: a filter
+    # created before a FOCUS View toggle must keep resolving by its real
+    # underlying column afterward, rather than KeyError-ing because its
+    # label isn't among the set currently being offered for NEW filters.
+    label_to_col = {label: col for col, label in normal_filter_specs + focus_filter_specs}
 
     # NaN-safe normalization (real bug caught 2026-08-23: a blank/NaN cell
     # in a sparse column like Resource Group used to silently disappear
@@ -1196,6 +1237,14 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
     _other_scope_col = ({"Resource Group", "Availability Zone"} - {extra_col}) if extra_col else set()
     default_cols = [c for c in all_cols if c != "Resource ID" and c not in _other_scope_col]
 
+    # Same show/hide picker for FOCUS View's own column set (real report,
+    # 2026-08-24: Columns was simply unavailable there) - FOCUS_COLUMN_
+    # DEFINITIONS already lists every real FOCUS v1.2 column name in order,
+    # so this doesn't need actual row data to know what's pickable, only
+    # to render the table once filtering has happened later.
+    focus_all_cols = [c for c, _, _ in FOCUS_COLUMN_DEFINITIONS]
+    focus_default_cols = focus_all_cols
+
     # Real "Filter results" panel, rebuilt properly this round (2026-08-23)
     # after direct confirmation - on BOTH local and the deployed app, ruling
     # out a stale-deployment explanation - that the previous inline-
@@ -1212,7 +1261,7 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
         normalized = disp[col].apply(_norm)
         return normalized, sorted(normalized.unique().tolist())
 
-    def _value_checklist(all_opts, key, defaults):
+    def _value_checklist(all_opts, key, defaults, search_label="Search values"):
         # A checkbox list, not st.multiselect - real bug seen live (video,
         # 2026-08-24): a multiselect's dropdown is a floating overlay tall
         # enough to cover the Apply/Cancel buttons beneath it (worse the
@@ -1223,13 +1272,42 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
         # immediately. Bounded height keeps a long list (SKU, Resource
         # Type) from growing the popover indefinitely; the search box
         # narrows it further, same as Azure's own "Search values" field.
-        query = st.text_input("Search values", key=f"{key}_search", placeholder="🔍 Search values", label_visibility="collapsed")
+        query = st.text_input(search_label, key=f"{key}_search", placeholder=f"🔍 {search_label}", label_visibility="collapsed")
         shown = [o for o in all_opts if query.strip().lower() in o.lower()] if query.strip() else all_opts
+
+        # Excel's real AutoFilter "(Select All)" - a single master checkbox,
+        # not two separate buttons (2026-08-24, matched against the video
+        # the user shared of it): checked means every currently-shown item
+        # is selected, unchecked means none are, and toggling it drives
+        # every visible item at once. st.checkbox has no indeterminate
+        # visual state, so a genuinely partial selection just reads as
+        # unchecked here - the closest honest approximation Streamlit's
+        # widget allows, not a full tri-state like Excel's filled square.
+        # Wired with on_change (not a plain button) so the master and the
+        # individual boxes below stay in sync with each other either way:
+        # toggling the master cascades to every visible item, AND toggling
+        # any individual item recomputes whether the master should still
+        # show as checked - a bare button could only do the first half.
+        master_key = f"{key}_master"
+
+        def _sync_master():
+            st.session_state[master_key] = bool(shown) and all(
+                st.session_state.get(f"{key}_cb_{o}", o in defaults) for o in shown
+            )
+
+        def _apply_master():
+            new_val = st.session_state[master_key]
+            for o in shown:
+                st.session_state[f"{key}_cb_{o}"] = new_val
+
+        _sync_master()
+        st.checkbox("(Select All)", key=master_key, on_change=_apply_master)
+
         with st.container(height=220):
             if not shown:
                 st.caption("No matches.")
             for o in shown:
-                st.checkbox(o, value=(o in defaults), key=f"{key}_cb_{o}")
+                st.checkbox(o, value=(o in defaults), key=f"{key}_cb_{o}", on_change=_sync_master)
         # Reads final selection from session_state across ALL options, not
         # just the currently search-filtered ones - a checkbox's state
         # persists in session_state even while hidden by the search text,
@@ -1239,7 +1317,23 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
 
     filters_state_key = f"{key_prefix}_active_filters_state"
     if filters_state_key not in st.session_state:
-        st.session_state[filters_state_key] = []
+        # Restore from the URL on a fresh session/refresh - Azure Portal
+        # keeps filters alive across a refresh via the URL; this app's
+        # filters otherwise live only in st.session_state, which a hard
+        # reload wipes (confirmed live - every refresh logs the whole
+        # session out too, not just filters). Guarded by key_prefix so a
+        # URL saved while viewing a different provider/mode combo can't
+        # leak its filters into this one.
+        _restored_filters = []
+        try:
+            _raw_filters = st.query_params.get("inv_filters")
+            if _raw_filters:
+                _filters_payload = json.loads(_raw_filters)
+                if _filters_payload.get("kp") == key_prefix:
+                    _restored_filters = _filters_payload.get("f", [])
+        except Exception:
+            _restored_filters = []
+        st.session_state[filters_state_key] = _restored_filters
     active_filters = st.session_state[filters_state_key]
 
     # st.columns() reserves each column's full ratio-of-row width even when
@@ -1271,12 +1365,132 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
         def _bump(gen_key):
             st.session_state[gen_key] = st.session_state.get(gen_key, 0) + 1
 
+        # Bumping the popover's own key closes it (a fresh instance mounts
+        # closed), but that alone left a _value_checklist's search box
+        # showing leftover text after reopening - session_state.pop() on the
+        # search key didn't reliably reset the already-mounted input's
+        # on-screen value (reported live: searched "region" in Columns,
+        # applied, reopened, "region" was still sitting in the box even
+        # though the list itself was no longer filtered by it). The robust
+        # fix is the same trick as the popover itself: fold the generation
+        # counter into the checklist's own key too, so a bump forces a
+        # genuinely new search box and checkboxes, not a state-side reset of
+        # an old one.
+
+        # FOCUS View and Columns render FIRST, before Add filter/the filter
+        # pills below - not just a layout choice. Streamlit prunes a
+        # widget's session_state if that widget hasn't been instantiated
+        # yet in the CURRENT script run at the moment st.rerun() fires -
+        # and Apply/Cancel/✕ on a filter all call st.rerun() explicitly.
+        # With the FOCUS toggle defined AFTER those buttons in the code (as
+        # it originally was), clicking any of them silently reset FOCUS
+        # View back off mid-session, even though the toggle still visually
+        # showed on - confirmed live (video, 2026-08-24: filtering while in
+        # FOCUS View made the table quietly fall back to internal column
+        # names) and isolated with a debug probe: Columns' "Done" button,
+        # defined AFTER the toggle, never reset it; every filter button,
+        # defined BEFORE it, always did. Registering the toggle earlier
+        # than anything that can call st.rerun() is the actual fix.
+        settings_row = st.columns(2)
+        with settings_row[0]:
+            focus_view = st.toggle("🔭 FOCUS View", key=f"{key_prefix}_focus", help="Show columns mapped to the FinOps Open Cost & Usage Specification (FOCUS) instead of the app's internal display names.")
+        # Re-asserted every rerun, not just once - same "provider"/"currency"
+        # fix pattern used in the sidebar (see the comment there): a query
+        # param only survives Streamlit's sidebar nav links if it's
+        # rewritten on every single script run.
+        try:
+            st.query_params["inv_focus"] = "1" if focus_view else "0"
+        except Exception:
+            pass
+
+        # Columns adapts to whichever mode is active - same picker, pointed
+        # at FOCUS's own column set when FOCUS View is on and the app's
+        # internal columns otherwise. Every key below is suffixed with
+        # mode_tag so each mode remembers its OWN picks (and its own search
+        # text/popover-open state) independently - switching the toggle
+        # shouldn't carry one mode's leftover UI state into the other.
+        mode_tag = "focus" if focus_view else "normal"
+        active_all_cols = focus_all_cols if focus_view else all_cols
+        active_default_cols = focus_default_cols if focus_view else default_cols
+        chosen_cols = active_default_cols
+        with settings_row[1]:
+            # Unlike the filter checklists below, a column checkbox IS the
+            # live, persisted setting (no separate Apply/commit step) - so
+            # unlike `defaults=[]`/`defaults=f["values"]` there, the default
+            # fed into each new generation has to be "whatever was picked
+            # last", tracked here explicitly, or bumping the generation to
+            # fix the search-box staleness would also reset every checkbox
+            # back to the hardcoded app default and silently discard the
+            # user's choice.
+            chosen_key = f"{key_prefix}_chosen_columns_{mode_tag}"
+            if chosen_key not in st.session_state:
+                # Restore from the URL on a fresh session/refresh, guarded
+                # by key_prefix so a URL saved while viewing a different
+                # provider can't leak its column choice into this one -
+                # same reasoning and pattern as the filters restore below.
+                _restored_cols = None
+                try:
+                    _raw_cols = st.query_params.get("inv_cols")
+                    if _raw_cols:
+                        _cols_payload = json.loads(_raw_cols)
+                        if _cols_payload.get("kp") == key_prefix:
+                            _restored_cols = _cols_payload.get(mode_tag)
+                except Exception:
+                    _restored_cols = None
+                st.session_state[chosen_key] = _restored_cols if _restored_cols else active_default_cols
+            cols_gen_key = f"{key_prefix}_colspopover_gen_{mode_tag}"
+            cols_gen = st.session_state.get(cols_gen_key, 0)
+            # A separate counter just for the checklist, decoupled from the
+            # popover's own key: only "Done" needs to force a fresh search
+            # box (the one thing session_state.pop() didn't reliably clear
+            # visually) - it shouldn't also happen on every checkbox click,
+            # which is otherwise a plain in-place update under the same,
+            # unchanged key.
+            cols_list_gen_key = f"{key_prefix}_colslist_gen_{mode_tag}"
+            cols_list_gen = st.session_state.get(cols_list_gen_key, 0)
+            with st.popover("⚙️ Columns", key=f"{key_prefix}_colspopover_{mode_tag}_{cols_gen}"):
+                # Same single-column scrollable checklist (+ search + Select
+                # all/Unselect all) as the filter Value picker below, reusing
+                # _value_checklist directly rather than the earlier
+                # 3-column checkbox grid - requested explicitly so Columns
+                # matches the pattern already built for filters, not a
+                # second, different one.
+                st.caption("Columns to display")
+                picked = _value_checklist(active_all_cols, key=f"{key_prefix}_colspicker_{mode_tag}_{cols_list_gen}", defaults=st.session_state[chosen_key], search_label="Search columns")
+                st.session_state[chosen_key] = picked
+                # Column visibility already applies live - this button
+                # exists only to close the popover once picking is done,
+                # same "Done" affordance requested for filters. Bumps both
+                # counters: the popover's own (to close it) and the
+                # checklist's (so the search box is blank next open too).
+                if st.button("Done", width="stretch", key=f"{key_prefix}_cols_done_{mode_tag}"):
+                    _bump(cols_gen_key)
+                    _bump(cols_list_gen_key)
+                    st.rerun()
+        if picked:
+            chosen_cols = picked
+
+        # Re-asserted every rerun, not just once - same reasoning as
+        # "provider"/"currency"/inv_focus above. Reads BOTH modes' current
+        # session_state (not just the active one) so switching FOCUS View
+        # mid-session and refreshing later doesn't lose whichever mode
+        # isn't currently showing.
+        try:
+            st.query_params["inv_cols"] = json.dumps({
+                "kp": key_prefix,
+                "normal": st.session_state.get(f"{key_prefix}_chosen_columns_normal"),
+                "focus": st.session_state.get(f"{key_prefix}_chosen_columns_focus"),
+            })
+        except Exception:
+            pass
+
         n_pills = len(active_filters)
         filter_row = st.columns(n_pills + 1)
         with filter_row[0]:
             add_gen_key = f"{key_prefix}_addfilter_gen"
-            with st.popover("➕ Add filter", key=f"{key_prefix}_addfilter_popover_{st.session_state.get(add_gen_key, 0)}"):
-                available = [l for l in label_to_col if l not in [f["label"] for f in active_filters]]
+            add_gen = st.session_state.get(add_gen_key, 0)
+            with st.popover("➕ Add filter", key=f"{key_prefix}_addfilter_popover_{add_gen}"):
+                available = [l for _, l in filter_specs if l not in [f["label"] for f in active_filters]]
                 if not available:
                     st.caption("All filterable fields are already added.")
                 else:
@@ -1294,7 +1508,10 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
                         st.session_state[pending_key] = available[0]
                     new_label = st.selectbox("Filter", available, key=pending_key)
                     _, opts = _filter_opts(new_label)
-                    new_values = _value_checklist(opts, key=f"{key_prefix}_addfilter_{new_label}", defaults=[])
+                    # defaults=[] is correct every generation - "Add filter"
+                    # always starts a value picker from scratch, so there's
+                    # no prior selection that needs carrying into a fresh key.
+                    new_values = _value_checklist(opts, key=f"{key_prefix}_addfilter_{new_label}_{add_gen}", defaults=[])
                     fc1, fc2 = st.columns(2)
                     if fc1.button("Apply", type="primary", width="stretch", key=f"{key_prefix}_addfilter_apply_{new_label}"):
                         active_filters.append({"label": new_label, "values": new_values})
@@ -1308,10 +1525,26 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
             with filter_row[i + 1]:
                 summary = "all" if not f["values"] else (f["values"][0] if len(f["values"]) == 1 else f"{len(f['values'])} selected")
                 edit_gen_key = f"{key_prefix}_editfilter_gen_{i}"
-                with st.popover(f"{f['label']} equals {summary}", key=f"{key_prefix}_editfilter_popover_{i}_{st.session_state.get(edit_gen_key, 0)}"):
+                edit_gen = st.session_state.get(edit_gen_key, 0)
+                # A direct X next to the pill, not just the Remove filter
+                # button buried inside the popover - removing a filter
+                # shouldn't require opening its panel first. The CSS on the
+                # filter_bar container (shrink columns to content) already
+                # applies to this nested row too, so the pill + X still pack
+                # tightly together rather than spreading across the row.
+                pill_col, x_col = st.columns(2)
+                with x_col:
+                    if st.button("✕", key=f"{key_prefix}_editfilter_x_{i}", help=f"Remove {f['label']} filter"):
+                        active_filters.pop(i)
+                        st.rerun()
+                with pill_col, st.popover(f"{f['label']} equals {summary}", key=f"{key_prefix}_editfilter_popover_{i}_{edit_gen}"):
                     _, opts = _filter_opts(f["label"])
                     st.markdown("**Filter results**")
-                    new_values = _value_checklist(opts, key=f"{key_prefix}_editfilter_{i}", defaults=f["values"])
+                    # defaults=f["values"] is always the current committed
+                    # value, so a fresh generation's checkboxes rebuild
+                    # correctly seeded from it every time - no separate
+                    # reset step needed.
+                    new_values = _value_checklist(opts, key=f"{key_prefix}_editfilter_{i}_{edit_gen}", defaults=f["values"])
                     fc1, fc2 = st.columns(2)
                     if fc1.button("Apply", type="primary", width="stretch", key=f"{key_prefix}_editfilter_apply_{i}"):
                         f["values"] = new_values
@@ -1321,36 +1554,18 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
                         active_filters.pop(i)
                         st.rerun()
 
-        settings_row = st.columns(2)
-        with settings_row[0]:
-            focus_view = st.toggle("🔭 FOCUS View", key=f"{key_prefix}_focus", help="Show columns mapped to the FinOps Open Cost & Usage Specification (FOCUS) instead of the app's internal display names.")
-        chosen_cols = default_cols
-        if not focus_view:
-            # No effect on FOCUS view (that mode uses its own fixed column
-            # set below), so skip rendering a picker that would do nothing.
-            with settings_row[1]:
-                cols_gen_key = f"{key_prefix}_colspopover_gen"
-                with st.popover("⚙️ Columns", key=f"{key_prefix}_colspopover_{st.session_state.get(cols_gen_key, 0)}"):
-                    # Real checkbox list (2026-08-23 feedback: a multiselect's
-                    # chip wall was exactly the clutter problem being fixed,
-                    # just moved behind a button) - matches Azure Portal's own
-                    # "Edit columns" panel, a checkbox per field, not chips.
-                    st.caption("Columns to display")
-                    cb_cols = st.columns(3)
-                    picked = []
-                    for i, c in enumerate(all_cols):
-                        with cb_cols[i % 3]:
-                            if st.checkbox(c, value=(c in default_cols), key=f"{key_prefix}_colcb_{c}"):
-                                picked.append(c)
-                    # Column visibility already applies live (no separate
-                    # commit step, unlike the filter values above) - this
-                    # button exists only to close the popover once picking
-                    # is done, same "Done" affordance requested for filters.
-                    if st.button("Done", width="stretch", key=f"{key_prefix}_cols_done"):
-                        _bump(cols_gen_key)
-                        st.rerun()
-            if picked:
-                chosen_cols = picked
+    # Re-asserted every rerun, not just once - same "provider"/"currency"
+    # fix pattern used in the sidebar (see the comment there): a query
+    # param only survives Streamlit's sidebar nav links if it's rewritten
+    # on every single script run, not just at the moment it was first set.
+    # Placed here (after every Apply/Remove button above, which halts the
+    # run via st.rerun() the instant one fires) so active_filters is always
+    # its final, settled value for this render before being written out -
+    # never a stale mid-click snapshot.
+    try:
+        st.query_params["inv_filters"] = json.dumps({"kp": key_prefix, "f": active_filters})
+    except Exception:
+        pass
 
     mask = pd.Series(True, index=disp.index)
     for f in active_filters:
@@ -1366,7 +1581,7 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
             st.caption(f"Columns below follow the [FinOps Open Cost & Usage Specification]({FOCUS_SPEC_URL}) v{FOCUS_SPEC_VERSION}. Each is mapped from this app's internal schema as noted.")
             st.dataframe(
                 pd.DataFrame(FOCUS_COLUMN_DEFINITIONS, columns=["FOCUS Column", "Spec Definition", "How it's populated here"]),
-                hide_index=True, width="stretch",
+                hide_index=True, width="stretch", key=f"{key_prefix}_focus_reference_table",
             )
             st.caption(
                 "**Note on BilledCost/EffectiveCost:** BilledCost is shown equal to ListCost at this per-resource "
@@ -1374,8 +1589,18 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
                 "but that math applies against pooled commitments across many resources - see the **RI Coverage** "
                 "and **Savings Plan Analysis** tabs for the actual $ savings, rather than a guessed per-resource split."
             )
+        # Explicit, mode-specific key on both this and the normal-mode
+        # table below - without one, st.dataframe's identity is inferred
+        # from its position among the OTHER elements in this container,
+        # and FOCUS mode renders a different number of elements above it
+        # (the reference-table expander) than normal mode does. That
+        # mismatch left a stale table on screen instead of replacing it
+        # when toggling FOCUS View while a filter was active - a real,
+        # persistent (not one-frame-flicker) bug caught on video,
+        # 2026-08-24: both the old internal-schema table AND the new FOCUS
+        # table stayed visible stacked on top of each other.
         st.dataframe(
-            focus_df, hide_index=True, width="stretch",
+            focus_df[chosen_cols], hide_index=True, width="stretch", key=f"{key_prefix}_table_focus",
             column_config={
                 "ListUnitPrice": st.column_config.NumberColumn("ListUnitPrice", format="$%.4f"),
                 "ListCost":      st.column_config.NumberColumn("ListCost", format="$%.2f"),
@@ -1396,7 +1621,7 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
             show_df[_blank_col] = show_df[_blank_col].apply(lambda v: str(v).strip() if pd.notna(v) and str(v).strip() else "N/A")
 
     st.dataframe(
-        show_df, hide_index=True, width="stretch",
+        show_df, hide_index=True, width="stretch", key=f"{key_prefix}_table_normal",
         column_config={
             "Resource Type":          st.column_config.TextColumn("Service"),
             "Status":                 st.column_config.TextColumn("Power State"),

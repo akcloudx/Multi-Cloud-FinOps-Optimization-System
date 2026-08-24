@@ -98,7 +98,7 @@ FOCUS_COLUMN_DEFINITIONS = [
 ]
 
 
-def _map_service_category(resource_type: str) -> str:
+def map_service_category(resource_type: str) -> str:
     return _SERVICE_CATEGORY_MAP.get(resource_type, "Other")
 
 
@@ -127,7 +127,7 @@ def to_focus_view(df: pd.DataFrame, provider: str) -> pd.DataFrame:
         "ResourceName": df["Resource Name"],
         "ResourceType": df["SKU"],
         "ServiceName": df["Resource Type"],
-        "ServiceCategory": df["Resource Type"].apply(_map_service_category),
+        "ServiceCategory": df["Resource Type"].apply(map_service_category),
         "RegionId": df["Region"],
         "PricingUnit": "Hour",
         "ListUnitPrice": df["PAYG Hourly Cost USD"],
