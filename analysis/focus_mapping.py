@@ -51,6 +51,39 @@ _SERVICE_CATEGORY_MAP = {
     # categorized by coincidence before the rename, so this entry keeps it
     # that way rather than silently regressing it to "Other").
     "Amazon EC2": "Compute",
+    # The rest of the AWS resource types below were the actual pre-existing
+    # gap the comment above referred to - real live report, 2026-08-25:
+    # 20 of 21 AWS resource types fell through to "Other" (only EC2 was
+    # ever mapped), which the app's ServiceCategory FOCUS filter made far
+    # more visible/interactive than the FOCUS table's own column already
+    # made it. Categorized against AWS's own service groupings and this
+    # file's existing Azure precedents (e.g. Redis/DocumentDB-equivalents
+    # -> Databases, Synapse/Redshift-style warehouses -> Analytics).
+    "AWS Fargate": "Compute",
+    "AWS DMS Replication Instance": "Databases",
+    "AWS DMS Serverless": "Databases",
+    "AWS RDS MySQL": "Databases",
+    "AWS RDS PostgreSQL": "Databases",
+    "Amazon Aurora": "Databases",
+    "Amazon DocumentDB": "Databases",
+    "Amazon DocumentDB Serverless": "Databases",
+    "Amazon DynamoDB": "Databases",
+    "Amazon ElastiCache for Redis": "Databases",
+    "Amazon ElastiCache for Valkey": "Databases",
+    "Amazon Keyspaces": "Databases",
+    "Amazon MemoryDB": "Databases",
+    "Amazon Neptune": "Databases",
+    "Amazon Neptune Serverless": "Databases",
+    "Amazon Neptune Analytics": "Analytics",
+    "Amazon OpenSearch": "Analytics",
+    "Amazon Redshift": "Analytics",
+    # FOCUS v1.2's real controlled vocabulary includes "AI and Machine
+    # Learning" as its own category - force-fitting SageMaker into
+    # Compute/Analytics instead would be less accurate than just adding it,
+    # given this map already documents it only uses the categories this
+    # app's tracked types actually need.
+    "Amazon SageMaker Endpoint": "AI and Machine Learning",
+    "Amazon SageMaker Notebook Instance": "AI and Machine Learning",
     "App Service": "Web and Mobile",
     "Azure SQL Database": "Databases",
     "Azure SQL Managed Instance": "Databases",
