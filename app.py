@@ -1260,10 +1260,22 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
             unsafe_allow_html=True,
         )
 
+        # Streamlit popovers don't close themselves after an in-popover
+        # button click - they stay open until the user clicks elsewhere,
+        # which read as "I have to click Cancel/away every time" (real
+        # feedback, 2026-08-24). There's no direct "close" call, but a
+        # popover re-mounts closed when its own `key` changes, so each
+        # dismissing action (Apply/Cancel/Done) bumps a small per-popover
+        # counter used in that popover's key before rerunning - the next
+        # render is a fresh, closed instance.
+        def _bump(gen_key):
+            st.session_state[gen_key] = st.session_state.get(gen_key, 0) + 1
+
         n_pills = len(active_filters)
         filter_row = st.columns(n_pills + 1)
         with filter_row[0]:
-            with st.popover("➕ Add filter"):
+            add_gen_key = f"{key_prefix}_addfilter_gen"
+            with st.popover("➕ Add filter", key=f"{key_prefix}_addfilter_popover_{st.session_state.get(add_gen_key, 0)}"):
                 available = [l for l in label_to_col if l not in [f["label"] for f in active_filters]]
                 if not available:
                     st.caption("All filterable fields are already added.")
@@ -1286,20 +1298,24 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
                     fc1, fc2 = st.columns(2)
                     if fc1.button("Apply", type="primary", width="stretch", key=f"{key_prefix}_addfilter_apply_{new_label}"):
                         active_filters.append({"label": new_label, "values": new_values})
+                        _bump(add_gen_key)
                         st.rerun()
                     if fc2.button("Cancel", width="stretch", key=f"{key_prefix}_addfilter_cancel_{new_label}"):
+                        _bump(add_gen_key)
                         st.rerun()
 
         for i, f in enumerate(list(active_filters)):
             with filter_row[i + 1]:
                 summary = "all" if not f["values"] else (f["values"][0] if len(f["values"]) == 1 else f"{len(f['values'])} selected")
-                with st.popover(f"{f['label']} equals {summary}"):
+                edit_gen_key = f"{key_prefix}_editfilter_gen_{i}"
+                with st.popover(f"{f['label']} equals {summary}", key=f"{key_prefix}_editfilter_popover_{i}_{st.session_state.get(edit_gen_key, 0)}"):
                     _, opts = _filter_opts(f["label"])
                     st.markdown("**Filter results**")
                     new_values = _value_checklist(opts, key=f"{key_prefix}_editfilter_{i}", defaults=f["values"])
                     fc1, fc2 = st.columns(2)
                     if fc1.button("Apply", type="primary", width="stretch", key=f"{key_prefix}_editfilter_apply_{i}"):
                         f["values"] = new_values
+                        _bump(edit_gen_key)
                         st.rerun()
                     if fc2.button("Remove filter", width="stretch", key=f"{key_prefix}_editfilter_remove_{i}"):
                         active_filters.pop(i)
@@ -1313,7 +1329,8 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
             # No effect on FOCUS view (that mode uses its own fixed column
             # set below), so skip rendering a picker that would do nothing.
             with settings_row[1]:
-                with st.popover("⚙️ Columns"):
+                cols_gen_key = f"{key_prefix}_colspopover_gen"
+                with st.popover("⚙️ Columns", key=f"{key_prefix}_colspopover_{st.session_state.get(cols_gen_key, 0)}"):
                     # Real checkbox list (2026-08-23 feedback: a multiselect's
                     # chip wall was exactly the clutter problem being fixed,
                     # just moved behind a button) - matches Azure Portal's own
@@ -1325,6 +1342,13 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
                         with cb_cols[i % 3]:
                             if st.checkbox(c, value=(c in default_cols), key=f"{key_prefix}_colcb_{c}"):
                                 picked.append(c)
+                    # Column visibility already applies live (no separate
+                    # commit step, unlike the filter values above) - this
+                    # button exists only to close the popover once picking
+                    # is done, same "Done" affordance requested for filters.
+                    if st.button("Done", width="stretch", key=f"{key_prefix}_cols_done"):
+                        _bump(cols_gen_key)
+                        st.rerun()
             if picked:
                 chosen_cols = picked
 
