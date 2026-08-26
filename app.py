@@ -1093,13 +1093,17 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
     # ("Stopped (deallocated)" for Azure, "Stopped" for AWS - see
     # azure_conn/connector.py's/aws/connector.py's _map_power_state /
     # _map_ec2_state), so this is a direct passthrough, not a re-derivation.
+    #
+    # No separate "Orphaned" column here (tried it, explicitly not wanted -
+    # 2026-08-26: it read as clutter on the Inventory tab, and a stopped
+    # resource's power state alone is enough signal at this level). The
+    # underlying detection (Is Orphaned, analysis/engine.py's
+    # compute_orphaned_status) is untouched and still real - it's just
+    # consumed where it actually belongs: the RI Coverage/orphan-drain
+    # math (run_waterfall, reservation_analysis) and the Maturity
+    # Assessment's detection-capability score, not as an extra Inventory
+    # tab field.
     disp["Status"] = disp["Resource State"]
-    # A separate Yes/No column for the orphaned signal instead, so it stays
-    # independently filterable/visible without overwriting Status - now
-    # backed by real detection (see analysis/engine.py's
-    # compute_orphaned_status), not the static demo-only flag this used to
-    # be silently stuck as for every live tenant.
-    disp["Orphaned"] = disp["Is Orphaned"].map({True: "Yes", False: "No"})
     # A Stopped (deallocated) resource genuinely isn't accruing compute
     # charges - real gap caught live 2026-08-21: this table was showing
     # the full running rate for stopped resources regardless of state,
@@ -1161,9 +1165,11 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
     #     FILTER, not per-type tabs, so this is closer to the reference,
     #     not just a workaround.
     #   - Status/Region/Subscription/OS/SKU: bounded, categorical, real
-    #     filter candidates. Status uses the derived 3-way Running/Stopped/
-    #     Orphaned column (not the raw 2-way Resource State) - "Orphaned"
-    #     is a genuine FinOps waste signal worth isolating on its own.
+    #     filter candidates. Status is the real power state (Running /
+    #     Stopped (deallocated) / Stopped) - Orphaned is tracked
+    #     separately (Is Orphaned) but deliberately not surfaced as its
+    #     own Inventory tab column/filter, see the comment on disp["Status"]
+    #     above for why.
     #   - Resource Group (Azure) / Availability Zone (AWS): whichever
     #     actually has real data in this section, decided from the DATA
     #     itself (not a provider global) so it's correct even if a live
@@ -1180,8 +1186,8 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
             extra_col, extra_label = col, label
             break
 
-    normal_filter_specs = [("Resource Type", "Resource Type"), ("Status", "Status"), ("Orphaned", "Orphaned"),
-                            ("Region", "Region"), ("Subscription", "Subscription"), ("OS", "OS"), ("SKU", "SKU")]
+    normal_filter_specs = [("Resource Type", "Resource Type"), ("Status", "Status"), ("Region", "Region"),
+                            ("Subscription", "Subscription"), ("OS", "OS"), ("SKU", "SKU")]
     if extra_col:
         normal_filter_specs.append((extra_col, extra_label))
 
@@ -1239,7 +1245,7 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
         return str(v).strip() if pd.notna(v) and str(v).strip() else "(Not set)"
 
     all_cols = ["Resource ID", "Resource Name", "Subscription", "Resource Type",
-                "Status", "Orphaned", "Region", "Resource Group", "Availability Zone", "OS", "SKU",
+                "Status", "Region", "Resource Group", "Availability Zone", "OS", "SKU",
                 "Est. Monthly PAYG Cost", "PAYG Cost/hr"]
     all_cols = [c for c in all_cols if c in disp.columns]
     # Resource ID hidden by default (toggle back on if needed); of Resource
@@ -1347,6 +1353,15 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
             _restored_filters = []
         st.session_state[filters_state_key] = _restored_filters
     active_filters = st.session_state[filters_state_key]
+    # Self-healing prune: drops any filter whose label no longer exists in
+    # this app's vocabulary (e.g. "Orphaned", removed as its own filter
+    # 2026-08-26) - without this, a filter persisted in the URL or
+    # session_state from before that change would KeyError the first time
+    # _filter_opts() tried to resolve it, instead of just quietly no longer
+    # applying.
+    _valid_labels = set(label_to_col.keys())
+    if any(f["label"] not in _valid_labels for f in active_filters):
+        active_filters[:] = [f for f in active_filters if f["label"] in _valid_labels]
 
     # st.columns() reserves each column's full ratio-of-row width even when
     # its content (a small popover button) is far narrower, which is what
