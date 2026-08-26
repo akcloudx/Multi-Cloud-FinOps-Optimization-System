@@ -65,33 +65,33 @@ AWS_COMPUTE_INVENTORY = [
      "resource_type": "Amazon EC2", "resource_state": "Running",
      "region": "us-east-1", "os": "Linux", "sku": "c5.xlarge",
      "payg_hourly_usd": 0.170, "avg_daily_running_hours": 24,
-     "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
+     "subscription": "acc-aws-11223344", "availability_zone": "us-east-1a", "provider": "AWS", "is_orphaned": False},
 
     {"resource_id": "i-0123456789abcdef3", "resource_name": "aws-prod-app-02",
      "resource_type": "Amazon EC2", "resource_state": "Running",
      "region": "us-east-1", "os": "Linux", "sku": "c5.xlarge",
      "payg_hourly_usd": 0.170, "avg_daily_running_hours": 24,
-     "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
+     "subscription": "acc-aws-11223344", "availability_zone": "us-east-1b", "provider": "AWS", "is_orphaned": False},
 
     # Dev EC2 — 10 hrs/day → Compute Savings Plan candidates
     {"resource_id": "i-0dev123456789abc0", "resource_name": "aws-dev-sandbox-01",
      "resource_type": "Amazon EC2", "resource_state": "Running",
      "region": "us-east-1", "os": "Linux", "sku": "t3.medium",
      "payg_hourly_usd": 0.0416, "avg_daily_running_hours": 10,
-     "subscription": "acc-aws-99887766", "provider": "AWS", "is_orphaned": False},
+     "subscription": "acc-aws-99887766", "availability_zone": "us-east-1a", "provider": "AWS", "is_orphaned": False},
 
     {"resource_id": "i-0dev123456789abc1", "resource_name": "aws-dev-test-01",
      "resource_type": "Amazon EC2", "resource_state": "Running",
      "region": "us-west-2", "os": "Linux", "sku": "t3.micro",
      "payg_hourly_usd": 0.0104, "avg_daily_running_hours": 10,
-     "subscription": "acc-aws-99887766", "provider": "AWS", "is_orphaned": False},
+     "subscription": "acc-aws-99887766", "availability_zone": "us-west-2a", "provider": "AWS", "is_orphaned": False},
 
     # Stopped EC2 — Orphaned (RI active but instance is stopped)
     {"resource_id": "i-0legacy123456789a", "resource_name": "aws-legacy-batch",
-     "resource_type": "Amazon EC2", "resource_state": "Stopped (deallocated)",
+     "resource_type": "Amazon EC2", "resource_state": "Stopped",
      "region": "us-east-1", "os": "Linux", "sku": "c5.xlarge",
      "payg_hourly_usd": 0.170, "avg_daily_running_hours": 0,
-     "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": True},
+     "subscription": "acc-aws-11223344", "availability_zone": "us-east-1a", "provider": "AWS", "is_orphaned": True},
 ]
 
 
@@ -104,7 +104,7 @@ AWS_DATABASE_INVENTORY = [
      "resource_state": "Running",
      "region": "us-east-1", "os": "N/A", "sku": "db.m5.large",
      "payg_hourly_usd": 0.176, "avg_daily_running_hours": 24,
-     "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
+     "subscription": "acc-aws-11223344", "availability_zone": "us-east-1a", "provider": "AWS", "is_orphaned": False},
 
     # AWS RDS MySQL — db.t3.medium
     {"resource_id": "rds-prod-mysql-01", "resource_name": "prod-cms-rds",
@@ -112,7 +112,7 @@ AWS_DATABASE_INVENTORY = [
      "resource_state": "Running",
      "region": "us-east-1", "os": "N/A", "sku": "db.t3.medium",
      "payg_hourly_usd": 0.068, "avg_daily_running_hours": 24,
-     "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
+     "subscription": "acc-aws-11223344", "availability_zone": "us-east-1b", "provider": "AWS", "is_orphaned": False},
 
     # Amazon Aurora PostgreSQL — db.r5.large
     {"resource_id": "aurora-prod-cluster-01", "resource_name": "prod-aurora-cluster",
@@ -120,7 +120,7 @@ AWS_DATABASE_INVENTORY = [
      "resource_state": "Running",
      "region": "us-east-1", "os": "N/A", "sku": "db.r5.large",
      "payg_hourly_usd": 0.290, "avg_daily_running_hours": 24,
-     "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
+     "subscription": "acc-aws-11223344", "availability_zone": "us-east-1a", "provider": "AWS", "is_orphaned": False},
 
     # Amazon DynamoDB — Provisioned Throughput
     {"resource_id": "dynamo-prod-table-01", "resource_name": "prod-user-sessions",
@@ -128,7 +128,7 @@ AWS_DATABASE_INVENTORY = [
      "resource_state": "Running",
      "region": "us-east-1", "os": "N/A", "sku": "100_WCU_100_RCU",
      "payg_hourly_usd": 0.065, "avg_daily_running_hours": 24,
-     "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
+     "subscription": "acc-aws-11223344", "availability_zone": "us-east-1a", "provider": "AWS", "is_orphaned": False},
 
     # Amazon DocumentDB — db.r5.large. Added 2026-08-22 alongside the live
     # fetch (aws/connector.py) built for it - real IAM action confirmed as
@@ -139,7 +139,7 @@ AWS_DATABASE_INVENTORY = [
      "resource_state": "Running",
      "region": "us-east-1", "os": "N/A", "sku": "db.r5.large",
      "payg_hourly_usd": 0.277, "avg_daily_running_hours": 24,
-     "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
+     "subscription": "acc-aws-11223344", "availability_zone": "us-east-1a", "provider": "AWS", "is_orphaned": False},
 
     # Amazon DocumentDB Serverless - a genuinely different resource type
     # from provisioned DocumentDB above (billed per-DCU-hour, not by a
@@ -155,7 +155,7 @@ AWS_DATABASE_INVENTORY = [
      "resource_state": "Running",
      "region": "us-east-1", "os": "N/A", "sku": "2DCU-min",
      "payg_hourly_usd": 0.1644, "avg_daily_running_hours": 24,
-     "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
+     "subscription": "acc-aws-11223344", "availability_zone": "us-east-1b", "provider": "AWS", "is_orphaned": False},
 
     # Amazon Neptune — db.r5.large. Same real-IAM/no-RI facts as DocumentDB above.
     {"resource_id": "neptune-prod-cluster-01", "resource_name": "prod-graph-neptune",
@@ -163,7 +163,7 @@ AWS_DATABASE_INVENTORY = [
      "resource_state": "Running",
      "region": "us-east-1", "os": "N/A", "sku": "db.r5.large",
      "payg_hourly_usd": 0.348, "avg_daily_running_hours": 24,
-     "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
+     "subscription": "acc-aws-11223344", "availability_zone": "us-east-1a", "provider": "AWS", "is_orphaned": False},
 
     # Amazon Neptune Serverless - a genuinely different resource type from
     # provisioned Neptune above (billed per-NCU-hour, not by a named
@@ -180,7 +180,7 @@ AWS_DATABASE_INVENTORY = [
      "resource_state": "Running",
      "region": "us-east-1", "os": "N/A", "sku": "2NCU-min",
      "payg_hourly_usd": 0.3216, "avg_daily_running_hours": 24,
-     "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
+     "subscription": "acc-aws-11223344", "availability_zone": "us-east-1b", "provider": "AWS", "is_orphaned": False},
 
     # Amazon Neptune Analytics - a genuinely SEPARATE product from Neptune
     # (Database)/Neptune Serverless above (own boto3 client "neptune-graph",
@@ -198,7 +198,7 @@ AWS_DATABASE_INVENTORY = [
      "resource_state": "Running",
      "region": "us-east-1", "os": "N/A", "sku": "128m-NCU",
      "payg_hourly_usd": 3.84, "avg_daily_running_hours": 24,
-     "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
+     "subscription": "acc-aws-11223344", "availability_zone": "us-east-1a", "provider": "AWS", "is_orphaned": False},
 
     # AWS DMS Replication Instance — dms.t3.medium. Unlike DocumentDB/Neptune,
     # DMS genuinely has its own Single-AZ/Multi-AZ price split (confirmed
@@ -211,7 +211,7 @@ AWS_DATABASE_INVENTORY = [
      "resource_state": "Running",
      "region": "us-east-1", "os": "N/A", "sku": "dms.t3.medium",
      "payg_hourly_usd": 0.0745, "avg_daily_running_hours": 24,
-     "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
+     "subscription": "acc-aws-11223344", "availability_zone": "us-east-1a", "provider": "AWS", "is_orphaned": False},
 
     # AWS DMS Serverless - a genuinely different resource ("ReplicationConfig",
     # not "ReplicationInstance" above). Added 2026-08-23 alongside its new
@@ -226,7 +226,7 @@ AWS_DATABASE_INVENTORY = [
      "resource_state": "Running",
      "region": "us-east-1", "os": "N/A", "sku": "2DCU-min",
      "payg_hourly_usd": 0.1639, "avg_daily_running_hours": 24,
-     "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
+     "subscription": "acc-aws-11223344", "availability_zone": "us-east-1b", "provider": "AWS", "is_orphaned": False},
 
     # Amazon Keyspaces — provisioned-throughput table (mirrors DynamoDB's
     # own SKU convention: this app's live fetch encodes provisioned RCU/WCU
@@ -240,7 +240,7 @@ AWS_DATABASE_INVENTORY = [
      "resource_state": "Running",
      "region": "us-east-1", "os": "N/A", "sku": "50RCU-50WCU",
      "payg_hourly_usd": 0.039, "avg_daily_running_hours": 24,
-     "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
+     "subscription": "acc-aws-11223344", "availability_zone": "us-east-1a", "provider": "AWS", "is_orphaned": False},
 ]
 
 # ── AWS Fargate (Compute Savings Plan eligible, not RI-eligible) ──────────────
@@ -258,7 +258,7 @@ AWS_FARGATE_INVENTORY = [
      "resource_state": "Running",
      "region": "us-east-1", "os": "Linux", "sku": "0.5vCPU-1GB",
      "payg_hourly_usd": 0.024685, "avg_daily_running_hours": 24,
-     "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
+     "subscription": "acc-aws-11223344", "availability_zone": "us-east-1a", "provider": "AWS", "is_orphaned": False},
 ]
 
 
@@ -277,7 +277,7 @@ AWS_RI_ONLY_INVENTORY = [
      "resource_state": "Running",
      "region": "us-east-1", "os": "N/A", "sku": "cache.m5.large",
      "payg_hourly_usd": 0.156, "avg_daily_running_hours": 24,
-     "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
+     "subscription": "acc-aws-11223344", "availability_zone": "us-east-1a", "provider": "AWS", "is_orphaned": False},
 
     # Amazon ElastiCache for Valkey Node — cache.m5.large. Added 2026-08-23
     # specifically so the demo Database SP pool has a real Valkey resource
@@ -288,7 +288,7 @@ AWS_RI_ONLY_INVENTORY = [
      "resource_state": "Running",
      "region": "us-east-1", "os": "N/A", "sku": "cache.m5.large",
      "payg_hourly_usd": 0.1248, "avg_daily_running_hours": 24,   # real On-Demand Valkey rate for cache.m5.large in us-east-1, confirmed against real downloaded price list data - genuinely cheaper than Redis at the identical instance type.
-     "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
+     "subscription": "acc-aws-11223344", "availability_zone": "us-east-1b", "provider": "AWS", "is_orphaned": False},
 
     # Amazon MemoryDB for Redis Node — db.r6g.large. New service, added
     # 2026-08-23 - real Reserved Nodes product (confirmed via boto3), no
@@ -303,7 +303,7 @@ AWS_RI_ONLY_INVENTORY = [
      "resource_state": "Running",
      "region": "us-east-1", "os": "N/A", "sku": "db.r6g.large",
      "payg_hourly_usd": 0.309, "avg_daily_running_hours": 24,   # real On-Demand Redis rate for db.r6g.large in us-east-1, confirmed against real downloaded AmazonMemoryDB price list data.
-     "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
+     "subscription": "acc-aws-11223344", "availability_zone": "us-east-1a", "provider": "AWS", "is_orphaned": False},
 
     # Amazon Redshift Cluster — dc2.large
     {"resource_id": "redshift-prod-cluster-01", "resource_name": "prod-dw-redshift",
@@ -311,7 +311,7 @@ AWS_RI_ONLY_INVENTORY = [
      "resource_state": "Running",
      "region": "us-east-1", "os": "N/A", "sku": "dc2.large",
      "payg_hourly_usd": 0.250, "avg_daily_running_hours": 24,
-     "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
+     "subscription": "acc-aws-11223344", "availability_zone": "us-east-1a", "provider": "AWS", "is_orphaned": False},
 
     # Amazon OpenSearch — r5.large.search
     {"resource_id": "opensearch-prod-01", "resource_name": "prod-logs-opensearch",
@@ -319,7 +319,7 @@ AWS_RI_ONLY_INVENTORY = [
      "resource_state": "Running",
      "region": "us-east-1", "os": "N/A", "sku": "r5.large.search",
      "payg_hourly_usd": 0.186, "avg_daily_running_hours": 24,   # exact real AmazonES On-Demand rate for r5.large.search in us-east-1, confirmed 2026-08-22 - was a rounded $0.180 estimate before OpenSearch's live pricing lookup existed.
-     "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
+     "subscription": "acc-aws-11223344", "availability_zone": "us-east-1a", "provider": "AWS", "is_orphaned": False},
 ]
 
 # ── Amazon SageMaker AI (SageMaker Savings Plan eligible, not RI-eligible) ────
@@ -354,7 +354,7 @@ AWS_SAGEMAKER_INVENTORY = [
      "resource_state": "Running",
      "region": "us-east-1", "os": "N/A", "sku": "ml.m5.xlarge",
      "payg_hourly_usd": 0.23, "avg_daily_running_hours": 24,
-     "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
+     "subscription": "acc-aws-11223344", "availability_zone": "us-east-1a", "provider": "AWS", "is_orphaned": False},
 
     # Notebook Instance - ml.t3.medium. Same real-price-list-confirmed rate
     # (component="Notebook", distinct from the "Studio-Notebook" component
@@ -365,7 +365,7 @@ AWS_SAGEMAKER_INVENTORY = [
      "resource_state": "Running",
      "region": "us-east-1", "os": "N/A", "sku": "ml.t3.medium",
      "payg_hourly_usd": 0.05, "avg_daily_running_hours": 24,
-     "subscription": "acc-aws-11223344", "provider": "AWS", "is_orphaned": False},
+     "subscription": "acc-aws-11223344", "availability_zone": "us-east-1b", "provider": "AWS", "is_orphaned": False},
 ]
 
 AWS_INVENTORY = AWS_COMPUTE_INVENTORY + AWS_DATABASE_INVENTORY + AWS_RI_ONLY_INVENTORY + AWS_FARGATE_INVENTORY + AWS_SAGEMAKER_INVENTORY

@@ -142,6 +142,7 @@ from analysis.engine import (
     savings_plan_analysis,
     reservation_analysis,
     generate_recommendations,
+    compute_orphaned_status,
     DEFAULT_SAFETY_BUFFER,
 )
 from analysis.sp_eligibility import check_sp_eligibility
@@ -1083,11 +1084,22 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
         return
 
     disp = df.copy()
-    disp["Status"] = disp.apply(
-        lambda r: "Orphaned" if r["Is Orphaned"]
-        else ("Running" if r["Resource State"] == "Running" else "Stopped"),
-        axis=1,
-    )
+    # The real power state, not overridden with "Orphaned" text - real
+    # feedback, 2026-08-25: Orphaned and "is it running" are two different
+    # facts (a resource's power state vs. whether an active Reservation/
+    # Savings Plan is going to waste because of it), and conflating them
+    # here lost the actual power state entirely. Resource State is already
+    # exactly "Running" or the provider's own real term for stopped
+    # ("Stopped (deallocated)" for Azure, "Stopped" for AWS - see
+    # azure_conn/connector.py's/aws/connector.py's _map_power_state /
+    # _map_ec2_state), so this is a direct passthrough, not a re-derivation.
+    disp["Status"] = disp["Resource State"]
+    # A separate Yes/No column for the orphaned signal instead, so it stays
+    # independently filterable/visible without overwriting Status - now
+    # backed by real detection (see analysis/engine.py's
+    # compute_orphaned_status), not the static demo-only flag this used to
+    # be silently stuck as for every live tenant.
+    disp["Orphaned"] = disp["Is Orphaned"].map({True: "Yes", False: "No"})
     # A Stopped (deallocated) resource genuinely isn't accruing compute
     # charges - real gap caught live 2026-08-21: this table was showing
     # the full running rate for stopped resources regardless of state,
@@ -1168,8 +1180,8 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
             extra_col, extra_label = col, label
             break
 
-    normal_filter_specs = [("Resource Type", "Resource Type"), ("Status", "Status"), ("Region", "Region"),
-                            ("Subscription", "Subscription"), ("OS", "OS"), ("SKU", "SKU")]
+    normal_filter_specs = [("Resource Type", "Resource Type"), ("Status", "Status"), ("Orphaned", "Orphaned"),
+                            ("Region", "Region"), ("Subscription", "Subscription"), ("OS", "OS"), ("SKU", "SKU")]
     if extra_col:
         normal_filter_specs.append((extra_col, extra_label))
 
@@ -1227,7 +1239,7 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
         return str(v).strip() if pd.notna(v) and str(v).strip() else "(Not set)"
 
     all_cols = ["Resource ID", "Resource Name", "Subscription", "Resource Type",
-                "Status", "Region", "Resource Group", "Availability Zone", "OS", "SKU",
+                "Status", "Orphaned", "Region", "Resource Group", "Availability Zone", "OS", "SKU",
                 "Est. Monthly PAYG Cost", "PAYG Cost/hr"]
     all_cols = [c for c in all_cols if c in disp.columns]
     # Resource ID hidden by default (toggle back on if needed); of Resource
@@ -2515,6 +2527,13 @@ def load_benchmark_data(days: int, buffer: float, provider: str, sp_eligible_typ
     db_sp_df         = get_database_savings_plans(provider=provider, mode="demo")
     sagemaker_sp_df  = get_sagemaker_savings_plans(provider=provider, mode="demo")
     ri_df            = get_existing_reservations(provider=provider, mode="demo")
+    # Overwrites whatever "Is Orphaned" the DB row carried with the real,
+    # computed value - see compute_orphaned_status's docstring for why this
+    # can't stay a static stored flag. Must happen before run_waterfall/
+    # reservation_analysis below, since both already read this column for
+    # their own orphan-drain calculations.
+    if not inv_raw.empty:
+        inv_raw["Is Orphaned"] = compute_orphaned_status(inv_raw, ri_df)
     wf            = run_waterfall(inv_raw, ri_df, sp_df, simulate_days=days)
     sp_res        = savings_plan_analysis(inv_raw, sp_df, safety_buffer=buffer, eligible_types=list(sp_eligible_types))
     ri_res        = reservation_analysis(inv_raw, ri_df)
@@ -2533,6 +2552,14 @@ def load_live_data(provider: str, tenant_id: int, days: int, buffer: float, sp_e
     db_sp_df         = get_database_savings_plans(provider=provider, mode="live", tenant_id=tenant_id)
     sagemaker_sp_df  = get_sagemaker_savings_plans(provider=provider, mode="live", tenant_id=tenant_id)
     ri_df            = get_existing_reservations(provider=provider, mode="live", tenant_id=tenant_id)
+    # Same real, computed "Is Orphaned" as load_benchmark_data - this is the
+    # actual fix for live tenants: every live connector previously hardcoded
+    # this column to False, so a genuinely orphaned resource never surfaced
+    # anywhere in the app. Must happen before run_waterfall/
+    # reservation_analysis below, since both already read this column for
+    # their own orphan-drain calculations.
+    if not inv_raw.empty:
+        inv_raw["Is Orphaned"] = compute_orphaned_status(inv_raw, ri_df)
     wf            = run_waterfall(inv_raw, ri_df, sp_df, simulate_days=days)
     sp_res        = savings_plan_analysis(inv_raw, sp_df, safety_buffer=buffer, eligible_types=list(sp_eligible_types))
     ri_res        = reservation_analysis(inv_raw, ri_df)

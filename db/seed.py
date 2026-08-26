@@ -82,7 +82,7 @@ COMPUTE_INVENTORY = [
      "resource_type": "Compute", "resource_state": "Running",
      "region": "australiaeast", "os": "Windows", "sku": "Standard_E4s_v5",
      "payg_hourly_usd": 0.486, "avg_daily_running_hours": 24,
-     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+     "subscription": "sub-prod-001", "resource_group": "rg-prod", "provider": "Azure", "is_orphaned": False},
 
     # Dev/test box — runs full-time like the prod VMs (no reduced-hours
     # modeling), so it counts in the same steady-state Compute SP pool. It
@@ -93,7 +93,7 @@ COMPUTE_INVENTORY = [
      "resource_type": "Compute", "resource_state": "Running",
      "region": "australiaeast", "os": "Windows", "sku": "Standard_B2ms",
      "payg_hourly_usd": 0.106, "avg_daily_running_hours": 24,
-     "subscription": "sub-dev-002", "provider": "Azure", "is_orphaned": False},
+     "subscription": "sub-dev-002", "resource_group": "rg-dev", "provider": "Azure", "is_orphaned": False},
 
     # Stopped — Orphaned (RI still active but VM is deallocated). Kept on
     # D4ds_v4 (one generation behind the Prod-01's D4ds_v5) rather than moving
@@ -106,7 +106,7 @@ COMPUTE_INVENTORY = [
      "resource_type": "Compute", "resource_state": "Stopped (deallocated)",
      "region": "australiaeast", "os": "Windows", "sku": "Standard_D4ds_v4",
      "payg_hourly_usd": 0.284, "avg_daily_running_hours": 0,
-     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": True},
+     "subscription": "sub-prod-001", "resource_group": "rg-prod", "provider": "Azure", "is_orphaned": True},
 ]
 
 
@@ -124,7 +124,7 @@ DATABASE_INVENTORY = [
      "region": "australiaeast", "os": "N/A", "sku": "GP_Gen5_4",
      "redundancy": "Locally Redundant",
      "payg_hourly_usd": 0.724552, "avg_daily_running_hours": 24,   # real live-fetched rate, refreshed 2026-08 (was stale at 0.526)
-     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+     "subscription": "sub-prod-001", "resource_group": "rg-prod-data", "provider": "Azure", "is_orphaned": False},
 
     # Azure SQL Database — same SKU/region as SQLDB-Prod-01 above, but Zone
     # Redundant - deliberately included to prove the redundancy-aware
@@ -138,7 +138,7 @@ DATABASE_INVENTORY = [
      "region": "australiaeast", "os": "N/A", "sku": "GP_Gen5_4",
      "redundancy": "Zone Redundant",
      "payg_hourly_usd": 0.434732, "avg_daily_running_hours": 24,
-     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+     "subscription": "sub-prod-001", "resource_group": "rg-prod-data", "provider": "Azure", "is_orphaned": False},
 
     # Azure SQL Database — Hyperscale, Premium-series, 4 vCores, WITH 1 High
     # Availability secondary replica. Exercises NEW billing dimension
@@ -158,7 +158,7 @@ DATABASE_INVENTORY = [
      "region": "eastus", "os": "N/A", "sku": "HS_Premium_4",
      "redundancy": "Locally Redundant", "ha_replica_count": 1,
      "payg_hourly_usd": 0.73064, "avg_daily_running_hours": 24,
-     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+     "subscription": "sub-prod-001", "resource_group": "rg-prod-data", "provider": "Azure", "is_orphaned": False},
 
     # Azure SQL Managed Instance — General Purpose, 8 vCores
     # RI covers: compute costs only. Not: software license, networking, storage.
@@ -168,7 +168,7 @@ DATABASE_INVENTORY = [
      "region": "australiaeast", "os": "N/A", "sku": "GP_Gen5_8",
      "redundancy": "Locally Redundant",
      "payg_hourly_usd": 1.449112, "avg_daily_running_hours": 24,   # real live-fetched rate, refreshed 2026-08 (was stale at 1.008)
-     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+     "subscription": "sub-prod-001", "resource_group": "rg-prod-data", "provider": "Azure", "is_orphaned": False},
 
     # Azure SQL Managed Instance — Business Critical, Premium-series, 4 vCores,
     # Zone Redundant. Exercises NEW hardware-generation support (2026-08):
@@ -183,7 +183,7 @@ DATABASE_INVENTORY = [
      "region": "eastus2", "os": "N/A", "sku": "BC_Premium_4",
      "redundancy": "Zone Redundant",
      "payg_hourly_usd": 0.844, "avg_daily_running_hours": 24,
-     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+     "subscription": "sub-prod-001", "resource_group": "rg-prod-data", "provider": "Azure", "is_orphaned": False},
 
     # Azure SQL Managed Instance Pool — General Purpose, Standard-series
     # (Gen5), 8 vCores. A genuinely different resource from standalone
@@ -200,7 +200,7 @@ DATABASE_INVENTORY = [
      "resource_state": "Running",
      "region": "australiaeast", "os": "N/A", "sku": "GP_Gen5_8",
      "payg_hourly_usd": 1.449112, "avg_daily_running_hours": 24,
-     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+     "subscription": "sub-prod-001", "resource_group": "rg-prod-data", "provider": "Azure", "is_orphaned": False},
 
     # Azure DocumentDB — vCore-based Cosmos DB for MongoDB, General Purpose,
     # M30 tier, single shard. NOT RI-eligible (no Reservation product for
@@ -216,7 +216,7 @@ DATABASE_INVENTORY = [
      "resource_state": "Running",
      "region": "australiaeast", "os": "N/A", "sku": "M30_1",
      "payg_hourly_usd": 0.3429, "avg_daily_running_hours": 24,
-     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+     "subscription": "sub-prod-001", "resource_group": "rg-prod-data", "provider": "Azure", "is_orphaned": False},
 
     # Azure Database for PostgreSQL — General Purpose, 4 vCores
     # RI covers: compute costs only. Not: software, networking, storage.
@@ -225,7 +225,7 @@ DATABASE_INVENTORY = [
      "resource_state": "Running",
      "region": "australiaeast", "os": "N/A", "sku": "GeneralPurpose_Standard_D4ds_v5",
      "payg_hourly_usd": 0.488, "avg_daily_running_hours": 24,
-     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+     "subscription": "sub-prod-001", "resource_group": "rg-prod-data", "provider": "Azure", "is_orphaned": False},
 
     # Azure Database for MySQL — General Purpose, 4 vCores
     # RI covers: compute costs only. Not: software, networking, storage.
@@ -234,7 +234,7 @@ DATABASE_INVENTORY = [
      "resource_state": "Running",
      "region": "australiasoutheast", "os": "N/A", "sku": "GeneralPurpose_Standard_D4ds_v5",
      "payg_hourly_usd": 0.47, "avg_daily_running_hours": 24,
-     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+     "subscription": "sub-prod-001", "resource_group": "rg-prod-data", "provider": "Azure", "is_orphaned": False},
 
     # Azure Cosmos DB — Standard Provisioned, General Purpose, 400 RU/s
     # RI covers: throughput only. Not: storage, networking.
@@ -243,7 +243,7 @@ DATABASE_INVENTORY = [
      "resource_state": "Running",
      "region": "australiaeast", "os": "N/A", "sku": "Standard_GeneralPurpose_400",
      "payg_hourly_usd": 0.0368, "avg_daily_running_hours": 24,
-     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+     "subscription": "sub-prod-001", "resource_group": "rg-prod-data", "provider": "Azure", "is_orphaned": False},
 
     # Azure SQL Database Serverless — Dev/Test
     {"resource_id": "SQLDB-Dev-01", "resource_name": "dev-test-serverless-sqldb",
@@ -260,7 +260,7 @@ DATABASE_INVENTORY = [
      # confirmed real, not a bug: the tradeoff only pays off if the resource
      # actually pauses during idle time, which this app doesn't model.
      "payg_hourly_usd": 2.483568, "avg_daily_running_hours": 10,
-     "subscription": "sub-dev-002", "provider": "Azure", "is_orphaned": False},
+     "subscription": "sub-dev-002", "resource_group": "rg-dev", "provider": "Azure", "is_orphaned": False},
 
     # Azure SQL Elastic Pool — General Purpose, Gen5, 8 vCores shared across
     # multiple databases. Billed as its own resource (the pool, not the
@@ -274,7 +274,7 @@ DATABASE_INVENTORY = [
      "region": "australiaeast", "os": "N/A", "sku": "GP_Gen5_8",
      "redundancy": "Locally Redundant",
      "payg_hourly_usd": 1.449104, "avg_daily_running_hours": 24,
-     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+     "subscription": "sub-prod-001", "resource_group": "rg-prod-data", "provider": "Azure", "is_orphaned": False},
 
     # Azure Database Migration Service — General Purpose, 4 vCores, real
     # ARM sku.tier/sku.capacity convention stored as "{Tier}_{N}vCores" (see
@@ -286,7 +286,7 @@ DATABASE_INVENTORY = [
      "resource_state": "Running",
      "region": "australiaeast", "os": "N/A", "sku": "GeneralPurpose_4vCores",
      "payg_hourly_usd": 0.2025, "avg_daily_running_hours": 10,
-     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+     "subscription": "sub-prod-001", "resource_group": "rg-prod-data", "provider": "Azure", "is_orphaned": False},
 ]
 
 
@@ -302,7 +302,7 @@ RI_ONLY_INVENTORY = [
      "resource_state": "Running",
      "region": "australiaeast", "os": "N/A", "sku": "LRS_Hot_100TB",
      "payg_hourly_usd": 0.188, "avg_daily_running_hours": 24,
-     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+     "subscription": "sub-prod-001", "resource_group": "rg-prod-storage", "provider": "Azure", "is_orphaned": False},
 
     # Azure Files — Reserved Capacity
     # RI covers: storage capacity for Azure Files.
@@ -312,7 +312,7 @@ RI_ONLY_INVENTORY = [
      "resource_state": "Running",
      "region": "australiaeast", "os": "N/A", "sku": "LRS_Hot_10TB",
      "payg_hourly_usd": 0.055, "avg_daily_running_hours": 24,
-     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+     "subscription": "sub-prod-001", "resource_group": "rg-prod-storage", "provider": "Azure", "is_orphaned": False},
 
     # Azure Cache for Redis — Reserved Capacity
     # RI covers: compute costs only. NOT: networking or storage.
@@ -321,7 +321,7 @@ RI_ONLY_INVENTORY = [
      "resource_state": "Running",
      "region": "australiaeast", "os": "N/A", "sku": "C2_Standard",
      "payg_hourly_usd": 0.088, "avg_daily_running_hours": 24,
-     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+     "subscription": "sub-prod-001", "resource_group": "rg-prod-data", "provider": "Azure", "is_orphaned": False},
 
     # Azure Cache for Redis Enterprise (aka "Azure Managed Redis") — a
     # genuinely separate ARM resource type/SKU taxonomy from classic Redis
@@ -331,7 +331,7 @@ RI_ONLY_INVENTORY = [
      "resource_state": "Running",
      "region": "australiaeast", "os": "N/A", "sku": "Balanced_B10",
      "payg_hourly_usd": 0.391, "avg_daily_running_hours": 24,
-     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+     "subscription": "sub-prod-001", "resource_group": "rg-prod-data", "provider": "Azure", "is_orphaned": False},
 
     # Azure Synapse Analytics — Reserved Capacity (cDWU)
     # RI covers: cDWU usage only. NOT: storage or networking.
@@ -340,7 +340,7 @@ RI_ONLY_INVENTORY = [
      "resource_state": "Running",
      "region": "australiaeast", "os": "N/A", "sku": "DW500c",
      "payg_hourly_usd": 8.45, "avg_daily_running_hours": 10,   # real live-fetched rate, refreshed 2026-08 (was stale at 6.000)
-     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+     "subscription": "sub-prod-001", "resource_group": "rg-prod-analytics", "provider": "Azure", "is_orphaned": False},
 
     # Azure Databricks — Reserved Capacity (DBU)
     # RI covers: DBU usage only. NOT: compute, storage, networking.
@@ -349,7 +349,7 @@ RI_ONLY_INVENTORY = [
      "resource_state": "Running",
      "region": "australiaeast", "os": "N/A", "sku": "Premium_DBU",
      "payg_hourly_usd": 0.550, "avg_daily_running_hours": 10,
-     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+     "subscription": "sub-prod-001", "resource_group": "rg-prod-analytics", "provider": "Azure", "is_orphaned": False},
 
     # Microsoft Fabric — Reserved Capacity (per-CU), F64 (64 Capacity Units).
     # RI covers: capacity usage only. NOT: storage or networking. Not
@@ -360,7 +360,7 @@ RI_ONLY_INVENTORY = [
      "resource_state": "Running",
      "region": "australiaeast", "os": "N/A", "sku": "F64",
      "payg_hourly_usd": 13.44, "avg_daily_running_hours": 24,
-     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+     "subscription": "sub-prod-001", "resource_group": "rg-prod-analytics", "provider": "Azure", "is_orphaned": False},
 
     # Azure Data Explorer — Reserved Capacity (Engine Cluster Markup fee only).
     # RI covers: the markup fee only, NOT cluster compute/storage/networking
@@ -373,7 +373,7 @@ RI_ONLY_INVENTORY = [
      "resource_state": "Running",
      "region": "australiaeast", "os": "N/A", "sku": "Standard_Standard_L16as_v3_2",
      "payg_hourly_usd": 0.22, "avg_daily_running_hours": 24,
-     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+     "subscription": "sub-prod-001", "resource_group": "rg-prod-analytics", "provider": "Azure", "is_orphaned": False},
 
     # Azure-SSIS Integration Runtime — Consumption only, no RI or SP of any
     # kind exists for this (see analysis/ri_eligibility.py + sp_eligibility.py).
@@ -385,7 +385,7 @@ RI_ONLY_INVENTORY = [
      "resource_state": "Running",
      "region": "australiaeast", "os": "N/A", "sku": "Standard_D8_v3_1_Standard_BasePrice",
      "payg_hourly_usd": 1.158, "avg_daily_running_hours": 24,
-     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+     "subscription": "sub-prod-001", "resource_group": "rg-prod-analytics", "provider": "Azure", "is_orphaned": False},
 
     # Azure Disk Storage — Reserved (P30+ Premium SSD only)
     # RI covers: Premium SSD P30 and larger. NOT: other disk types or smaller sizes.
@@ -400,7 +400,7 @@ RI_ONLY_INVENTORY = [
      "resource_state": "Running",
      "region": "australiaeast", "os": "N/A", "sku": "Premium_LRS_1024",
      "payg_hourly_usd": 0.1852, "avg_daily_running_hours": 24,
-     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+     "subscription": "sub-prod-001", "resource_group": "rg-prod-storage", "provider": "Azure", "is_orphaned": False},
 
     # A second, smaller Premium disk below the P30 Reservation threshold -
     # demonstrates the real "PAYG-priceable but not RI-eligible" split this
@@ -413,7 +413,7 @@ RI_ONLY_INVENTORY = [
      "resource_state": "Running",
      "region": "australiaeast", "os": "N/A", "sku": "Premium_LRS_256",
      "payg_hourly_usd": 0.0521, "avg_daily_running_hours": 24,
-     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+     "subscription": "sub-prod-001", "resource_group": "rg-prod-storage", "provider": "Azure", "is_orphaned": False},
 ]
 
 
@@ -431,7 +431,7 @@ COMPUTE_SP_INVENTORY = [
      "resource_state": "Running",
      "region": "australiaeast", "os": "N/A", "sku": "DSv3-Type3",
      "payg_hourly_usd": 5.280, "avg_daily_running_hours": 24,
-     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+     "subscription": "sub-prod-001", "resource_group": "rg-prod", "provider": "Azure", "is_orphaned": False},
 
     # Azure Container Instances — 2 vCPU / 4 GB group, live-verified australiaeast
     # rates: Standard vCPU $0.0486/hr x 2 + Standard Memory $0.00532/GB-hr x 4
@@ -440,7 +440,7 @@ COMPUTE_SP_INVENTORY = [
      "resource_state": "Running",
      "region": "australiaeast", "os": "N/A", "sku": "vCPU2_Mem4",
      "payg_hourly_usd": 0.118, "avg_daily_running_hours": 24,
-     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+     "subscription": "sub-prod-001", "resource_group": "rg-prod", "provider": "Azure", "is_orphaned": False},
 
     # Azure Container Apps — Dedicated profile, D4 node (4 vCPU / 16 GiB,
     # General Purpose), live-verified australiaeast rates: Dedicated vCPU
@@ -458,7 +458,7 @@ COMPUTE_SP_INVENTORY = [
      "resource_state": "Running",
      "region": "australiaeast", "os": "N/A", "sku": "Dedicated_D4",
      "payg_hourly_usd": 0.4296, "avg_daily_running_hours": 24,
-     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+     "subscription": "sub-prod-001", "resource_group": "rg-prod", "provider": "Azure", "is_orphaned": False},
 
     # Azure Spring Apps Enterprise — one app instance within the base bundle
     # (<=6 vCPU, <=12 GB), live-verified australiaeast flat rate $0.8408/hr
@@ -472,7 +472,7 @@ COMPUTE_SP_INVENTORY = [
      "resource_state": "Running",
      "region": "australiaeast", "os": "N/A", "sku": "Enterprise",
      "payg_hourly_usd": 0.8408, "avg_daily_running_hours": 24,
-     "subscription": "sub-prod-001", "provider": "Azure", "is_orphaned": False},
+     "subscription": "sub-prod-001", "resource_group": "rg-prod", "provider": "Azure", "is_orphaned": False},
 ]
 
 INVENTORY = COMPUTE_INVENTORY + DATABASE_INVENTORY + RI_ONLY_INVENTORY + COMPUTE_SP_INVENTORY

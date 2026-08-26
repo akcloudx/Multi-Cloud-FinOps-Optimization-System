@@ -512,17 +512,20 @@ def _discover_regions(session) -> list:
 
 
 def _map_ec2_state(state: str) -> str:
-    """Collapses EC2's 6 lifecycle states into the exact two categorical
-    values analysis/engine.py keys off of (`== "Running"` / `== "Stopped
-    (deallocated)"`, checked literally, not a general "not running" test -
-    see engine.py lines 89/373/393/449/537). "stopped" is the real EC2
-    equivalent of Azure's "deallocated" state (confirmed via AWS's own EC2
-    pricing docs: a stopped instance is not billed for compute) - same
-    semantic, reusing the same label rather than inventing an AWS-specific
-    one so the shared analysis engine treats it identically."""
+    """Collapses EC2's 6 lifecycle states into the two categorical values
+    the rest of the app keys off of. Real bug fixed 2026-08-25: this used
+    to return the literal string "Stopped (deallocated)" - Azure's own VM
+    terminology, reused here on the (wrong) assumption that
+    analysis/engine.py checked for that exact string - it actually only
+    ever checks `!= "Running"`, so the AWS-inappropriate wording was purely
+    cosmetic, but real (showed up as-is in the UI for every stopped AWS
+    resource type). "Stopped" is EC2's own real terminology (confirmed via
+    AWS's own EC2 pricing docs: a stopped instance is not billed for
+    compute, same semantic as Azure's "deallocated", just AWS's own word
+    for it)."""
     s = (state or "").lower()
     if s in ("stopped", "stopping", "shutting-down"):
-        return "Stopped (deallocated)"
+        return "Stopped"
     return "Running"   # running, pending, or any future/unknown state - matches Azure's own fallback default.
 
 
@@ -530,11 +533,10 @@ def _map_rds_state(status: str) -> str:
     """Same two-bucket mapping as _map_ec2_state, for RDS's DBInstanceStatus.
     RDS's own docs confirm a "stopped" DB instance is not billed for compute
     (storage still bills, same nuance EC2 has) - genuinely equivalent to
-    Azure's "deallocated" concept, not just a display label chosen for
-    convenience."""
+    Azure's "deallocated" concept, just AWS's own real wording for it."""
     s = (status or "").lower()
     if s == "stopped":
-        return "Stopped (deallocated)"
+        return "Stopped"
     return "Running"
 
 
@@ -928,7 +930,7 @@ def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
                         "Resource ID":             graph.get("arn") or graph.get("id", ""),
                         "Resource Name":           graph.get("name", ""),
                         "Resource Type":           "Amazon Neptune Analytics",
-                        "Resource State":          "Running" if is_running else "Stopped (deallocated)",
+                        "Resource State":          "Running" if is_running else "Stopped",
                         "Region":                  region,
                         "OS":                      "N/A",
                         "SKU":                     f"{capacity}m-NCU" if is_running else f"{capacity}m-NCU-stopped",
@@ -1017,7 +1019,7 @@ def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
                         "Resource ID":             config_arn or cfg.get("ReplicationConfigIdentifier", ""),
                         "Resource Name":           cfg.get("ReplicationConfigIdentifier", ""),
                         "Resource Type":           "AWS DMS Serverless",
-                        "Resource State":          "Running" if is_running else "Stopped (deallocated)",
+                        "Resource State":          "Running" if is_running else "Stopped",
                         "Region":                  region,
                         "OS":                      "N/A",
                         # Synthetic "{DCU}DCU-min" SKU, same convention as
@@ -1063,7 +1065,7 @@ def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
                     "Resource ID":             desc.get("TableArn") or name,
                     "Resource Name":           name,
                     "Resource Type":           "Amazon DynamoDB",
-                    "Resource State":          "Running" if desc.get("TableStatus") == "ACTIVE" else "Stopped (deallocated)",
+                    "Resource State":          "Running" if desc.get("TableStatus") == "ACTIVE" else "Stopped",
                     "Region":                  region,
                     "OS":                      "N/A",
                     "SKU":                     f"{rcu}RCU-{wcu}WCU",
@@ -1095,7 +1097,7 @@ def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
                             "Resource ID":             table.get("resourceArn") or f"{keyspace_name}.{table_name}",
                             "Resource Name":           f"{keyspace_name}.{table_name}",
                             "Resource Type":           "Amazon Keyspaces",
-                            "Resource State":          "Running" if table.get("status") == "ACTIVE" else "Stopped (deallocated)",
+                            "Resource State":          "Running" if table.get("status") == "ACTIVE" else "Stopped",
                             "Region":                  region,
                             "OS":                      "N/A",
                             "SKU":                     f"{rcu}RCU-{wcu}WCU",
@@ -1151,7 +1153,7 @@ def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
                                 "Resource ID":             task.get("taskArn") or task_id,
                                 "Resource Name":           task_id,
                                 "Resource Type":           "AWS Fargate",
-                                "Resource State":          "Running" if task.get("lastStatus") == "RUNNING" else "Stopped (deallocated)",
+                                "Resource State":          "Running" if task.get("lastStatus") == "RUNNING" else "Stopped",
                                 "Region":                  region,
                                 "OS":                      os_,
                                 "SKU":                     f"{vcpu:g}vCPU-{memory_gb:g}GB",
@@ -1241,7 +1243,7 @@ def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
                         "Resource ID":             cc.get("ARN") or cc.get("CacheClusterId", ""),
                         "Resource Name":           cc.get("CacheClusterId", ""),
                         "Resource Type":           map_elasticache_engine(cc.get("Engine", "")),
-                        "Resource State":          "Running" if cc.get("CacheClusterStatus") == "available" else "Stopped (deallocated)",
+                        "Resource State":          "Running" if cc.get("CacheClusterStatus") == "available" else "Stopped",
                         "Region":                  region,
                         "OS":                      "N/A",
                         "SKU":                     cc.get("CacheNodeType", "N/A"),
@@ -1265,7 +1267,7 @@ def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
                         "Resource ID":             cl.get("ClusterNamespaceArn") or cl.get("ClusterIdentifier", ""),
                         "Resource Name":           cl.get("ClusterIdentifier", ""),
                         "Resource Type":           "Amazon Redshift",
-                        "Resource State":          "Running" if cl.get("ClusterStatus") == "available" else "Stopped (deallocated)",
+                        "Resource State":          "Running" if cl.get("ClusterStatus") == "available" else "Stopped",
                         "Region":                  region,
                         "OS":                      "N/A",
                         "SKU":                     cl.get("NodeType", "N/A"),
@@ -1320,7 +1322,7 @@ def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
                                 "Resource ID":             f"{cluster_arn}#{node_name}",
                                 "Resource Name":           f"{node_name or cluster_name} ({engine_label.rsplit(' ', 1)[-1]})",
                                 "Resource Type":           "Amazon MemoryDB",
-                                "Resource State":          "Running" if node.get("Status") == "available" else "Stopped (deallocated)",
+                                "Resource State":          "Running" if node.get("Status") == "available" else "Stopped",
                                 "Region":                  region,
                                 "OS":                      "N/A",
                                 "SKU":                     node_type,
@@ -1377,7 +1379,7 @@ def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
                                     "Resource ID":             f"{ep.get('EndpointArn') or ep_name}#{variant_name}#{node_idx}",
                                     "Resource Name":           f"{ep_name}-{variant_name}" if instance_count == 1 else f"{ep_name}-{variant_name}-{node_idx}",
                                     "Resource Type":           "Amazon SageMaker Endpoint",
-                                    "Resource State":          "Running" if status == "InService" else "Stopped (deallocated)",
+                                    "Resource State":          "Running" if status == "InService" else "Stopped",
                                     "Region":                  region,
                                     "OS":                      "N/A",
                                     "SKU":                     instance_type,
@@ -1402,7 +1404,7 @@ def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
                         "Resource ID":             nb.get("NotebookInstanceArn") or nb_name,
                         "Resource Name":           nb_name,
                         "Resource Type":           "Amazon SageMaker Notebook Instance",
-                        "Resource State":          "Running" if nb.get("NotebookInstanceStatus") == "InService" else "Stopped (deallocated)",
+                        "Resource State":          "Running" if nb.get("NotebookInstanceStatus") == "InService" else "Stopped",
                         "Region":                  region,
                         "OS":                      "N/A",
                         "SKU":                     nb.get("InstanceType", "N/A"),

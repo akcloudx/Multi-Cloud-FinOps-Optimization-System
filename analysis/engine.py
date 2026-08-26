@@ -124,11 +124,26 @@ def _azure_scope_matches(commitment_sub, commitment_rg, resource_sub, resource_r
     -> Resource Group) while AWS's nests under Region (-> Availability Zone),
     genuinely different restriction axes with different real-world defaults
     (see _aws_scope_matches's own docstring) - conflating them into one
-    signature made it harder to see which params apply to which provider."""
-    if commitment_rg:
+    signature made it harder to see which params apply to which provider.
+
+    Real bug fixed 2026-08-25: a missing scope value read off a DataFrame
+    row (`.get(...)`/`.iterrows()`) comes through as a genuine float NaN,
+    not Python None - and `bool(float('nan'))` is True, so the old bare
+    `if commitment_sub:` treated a NaN (unrestricted/Shared-scope) commitment
+    as if it were restricted to the literal string "nan", which matches no
+    real resource. Confirmed live: 8 of this app's own 10 demo Azure RIs
+    have a NULL scope_subscription_id, so this was silently starving
+    run_waterfall's RI/SP allocation passes (_apply_ri_pass/_apply_sp_pass,
+    which call this function directly per-row with no prior NaN cleanup) -
+    reservation_analysis's own coverage-table math happened to dodge it via
+    a separate `.notna()` pre-split into scoped/unscoped layers before ever
+    calling this function, which is exactly why the bug wasn't visible
+    there. pd.notna() (not bare truthiness) is the correct check either
+    way."""
+    if pd.notna(commitment_rg) and commitment_rg:
         return (str(resource_sub or "").lower() == str(commitment_sub or "").lower() and
                 str(resource_rg or "").lower() == str(commitment_rg or "").lower())
-    if commitment_sub:
+    if pd.notna(commitment_sub) and commitment_sub:
         return str(resource_sub or "").lower() == str(commitment_sub or "").lower()
     return True
 
@@ -155,10 +170,63 @@ def _aws_scope_matches(commitment_az, resource_az) -> bool:
     to detect the edge cases where that sharing is disabled for a specific
     account or restricted via Group Sharing, so account-level scope is
     deliberately left unrestricted rather than guessed at (see
-    db/schema.py's Commitment.scope_availability_zone comment)."""
-    if commitment_az:
+    db/schema.py's Commitment.scope_availability_zone comment).
+
+    Real bug fixed 2026-08-25, same root cause as _azure_scope_matches
+    above: a missing scope value off a DataFrame row is a genuine float
+    NaN, and bool(float('nan')) is True, so the old bare `if commitment_az:`
+    treated an unrestricted (Regional-scope) RI as if it were Zonal-locked
+    to the literal string "nan" - pd.notna() is the correct check."""
+    if pd.notna(commitment_az) and commitment_az:
         return str(resource_az or "").lower() == str(commitment_az or "").lower()
     return True
+
+
+def compute_orphaned_status(inventory_df: pd.DataFrame, ri_df: pd.DataFrame) -> pd.Series:
+    """True for a resource that is stopped AND has at least one active
+    Reservation whose SKU/Region/OS + scope would otherwise cover it - that
+    Reservation's $/hr is going to waste while this specific resource sits
+    stopped. Same SKU/Region/OS + _azure_scope_matches/_aws_scope_matches
+    matching already used to quantify RI drain elsewhere in this file
+    (run_waterfall, reservation_analysis), just applied here to DETECT the
+    condition instead of assuming a row is already flagged.
+
+    Real detection, added 2026-08-25 - previously "Is Orphaned" was a
+    static, hand-set column populated only in demo seed data; every live
+    connector (azure_conn/connector.py, aws/connector.py) hardcoded it to
+    False, so a genuinely orphaned resource in a real connected tenant
+    would never surface anywhere in the app (Inventory tab, the Maturity
+    Assessment's detection-capability score, or this file's own orphan-
+    drain calculations) - confirmed live by tracing every write site.
+
+    Savings Plans deliberately excluded from this check - unlike a
+    SKU/Region-locked Reservation, an SP's $/hr pool just flows to whatever
+    else is running, so one stopped resource doesn't strand it the same way
+    a Reservation gets stranded.
+    """
+    if inventory_df.empty:
+        return pd.Series([], dtype=bool)
+    if ri_df.empty:
+        return pd.Series(False, index=inventory_df.index)
+
+    def _is_orphaned(row) -> bool:
+        if row["Resource State"] == "Running":
+            return False
+        match = ri_df[
+            (ri_df["scope_sku"]    == row["SKU"]) &
+            (ri_df["scope_region"] == row["Region"]) &
+            (ri_df["scope_os"]     == row["OS"])
+        ]
+        if match.empty:
+            return False
+        return bool(match.apply(
+            lambda r: _azure_scope_matches(r.get("scope_subscription_id"), r.get("scope_resource_group_id"),
+                                            row.get("Subscription"), row.get("Resource Group"))
+                      and _aws_scope_matches(r.get("scope_availability_zone"), row.get("Availability Zone")),
+            axis=1,
+        ).any())
+
+    return inventory_df.apply(_is_orphaned, axis=1)
 
 
 # ── Pass 1: Reserved Instance Allocation ──────────────────────────────────────
@@ -1016,8 +1084,12 @@ def reservation_analysis(
         az_merged = _finalize_coverage_layer(az_merged)
         merged = pd.concat([merged, az_merged], ignore_index=True)
 
-    # Orphaned RI drain: Stopped VMs/resources whose profile is covered by an RI
-    stopped = inventory_df[inventory_df["Resource State"] == "Stopped (deallocated)"]
+    # Orphaned RI drain: Stopped VMs/resources whose profile is covered by an RI.
+    # != "Running" (not a literal "Stopped (deallocated)" match) - that literal
+    # string is Azure-specific VM terminology; AWS's real stopped-resource
+    # wording is "Stopped" (see aws/connector.py), and a literal-string check
+    # here would have silently never matched any AWS resource.
+    stopped = inventory_df[inventory_df["Resource State"] != "Running"]
     orphan_rows = []
     if not ri_df.empty:
         for _, sres in stopped.iterrows():
