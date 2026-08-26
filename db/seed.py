@@ -53,10 +53,18 @@ COMPUTE_INVENTORY = [
     # only value a Running VM ever carries here) → Reserved Instance and/or
     # Compute SP candidates. Each on a genuinely different VM family/size, not
     # near-duplicates of each other.
+    # avg/p95_cpu_percent and avg/p95_memory_percent below are VM
+    # Rightsizing's demo utilization data (added 2026-08-26) - real Azure
+    # Monitor metric shapes (Percentage CPU, Available Memory Percentage -
+    # the latter is *free* memory, not used, see analysis/rightsizing.py),
+    # deliberately varied across these 5 VMs so the tab demonstrates every
+    # classification case under the default settings, not just one.
     {"resource_id": "VM-Prod-01", "resource_name": "app-server-01",
      "resource_type": "Compute", "resource_state": "Running",
      "region": "australiaeast", "os": "Windows", "sku": "Standard_D4ds_v5",
      "payg_hourly_usd": 0.284, "avg_daily_running_hours": 24,
+     "avg_cpu_percent": 45.0, "p95_cpu_percent": 65.0,
+     "avg_memory_percent": 70.0, "p95_memory_percent": 55.0,   # -> Optimal
      "subscription": "sub-prod-001", "resource_group": "rg-prod", "provider": "Azure", "is_orphaned": False},
 
     # Same SKU/region/OS as VM-Prod-01 above, but in a DIFFERENT subscription
@@ -72,6 +80,8 @@ COMPUTE_INVENTORY = [
      "resource_type": "Compute", "resource_state": "Running",
      "region": "australiaeast", "os": "Windows", "sku": "Standard_D4ds_v5",
      "payg_hourly_usd": 0.284, "avg_daily_running_hours": 24,
+     "avg_cpu_percent": 8.0, "p95_cpu_percent": 15.0,
+     "avg_memory_percent": 88.0, "p95_memory_percent": 80.0,   # -> Underutilized
      "subscription": "sub-dev-002", "resource_group": "rg-dev", "provider": "Azure", "is_orphaned": False},
 
     # Memory-optimized batch/reporting workload — real live-fetched australiaeast
@@ -82,6 +92,12 @@ COMPUTE_INVENTORY = [
      "resource_type": "Compute", "resource_state": "Running",
      "region": "australiaeast", "os": "Windows", "sku": "Standard_E4s_v5",
      "payg_hourly_usd": 0.486, "avg_daily_running_hours": 24,
+     "avg_cpu_percent": 78.0, "p95_cpu_percent": 95.0,
+     # Memory deliberately left unset (no avg/p95_memory_percent keys at
+     # all) - the "no monitoring agent installed" demo case: this VM
+     # still classifies correctly (Overutilized by CPU alone), and the
+     # tab should show "N/A" + a caveat for its memory columns instead of
+     # silently looking fully analyzed. See analysis/rightsizing.py.
      "subscription": "sub-prod-001", "resource_group": "rg-prod", "provider": "Azure", "is_orphaned": False},
 
     # Dev/test box — runs full-time like the prod VMs (no reduced-hours
@@ -93,6 +109,8 @@ COMPUTE_INVENTORY = [
      "resource_type": "Compute", "resource_state": "Running",
      "region": "australiaeast", "os": "Windows", "sku": "Standard_B2ms",
      "payg_hourly_usd": 0.106, "avg_daily_running_hours": 24,
+     "avg_cpu_percent": 5.0, "p95_cpu_percent": 12.0,
+     "avg_memory_percent": 92.0, "p95_memory_percent": 85.0,   # -> Underutilized
      "subscription": "sub-dev-002", "resource_group": "rg-dev", "provider": "Azure", "is_orphaned": False},
 
     # Stopped — Orphaned (RI still active but VM is deallocated). Kept on

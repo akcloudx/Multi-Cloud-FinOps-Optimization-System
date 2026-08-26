@@ -35,10 +35,23 @@ from db.schema import init_db, get_engine, CloudInventory, Commitment
 
 AWS_COMPUTE_INVENTORY = [
     # Prod EC2 — 24x7 → Reserved Instance or SP candidates
+    # VM Rightsizing (AWS, added 2026-08-27) - avg/p95_memory_percent store
+    # *available* memory %, same convention as Azure, even though the real
+    # source metric is CloudWatch Agent's `mem_used_percent` (USAGE %, the
+    # opposite convention) - converted at seed time (100 - used) so
+    # analysis/rightsizing.py's classify_vm_utilization stays 100%
+    # provider-neutral, never needing to know which raw convention a row
+    # came from. Real AWS facts this is grounded in: CPUUtilization is a
+    # CloudWatch host-level metric, no agent needed (same as Azure's
+    # Percentage CPU); mem_used_percent needs the CloudWatch Agent
+    # installed on the instance (AWS's real equivalent of "no Azure
+    # Monitor Agent" - see aws-prod-app-01 below for that demo case).
     {"resource_id": "i-0123456789abcdef0", "resource_name": "aws-prod-web-01",
      "resource_type": "Amazon EC2", "resource_state": "Running",
      "region": "us-east-1", "os": "Linux", "sku": "m5.large",
      "payg_hourly_usd": 0.096, "avg_daily_running_hours": 24,
+     "avg_cpu_percent": 42.0, "p95_cpu_percent": 60.0,
+     "avg_memory_percent": 55.0, "p95_memory_percent": 50.0,   # -> Optimal (mem_used avg 45%/p95 50%)
      "subscription": "acc-aws-11223344", "availability_zone": "us-east-1a", "provider": "AWS", "is_orphaned": False},
 
     {"resource_id": "i-0123456789abcdef1", "resource_name": "aws-prod-web-02",
@@ -65,6 +78,9 @@ AWS_COMPUTE_INVENTORY = [
      "resource_type": "Amazon EC2", "resource_state": "Running",
      "region": "us-east-1", "os": "Linux", "sku": "c5.xlarge",
      "payg_hourly_usd": 0.170, "avg_daily_running_hours": 24,
+     "avg_cpu_percent": 75.0, "p95_cpu_percent": 92.0,   # -> Overutilized
+     # Memory columns deliberately omitted (NULL), not 0 - the "no
+     # CloudWatch Agent" demo case, mirroring Azure's VM-Prod-02.
      "subscription": "acc-aws-11223344", "availability_zone": "us-east-1a", "provider": "AWS", "is_orphaned": False},
 
     {"resource_id": "i-0123456789abcdef3", "resource_name": "aws-prod-app-02",
@@ -78,12 +94,16 @@ AWS_COMPUTE_INVENTORY = [
      "resource_type": "Amazon EC2", "resource_state": "Running",
      "region": "us-east-1", "os": "Linux", "sku": "t3.medium",
      "payg_hourly_usd": 0.0416, "avg_daily_running_hours": 10,
+     "avg_cpu_percent": 6.0, "p95_cpu_percent": 14.0,
+     "avg_memory_percent": 85.0, "p95_memory_percent": 78.0,   # -> Underutilized (mem_used avg 15%/p95 22%)
      "subscription": "acc-aws-99887766", "availability_zone": "us-east-1a", "provider": "AWS", "is_orphaned": False},
 
     {"resource_id": "i-0dev123456789abc1", "resource_name": "aws-dev-test-01",
      "resource_type": "Amazon EC2", "resource_state": "Running",
      "region": "us-west-2", "os": "Linux", "sku": "t3.micro",
      "payg_hourly_usd": 0.0104, "avg_daily_running_hours": 10,
+     "avg_cpu_percent": 4.0, "p95_cpu_percent": 10.0,
+     "avg_memory_percent": 82.0, "p95_memory_percent": 75.0,   # -> Underutilized (mem_used avg 18%/p95 25%)
      "subscription": "acc-aws-99887766", "availability_zone": "us-west-2a", "provider": "AWS", "is_orphaned": False},
 
     # Stopped EC2 — Orphaned (RI active but instance is stopped)

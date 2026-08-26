@@ -322,6 +322,20 @@ def init_db(provider: str = "Azure", mode: str = "demo"):
     _ensure_column(engine, schema_name, "commitments", "scope_availability_zone", "VARCHAR(100)")
     _ensure_column(engine, schema_name, "aws_reservation_purchases", "account_id", "VARCHAR(50)")
     _ensure_column(engine, schema_name, "aws_savings_plan_purchases", "account_id", "VARCHAR(50)")
+    # VM Rightsizing - see CloudInventory's own comment on these 4, and
+    # CloudTenant's on the 7 settings columns below.
+    _ensure_column(engine, schema_name, "cloud_inventory", "avg_cpu_percent", "FLOAT")
+    _ensure_column(engine, schema_name, "cloud_inventory", "p95_cpu_percent", "FLOAT")
+    _ensure_column(engine, schema_name, "cloud_inventory", "avg_memory_percent", "FLOAT")
+    _ensure_column(engine, schema_name, "cloud_inventory", "p95_memory_percent", "FLOAT")
+    _ensure_column(engine, schema_name, "cloud_tenants", "rightsizing_percentile", "INTEGER")
+    _ensure_column(engine, schema_name, "cloud_tenants", "rightsizing_cpu_under_pct", "FLOAT")
+    _ensure_column(engine, schema_name, "cloud_tenants", "rightsizing_cpu_over_pct", "FLOAT")
+    _ensure_column(engine, schema_name, "cloud_tenants", "rightsizing_mem_under_pct", "FLOAT")
+    _ensure_column(engine, schema_name, "cloud_tenants", "rightsizing_mem_available_pct", "FLOAT")
+    _ensure_column(engine, schema_name, "cloud_tenants", "rightsizing_lookback_days", "INTEGER")
+    _ensure_column(engine, schema_name, "cloud_tenants", "rightsizing_headroom_pct", "FLOAT")
+    _ensure_column(engine, schema_name, "cloud_tenants", "rightsizing_min_days", "INTEGER")
     return engine
 
 
@@ -378,6 +392,22 @@ class CloudInventory(Base):
     # region) against the specific instances it actually covers - see
     # Commitment.scope_availability_zone and pricing/aws_commitment_mapping.py.
     availability_zone         = Column(String(100), nullable=True)
+    # VM Rightsizing (Azure only for now) - real Azure Monitor Metrics,
+    # not derived/estimated. NULL for every non-VM resource type, and for
+    # a VM whose metrics haven't been fetched yet (a not-yet-synced live
+    # tenant, or a demo VM this feature's seed data deliberately left
+    # unset). avg/p95_memory_percent store *available* (free) memory, the
+    # real name of Azure's own metric (`Available Memory Percentage`) -
+    # deliberately NOT inverted to "used %" here, since the one place
+    # that inversion actually matters is the classification threshold,
+    # not storage - see analysis/rightsizing.py's own comment on this.
+    # Independently nullable from CPU: a VM can have Percentage CPU
+    # (host-level, no agent needed) with memory still NULL (needs the
+    # Azure Monitor Agent, not confirmed present on every VM/region).
+    avg_cpu_percent            = Column(Float, nullable=True)
+    p95_cpu_percent            = Column(Float, nullable=True)
+    avg_memory_percent         = Column(Float, nullable=True)
+    p95_memory_percent         = Column(Float, nullable=True)
     provider                 = Column(String(255), default="Azure")
     is_orphaned              = Column(Boolean, default=False)
     # NULL = demo/seed data. Non-NULL = live-ingested, scoped to that cloud_tenants.id.
@@ -832,6 +862,21 @@ class CloudTenant(Base):
     # has no AWS equivalent (one credential set = one account here, not a
     # list of sub-scopes) - user's own call, confirmed live 2026-08.
     aws_account_id           = Column(String(50), nullable=True)
+    # VM Rightsizing per-tenant overrides (Azure only for now) - NULL on
+    # every field means "use the app's documented default", not "unset the
+    # feature" (see analysis/rightsizing.py's get_rightsizing_settings).
+    # Deliberately real per-tenant DB storage, not a session_state widget
+    # like the existing Savings Plan "Safety Buffer %" - that one resets
+    # every session, which doesn't satisfy "remember this for their
+    # tenant" the way these need to.
+    rightsizing_percentile        = Column(Integer, nullable=True)   # 90 | 95 | 99
+    rightsizing_cpu_under_pct     = Column(Float, nullable=True)
+    rightsizing_cpu_over_pct      = Column(Float, nullable=True)
+    rightsizing_mem_under_pct     = Column(Float, nullable=True)
+    rightsizing_mem_available_pct = Column(Float, nullable=True)
+    rightsizing_lookback_days     = Column(Integer, nullable=True)
+    rightsizing_headroom_pct      = Column(Float, nullable=True)
+    rightsizing_min_days          = Column(Integer, nullable=True)
 
 
 class TenantSubscription(Base):

@@ -116,6 +116,29 @@ def update_tenant_name(provider: str, mode: str, tenant_db_id: int, tenant_name:
         session.commit()
 
 
+def update_rightsizing_settings(provider: str, mode: str, tenant_db_id: int, settings: dict) -> None:
+    """Saves this tenant's VM Rightsizing overrides (analysis/rightsizing.py's
+    SETTINGS_FIELDS: percentile, cpu_under_pct, cpu_over_pct, mem_under_pct,
+    mem_available_pct, lookback_days, headroom_pct, min_days). Same
+    per-tenant, real-DB persistence as the rest of CloudTenant - not the
+    session_state-only pattern the existing Savings Plan "Safety Buffer %"
+    uses, since these need to survive a session/login, not just a rerun."""
+    init_db(provider, mode)
+    engine = get_engine(provider, mode)
+    with Session(engine) as session:
+        session.query(CloudTenant).filter(CloudTenant.id == tenant_db_id).update({
+            "rightsizing_percentile": settings["percentile"],
+            "rightsizing_cpu_under_pct": settings["cpu_under_pct"],
+            "rightsizing_cpu_over_pct": settings["cpu_over_pct"],
+            "rightsizing_mem_under_pct": settings["mem_under_pct"],
+            "rightsizing_mem_available_pct": settings["mem_available_pct"],
+            "rightsizing_lookback_days": settings["lookback_days"],
+            "rightsizing_headroom_pct": settings["headroom_pct"],
+            "rightsizing_min_days": settings["min_days"],
+        })
+        session.commit()
+
+
 def update_aws_account_id(provider: str, mode: str, tenant_db_id: int, account_id: Optional[str]) -> None:
     """AWS-only - stores the real AWS account ID resolved via STS
     GetCallerIdentity (aws/connector.py's test_aws_connection), shown in the

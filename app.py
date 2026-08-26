@@ -158,7 +158,11 @@ from db.tenants import (
     update_tenant_name, touch_last_synced, set_active_tenant, delete_tenant,
     resource_count, list_subscriptions, upsert_subscription,
     update_tenant_permission_status, record_sync_result, update_sync_interval,
-    update_aws_account_id,
+    update_aws_account_id, update_rightsizing_settings,
+)
+from analysis.rightsizing import (
+    classify_vm_utilization, get_rightsizing_settings, suggest_target_instance_type,
+    estimate_resize_monthly_impact, PRESETS, SETTINGS_FIELDS,
 )
 from azure_conn.connector import (
     AzureCredentials, load_credentials_from_env, save_credentials_to_env_file,
@@ -1073,6 +1077,67 @@ def _payg_blank_reason(resource_type: str, sku: str) -> str:
     return "Pricing data not available for this resource yet"
 
 
+def _value_checklist(all_opts, key, defaults, search_label="Search values"):
+    # A checkbox list, not st.multiselect - real bug seen live (video,
+    # 2026-08-24): a multiselect's dropdown is a floating overlay tall
+    # enough to cover the Apply/Cancel buttons beneath it (worse the
+    # more options a field has, e.g. Resource Type), and it doesn't
+    # close after a click, so there was no way to see what got picked
+    # without dismissing the dropdown first. Checkboxes render inline -
+    # nothing to overlap, and checked/unchecked state is visible
+    # immediately. Bounded height keeps a long list (SKU, Resource
+    # Type) from growing the popover indefinitely; the search box
+    # narrows it further, same as Azure's own "Search values" field.
+    #
+    # Module-level (hoisted 2026-08-26 from inside _render_inventory_section)
+    # so the VM Rightsizing tab can reuse the exact same filter-picker
+    # pattern instead of a second copy - it only ever touches its own
+    # params and st.session_state, no closure over the Inventory
+    # section's variables, so the hoist is behavior-preserving.
+    query = st.text_input(search_label, key=f"{key}_search", placeholder=f"🔍 {search_label}", label_visibility="collapsed")
+    shown = [o for o in all_opts if query.strip().lower() in o.lower()] if query.strip() else all_opts
+
+    # Excel's real AutoFilter "(Select All)" - a single master checkbox,
+    # not two separate buttons (2026-08-24, matched against the video
+    # the user shared of it): checked means every currently-shown item
+    # is selected, unchecked means none are, and toggling it drives
+    # every visible item at once. st.checkbox has no indeterminate
+    # visual state, so a genuinely partial selection just reads as
+    # unchecked here - the closest honest approximation Streamlit's
+    # widget allows, not a full tri-state like Excel's filled square.
+    # Wired with on_change (not a plain button) so the master and the
+    # individual boxes below stay in sync with each other either way:
+    # toggling the master cascades to every visible item, AND toggling
+    # any individual item recomputes whether the master should still
+    # show as checked - a bare button could only do the first half.
+    master_key = f"{key}_master"
+
+    def _sync_master():
+        st.session_state[master_key] = bool(shown) and all(
+            st.session_state.get(f"{key}_cb_{o}", o in defaults) for o in shown
+        )
+
+    def _apply_master():
+        new_val = st.session_state[master_key]
+        for o in shown:
+            st.session_state[f"{key}_cb_{o}"] = new_val
+
+    _sync_master()
+    st.checkbox("(Select All)", key=master_key, on_change=_apply_master)
+
+    with st.container(height=220):
+        if not shown:
+            st.caption("No matches.")
+        for o in shown:
+            st.checkbox(o, value=(o in defaults), key=f"{key}_cb_{o}", on_change=_sync_master)
+    # Reads final selection from session_state across ALL options, not
+    # just the currently search-filtered ones - a checkbox's state
+    # persists in session_state even while hidden by the search text,
+    # so narrowing then widening the search can't silently drop a
+    # selection made before the search was typed.
+    return [o for o in all_opts if st.session_state.get(f"{key}_cb_{o}", o in defaults)]
+
+
 def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
     """Renders the single, unified Inventory table (2026-08-23: previously
     called once per resource-type tab - removed per user feedback that a
@@ -1278,60 +1343,6 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
         col = label_to_col[label]
         normalized = disp[col].apply(_norm)
         return normalized, sorted(normalized.unique().tolist())
-
-    def _value_checklist(all_opts, key, defaults, search_label="Search values"):
-        # A checkbox list, not st.multiselect - real bug seen live (video,
-        # 2026-08-24): a multiselect's dropdown is a floating overlay tall
-        # enough to cover the Apply/Cancel buttons beneath it (worse the
-        # more options a field has, e.g. Resource Type), and it doesn't
-        # close after a click, so there was no way to see what got picked
-        # without dismissing the dropdown first. Checkboxes render inline -
-        # nothing to overlap, and checked/unchecked state is visible
-        # immediately. Bounded height keeps a long list (SKU, Resource
-        # Type) from growing the popover indefinitely; the search box
-        # narrows it further, same as Azure's own "Search values" field.
-        query = st.text_input(search_label, key=f"{key}_search", placeholder=f"🔍 {search_label}", label_visibility="collapsed")
-        shown = [o for o in all_opts if query.strip().lower() in o.lower()] if query.strip() else all_opts
-
-        # Excel's real AutoFilter "(Select All)" - a single master checkbox,
-        # not two separate buttons (2026-08-24, matched against the video
-        # the user shared of it): checked means every currently-shown item
-        # is selected, unchecked means none are, and toggling it drives
-        # every visible item at once. st.checkbox has no indeterminate
-        # visual state, so a genuinely partial selection just reads as
-        # unchecked here - the closest honest approximation Streamlit's
-        # widget allows, not a full tri-state like Excel's filled square.
-        # Wired with on_change (not a plain button) so the master and the
-        # individual boxes below stay in sync with each other either way:
-        # toggling the master cascades to every visible item, AND toggling
-        # any individual item recomputes whether the master should still
-        # show as checked - a bare button could only do the first half.
-        master_key = f"{key}_master"
-
-        def _sync_master():
-            st.session_state[master_key] = bool(shown) and all(
-                st.session_state.get(f"{key}_cb_{o}", o in defaults) for o in shown
-            )
-
-        def _apply_master():
-            new_val = st.session_state[master_key]
-            for o in shown:
-                st.session_state[f"{key}_cb_{o}"] = new_val
-
-        _sync_master()
-        st.checkbox("(Select All)", key=master_key, on_change=_apply_master)
-
-        with st.container(height=220):
-            if not shown:
-                st.caption("No matches.")
-            for o in shown:
-                st.checkbox(o, value=(o in defaults), key=f"{key}_cb_{o}", on_change=_sync_master)
-        # Reads final selection from session_state across ALL options, not
-        # just the currently search-filtered ones - a checkbox's state
-        # persists in session_state even while hidden by the search text,
-        # so narrowing then widening the search can't silently drop a
-        # selection made before the search was typed.
-        return [o for o in all_opts if st.session_state.get(f"{key}_cb_{o}", o in defaults)]
 
     filters_state_key = f"{key_prefix}_active_filters_state"
     if filters_state_key not in st.session_state:
@@ -2358,12 +2369,302 @@ def _render_maturity_tab():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# ANALYZE — VM RIGHTSIZING (Azure only, v1 - see analysis/rightsizing.py)
+# ═══════════════════════════════════════════════════════════════════════════════
+def _render_rightsizing_tab():
+    st.subheader(f"{selected_provider} VM Rightsizing")
+    st.caption(
+        "Flags virtual machines that are under- or over-provisioned relative to their real "
+        "CPU/memory utilization, with configurable, industry-grounded thresholds."
+    )
+    _finops_tag("Optimize Usage & Cost", "Usage Optimization")
+
+    key_prefix = f"{selected_provider}_{tenant_mode}_rightsizing"
+    saved_settings = get_rightsizing_settings(active_tenant)
+
+    for f in SETTINGS_FIELDS:
+        wkey = f"{key_prefix}_{f}"
+        if wkey not in st.session_state:
+            st.session_state[wkey] = saved_settings[f]
+    preset_key = f"{key_prefix}_preset"
+    if preset_key not in st.session_state:
+        st.session_state[preset_key] = next(
+            (name for name, p in PRESETS.items()
+             if all(saved_settings[f] == p[f] for f in SETTINGS_FIELDS)),
+            "Custom",
+        )
+
+    def _apply_preset():
+        choice = st.session_state[preset_key]
+        if choice != "Custom":
+            for f in SETTINGS_FIELDS:
+                st.session_state[f"{key_prefix}_{f}"] = PRESETS[choice][f]
+
+    with st.popover("⚙️ Rightsizing Settings"):
+        st.caption(
+            "Defaults follow real industry practice (Azure Advisor's own resize thresholds, "
+            "AWS Compute Optimizer's percentile/headroom/lookback model) — override and save "
+            "per tenant below."
+        )
+        st.caption(
+            "A VM is **Overutilized** if CPU *or* memory shows high pressure. It's only "
+            "**Underutilized** if CPU *and* memory (when memory data exists) are both low — "
+            "same multi-metric rollup AWS Compute Optimizer uses, so a VM idle on CPU but "
+            "heavy on memory isn't wrongly flagged for a downsize."
+        )
+        st.selectbox("Preset", list(PRESETS.keys()) + ["Custom"], key=preset_key, on_change=_apply_preset)
+
+        r1c1, r1c2 = st.columns(2)
+        with r1c1:
+            st.selectbox("Percentile", [90, 95, 99], key=f"{key_prefix}_percentile")
+        with r1c2:
+            st.number_input("Lookback window (days)", min_value=1, max_value=93,
+                             key=f"{key_prefix}_lookback_days")
+
+        r2c1, r2c2 = st.columns(2)
+        with r2c1:
+            st.number_input("CPU Underutilized threshold (%)", min_value=0.0, max_value=100.0,
+                             step=5.0, key=f"{key_prefix}_cpu_under_pct",
+                             help="Underutilized (CPU side) triggers when CPU usage drops below this.")
+        with r2c2:
+            st.number_input("CPU Overutilized threshold (%)", min_value=0.0, max_value=100.0,
+                             step=5.0, key=f"{key_prefix}_cpu_over_pct",
+                             help="Overutilized triggers when CPU usage rises above this.")
+
+        r3c1, r3c2 = st.columns(2)
+        with r3c1:
+            st.number_input("Memory Underutilized threshold (% used)", min_value=0.0, max_value=100.0,
+                             step=5.0, key=f"{key_prefix}_mem_under_pct",
+                             help="Underutilized (memory side) triggers when memory usage drops below this.")
+        with r3c2:
+            st.number_input("Memory Overutilized threshold (% available)", min_value=0.0, max_value=100.0,
+                             step=5.0, key=f"{key_prefix}_mem_available_pct",
+                             help="Overutilized triggers when *available* (free) memory drops below this.")
+
+        r4c1, r4c2 = st.columns(2)
+        with r4c1:
+            st.number_input("Headroom / safety margin (%)", min_value=0.0, max_value=50.0, step=5.0,
+                             key=f"{key_prefix}_headroom_pct",
+                             help="A suggested resize must leave at least this much headroom.")
+        with r4c2:
+            st.number_input("Minimum days of data", min_value=1, max_value=93,
+                             key=f"{key_prefix}_min_days")
+
+        if st.button("💾 Save for this tenant", key=f"{key_prefix}_save", width="stretch"):
+            if active_tenant is None:
+                st.warning("No active tenant to save to yet — connect or select one first.")
+            else:
+                update_rightsizing_settings(
+                    selected_provider, tenant_mode, active_tenant.id,
+                    {f: st.session_state[f"{key_prefix}_{f}"] for f in SETTINGS_FIELDS},
+                )
+                st.success("Saved for this tenant.")
+
+    settings = {f: st.session_state[f"{key_prefix}_{f}"] for f in SETTINGS_FIELDS}
+
+    st.divider()
+
+    if vm_inventory.empty:
+        st.caption("No VM inventory to analyze yet.")
+        return
+
+    # Percentile setting selects the aggregation the real per-provider metrics
+    # service would query in production (Azure Monitor Metrics / Amazon
+    # CloudWatch); today's demo/synced data only ever captures Avg and P95
+    # (see data/inventory_loader.py), so classification reads the stored P95
+    # columns regardless of the configured percentile - disclosed
+    # simplification, not silently pretended to be arbitrary-percentile-
+    # accurate. Threshold changes alone already drive real classification
+    # differences without this, so nothing downstream is faked.
+    live_metrics_service = "Azure Monitor Metrics" if is_azure else "Amazon CloudWatch"
+    st.caption(
+        "ℹ️ Classification currently reads the stored P95 CPU/Memory values (this app's synced "
+        f"summary stats). Full arbitrary-percentile aggregation requires a live production-phase "
+        f"{live_metrics_service} query — not built yet."
+    )
+
+    rows = []
+    for _, vm in vm_inventory.iterrows():
+        avg_cpu = vm.get("Avg CPU %")
+        p95_cpu = vm.get("P95 CPU %")
+        avg_mem = vm.get("Avg Memory Available %")
+        p95_mem = vm.get("P95 Memory Available %")
+        cpu_at_p = None if pd.isna(p95_cpu) else float(p95_cpu)
+        mem_at_p = None if pd.isna(p95_mem) else float(p95_mem)
+        days_of_data = settings["lookback_days"] if cpu_at_p is not None else None
+
+        result = classify_vm_utilization(
+            resource_state=vm["Resource State"],
+            cpu_at_percentile=cpu_at_p,
+            mem_available_at_percentile=mem_at_p,
+            days_of_data=days_of_data,
+            settings=settings,
+        )
+
+        suggested_sku, projected_cpu, projected_mem = None, None, None
+        impact = None
+        if result.label in ("Underutilized", "Overutilized") and cpu_at_p is not None:
+            direction = "down" if result.label == "Underutilized" else "up"
+            # Both metrics passed whenever available, regardless of which one
+            # actually drove the verdict - a VM flagged Overutilized purely
+            # by memory pressure still gets a real "after resize" memory
+            # number (not just an irrelevant CPU one), and a downsize's
+            # memory impact now gets safety-gated too, not only CPU's (see
+            # suggest_target_instance_type's own docstring for the full
+            # reasoning - extended 2026-08-26 after a direct user question
+            # about this exact gap). suggest_target_instance_type dispatches
+            # to the right SKU-naming parser for whichever provider is
+            # active (Azure vCPU-in-name vs. AWS EC2 family.size ladder).
+            suggestion = suggest_target_instance_type(
+                selected_provider, vm["SKU"], direction, settings["headroom_pct"],
+                cpu_utilization_pct=cpu_at_p, mem_available_pct=mem_at_p,
+            )
+            if suggestion:
+                suggested_sku, projected_cpu, projected_mem = suggestion
+                impact = estimate_resize_monthly_impact(
+                    selected_provider, vm["SKU"], suggested_sku,
+                    vm["PAYG Hourly Cost USD"], vm["Avg Daily Running Hours"],
+                )
+
+        rows.append({
+            "VM Name": vm["Resource Name"],
+            "SKU": vm["SKU"],
+            # Raw values kept numeric (float | None) here - the display step
+            # below turns a missing value into "Stopped"/"No agent" instead
+            # of a bare None, but that's a presentation concern, not data;
+            # "Resource State" rides along only to drive that formatting and
+            # is dropped from the visible table, same as "Reason" isn't.
+            "Resource State": vm["Resource State"],
+            "Avg CPU %": None if pd.isna(avg_cpu) else round(float(avg_cpu), 1),
+            "P95 CPU %": None if pd.isna(p95_cpu) else round(float(p95_cpu), 1),
+            "Avg Memory Available %": None if pd.isna(avg_mem) else round(float(avg_mem), 1),
+            "P95 Memory Available %": None if pd.isna(p95_mem) else round(float(p95_mem), 1),
+            "Classification": result.label,
+            "Why": result.reason,
+            "Suggested SKU": suggested_sku or "—",
+            # Kept numeric (float | None), not pre-stringified to "—" - a
+            # column mixing float and str dtypes fails clean Arrow
+            # serialization (Streamlit silently patches it, but it's sloppy
+            # - a real warning caught in this tab's own server logs). Same
+            # numeric-until-display pattern as Monthly Savings below.
+            # Column names picked to be self-explanatory without requiring
+            # the reader to already know this feature's jargon (renamed
+            # 2026-08-26 from "Projected Utilization %"/"Est. Monthly
+            # Impact" after a direct user question about what they meant).
+            # "Monthly Savings" not "Monthly $ Impact" - a hardcoded "$" in
+            # the header would mislead once selected_currency=INR (values
+            # would render in ₹ via fmt() while the header still said "$",
+            # a real bug caught by the user) - currency symbol belongs only
+            # in the formatted cell value, never baked into a column name.
+            "CPU % After Resize": projected_cpu,
+            # *Available* %, matching the pre-resize "P95 Memory Available
+            # %" column's own convention, so the two are directly
+            # comparable side by side - None when no memory reading exists
+            # for this VM (same "no agent" case, formatted the same way).
+            "Memory % After Resize": projected_mem,
+            "Monthly Savings": impact,
+        })
+
+    rs_df = pd.DataFrame(rows)
+
+    under_count = int((rs_df["Classification"] == "Underutilized").sum())
+    over_count = int((rs_df["Classification"] == "Overutilized").sum())
+    total_savings = float(rs_df.loc[rs_df["Monthly Savings"] > 0, "Monthly Savings"].sum()) \
+        if "Monthly Savings" in rs_df and rs_df["Monthly Savings"].notna().any() else 0.0
+
+    k1, k2, k3 = st.columns(3)
+    k1.metric("🔽 Underutilized", under_count)
+    k2.metric("🔼 Overutilized", over_count)
+    k3.metric("💰 Est. Monthly Savings (downsizes)", fmt(total_savings, 2))
+
+    st.divider()
+
+    class_opts = sorted(rs_df["Classification"].unique().tolist())
+    with st.popover("🔎 Filter by Classification"):
+        picked_classes = _value_checklist(class_opts, key=f"{key_prefix}_class_filter", defaults=class_opts,
+                                           search_label="Search classifications")
+    if picked_classes:
+        rs_df = rs_df[rs_df["Classification"].isin(picked_classes)]
+
+    def _fmt_metric_cell(value, resource_state, is_memory):
+        # A bare "None"/blank cell doesn't say WHY a metric is missing, and
+        # the two real reasons look identical without this: a stopped VM
+        # collects no telemetry at all (CPU and memory both blank), while a
+        # running VM missing only memory is this app's disclosed inference
+        # for a missing monitoring agent extension (Azure Monitor Agent /
+        # CloudWatch Agent depending on provider) - CPU is host-level,
+        # collected without any agent; memory needs the guest-level agent.
+        # Not a confirmed diagnosis (v1 doesn't call either provider's real
+        # Extensions/Agent-status API), so phrased as "No agent" rather
+        # than a certain claim - full caveat lives in the "Why" column/
+        # caption, this is just the short table-cell label.
+        if pd.notna(value):
+            return f"{value:.1f}"
+        if resource_state != "Running":
+            return "Stopped"
+        return "No agent" if is_memory else "Not synced"
+
+    show_df = rs_df.drop(columns=["Resource State"]).copy()
+    for col, is_memory in [("Avg CPU %", False), ("P95 CPU %", False),
+                            ("Avg Memory Available %", True), ("P95 Memory Available %", True)]:
+        show_df[col] = rs_df.apply(lambda r, c=col, m=is_memory: _fmt_metric_cell(r[c], r["Resource State"], m), axis=1)
+    show_df["CPU % After Resize"] = rs_df["CPU % After Resize"].apply(
+        lambda x: f"{x:.1f}%" if pd.notna(x) else "—"
+    )
+
+    def _fmt_mem_after_resize(row):
+        # Same "why is this blank" distinction as the pre-resize memory
+        # columns, not a bare "—" for every empty cell: a VM with no
+        # suggestion at all (Optimal/Unknown) genuinely has nothing to
+        # project, but a VM that WAS resized-suggested with memory data
+        # missing still gets the "No agent" wording, not a value-less dash
+        # that looks identical to "not applicable."
+        if pd.notna(row["Memory % After Resize"]):
+            return f"{row['Memory % After Resize']:.1f}%"
+        if row["Suggested SKU"] == "—":
+            return "—"
+        return _fmt_metric_cell(None, row["Resource State"], is_memory=True)
+
+    show_df["Memory % After Resize"] = rs_df.apply(_fmt_mem_after_resize, axis=1)
+    show_df["Monthly Savings"] = rs_df["Monthly Savings"].apply(
+        lambda x: fmt(x, 2) if pd.notna(x) else "—"
+    )
+    st.caption(
+        "🔎 Use the table's own Search icon (toolbar) or the Classification filter above to narrow "
+        "a large fleet — the **Why** column explains each VM's verdict inline instead of a separate list."
+    )
+    st.dataframe(
+        show_df, hide_index=True, width="stretch",
+        column_config={
+            "CPU % After Resize": st.column_config.TextColumn(
+                help="CPU usage this VM would have if you applied the Suggested SKU — lets you "
+                     "sanity-check a resize before making it (e.g. a downsize projecting above the "
+                     "safe range wouldn't have been suggested at all)."
+            ),
+            "Memory % After Resize": st.column_config.TextColumn(
+                help="Available (free) memory % this VM would have after the Suggested SKU — same "
+                     "units as the P95 Memory Available % column, so you can compare before/after "
+                     "directly. Confirms whether the resize actually relieves memory pressure when "
+                     "that's what triggered Overutilized, not just CPU. \"No agent\" when this VM has "
+                     "no memory reading to project from."
+            ),
+            "Monthly Savings": st.column_config.TextColumn(
+                help="Estimated monthly cost change from applying the Suggested SKU, in your selected "
+                     "display currency. Positive = savings (downsize). Negative = added cost (upsize "
+                     "needed to relieve overutilization)."
+            ),
+        },
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # WORKSPACE — ANALYZE (single page, top tabs inside)
 # ═══════════════════════════════════════════════════════════════════════════════
 def page_analyze():
     _render_top_header()
     tabs = st.tabs([
         "🔍 Inventory",
+        "🎯 VM Rightsizing",
         "💰 Savings Plan Analysis",
         "🏷️ RI Coverage",
         "📊 Cost Analysis",
@@ -2373,14 +2674,16 @@ def page_analyze():
     with tabs[0]:
         _render_inventory_tab()
     with tabs[1]:
-        _render_savings_plan_tab()
+        _render_rightsizing_tab()
     with tabs[2]:
-        _render_ri_coverage_tab()
+        _render_savings_plan_tab()
     with tabs[3]:
-        _render_cost_analysis_tab()
+        _render_ri_coverage_tab()
     with tabs[4]:
-        _render_recommendations_tab()
+        _render_cost_analysis_tab()
     with tabs[5]:
+        _render_recommendations_tab()
+    with tabs[6]:
         _render_maturity_tab()
 
 

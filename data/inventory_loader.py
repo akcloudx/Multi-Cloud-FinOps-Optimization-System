@@ -73,6 +73,15 @@ def get_compute_inventory(provider: str = "Azure", mode: str = "demo", tenant_id
             # "Zonal" EC2 Reserved Instance against the specific instances
             # it actually covers (see Commitment.scope_availability_zone).
             "Availability Zone":       r.availability_zone,
+            # VM Rightsizing (Azure only, added 2026-08-26) - real Azure
+            # Monitor Metrics shape (see analysis/rightsizing.py). NULL for
+            # every non-VM row and any VM not yet metrics-synced.
+            # avg/p95_memory_percent are *available* (free) memory %, not
+            # used % - matches the real Azure metric name.
+            "Avg CPU %":                r.avg_cpu_percent,
+            "P95 CPU %":                r.p95_cpu_percent,
+            "Avg Memory Available %":   r.avg_memory_percent,
+            "P95 Memory Available %":   r.p95_memory_percent,
             "Provider":                 r.provider,
             "Is Orphaned":              r.is_orphaned,
         }
@@ -80,5 +89,7 @@ def get_compute_inventory(provider: str = "Azure", mode: str = "demo", tenant_id
     ]
     columns = ["Resource ID", "Resource Name", "Resource Type", "Resource State", "Region", "OS",
                "SKU", "Redundancy", "HA Replicas", "PAYG Hourly Cost USD", "Avg Daily Running Hours",
-               "Subscription", "Resource Group", "Availability Zone", "Provider", "Is Orphaned"]
+               "Subscription", "Resource Group", "Availability Zone",
+               "Avg CPU %", "P95 CPU %", "Avg Memory Available %", "P95 Memory Available %",
+               "Provider", "Is Orphaned"]
     return pd.DataFrame(data, columns=columns)
