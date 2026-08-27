@@ -121,7 +121,10 @@ def require_login() -> dict:
     _render_landing_hero()
     _render_landing_features()
     _render_landing_process()
-    _render_landing_badges()
+    # No platform-badges section here anymore (removed 2026-08-27, real
+    # user feedback: "Azure/AWS/Demo Mode/USD" duplicated the hero's own
+    # preview-card badges, and the mode itself is already a real choice in
+    # the sign-in card right below - not just decorative repetition).
     _render_landing_closing_cta(mode)
     st.markdown("</div>", unsafe_allow_html=True)
     st.stop()
@@ -232,23 +235,6 @@ def _render_landing_process():
         unsafe_allow_html=True,
     )
 
-
-def _render_landing_badges():
-    badges = [
-        ("cloud", "Azure"), ("hex", "AWS"), ("grid", "Demo Mode"),
-        ("bolt", "Production / Live Mode"), ("globe", "USD"), ("coin", "INR"),
-    ]
-    badges_html = "".join(
-        f'<span class="fl-stackbadge">{_icon(icon, 15, "#60A5FA")}{label}</span>'
-        for icon, label in badges
-    )
-    st.markdown(
-        '<section class="fl-badgesection"><div class="fl-wrap">'
-        '<div class="lbl">Works across your environment</div>'
-        f'<div class="fl-stackrow">{badges_html}</div>'
-        "</div></section>",
-        unsafe_allow_html=True,
-    )
 
 
 def _render_landing_closing_cta(mode: str):

@@ -187,18 +187,6 @@ section[data-testid="stSidebar"] nav span {
 .fl-step h3 { font-size: 15px; font-weight: 700; margin: 0 0 6px; }
 .fl-step p { font-size: 12.5px; color: #94A3B8; line-height: 1.55; margin: 0; }
 
-/* ---- BADGES ---- */
-.fl-badgesection { padding: 40px 0; border-top: 1px solid #16233A; border-bottom: 1px solid #16233A; }
-.fl-badgesection .lbl {
-    text-align: center; font-size: 10.5px; font-weight: 700; letter-spacing: .1em;
-    text-transform: uppercase; color: #475569; margin-bottom: 18px;
-}
-.fl-stackrow { display: flex; justify-content: center; gap: 12px; flex-wrap: wrap; }
-.fl-stackbadge {
-    display: flex; align-items: center; gap: 8px; border: 1px solid #1E293B; background: #101A2E;
-    padding: 8px 14px; border-radius: 9px; font-size: 12.5px; font-weight: 600; color: #CBD5E1;
-}
-
 /* ---- CLOSING CTA + LOGIN ---- */
 .fl-closing { padding: 60px 0 40px; }
 /* 2026-08-27, second pass: dropped the two-column "single card split into
