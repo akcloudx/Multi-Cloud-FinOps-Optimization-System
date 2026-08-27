@@ -42,6 +42,22 @@ div[data-testid="stMetric"] {
     padding: 0.5rem 0.25rem;
 }
 
+/* Alert boxes (st.info/warning/success/error) toned down app-wide -
+   2026-08-27, real user feedback: the default saturated tint read as
+   jarring against this app's own dark theme. A CSS filter, not a
+   hardcoded background color, on purpose: st.info/warning/success/error
+   all share the SAME data-testid/className regardless of which one they
+   are - Streamlit picks the actual blue/amber/green/red internally via a
+   styled-component prop that isn't exposed as a stable, targetable class,
+   so there's no reliable hook to set four different literal colors per
+   kind. A filter instead dims/desaturates WHATEVER color Streamlit
+   already rendered, uniformly, for all four kinds, and in both light and
+   dark theme - not just this one page. Still visibly tinted per kind
+   (saturate isn't 0), just not shouting. */
+[data-testid="stAlertContainer"] {
+    filter: saturate(55%) brightness(0.94);
+}
+
 /* Sidebar nav links (st.navigation) render noticeably smaller/lighter than
    the rest of the sidebar's custom headers by default - match them up.
    Several selectors targeted since the exact testid isn't guaranteed stable

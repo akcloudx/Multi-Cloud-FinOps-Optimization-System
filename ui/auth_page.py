@@ -30,7 +30,7 @@ from db.users import (
 from db.sessions import create_session, get_session, delete_session
 from ui.styling import inject_global_css
 
-_ENV_MODE_BY_MODE = {"demo": "Demo / Benchmark Mode", "live": "Live Cloud API"}
+_ENV_MODE_BY_MODE = {"demo": "Demo / Benchmark Mode", "live": "Production"}
 
 # Inline SVG sprite, ported verbatim from the approved design-canvas source
 # (Landing.dc.html) - one <symbol> per icon, referenced via <use href="#i-x">
@@ -455,7 +455,7 @@ def render_switch_mode_control():
     because mixing them up silently is a real, recurring incident pattern
     elsewhere - not a hypothetical."""
     env_mode = st.session_state.get("env_mode_widget", "Demo / Benchmark Mode")
-    other_mode = "Live Cloud API" if env_mode == "Demo / Benchmark Mode" else "Demo / Benchmark Mode"
+    other_mode = "Production" if env_mode == "Demo / Benchmark Mode" else "Demo / Benchmark Mode"
     st.caption(f"**Data Source Environment:** {env_mode}")
     if st.button(f"🔁 Switch to {other_mode}", use_container_width=True,
                  help="Switching signs you out - sign back in for the other mode. Demo and Live are fully separate accounts and data now, not just a view toggle."):

@@ -1114,7 +1114,7 @@ def page_users():
     # page always reflects whichever scope the current session is in, same
     # as every other data read in the app. In Demo Mode this correctly shows
     # only the single fixed demo account with no "add a user" ability to
-    # abuse - real account management only makes sense in Live Cloud API mode.
+    # abuse - real account management only makes sense in Production mode.
     users_mode = "live" if is_live_mode else "demo"
 
     with st.container(border=True):
@@ -1122,19 +1122,23 @@ def page_users():
             ucols = st.columns([3, 3, 2])
             ucols[0].markdown(f"**{u.display_name or u.username}** (`{u.username}`)")
             ucols[1].caption(f"Added {u.created_at[:10]} · Last login: {u.last_login_at[:10] if u.last_login_at else 'never'}")
-            ucols[2].caption("🟢 Active" if u.is_active else "⚪ Inactive")
+            with ucols[2]:
+                if u.is_active:
+                    st.badge("Active", icon=":material/check_circle:", color="green")
+                else:
+                    st.badge("Inactive", icon=":material/radio_button_unchecked:", color="gray")
 
     if not is_live_mode:
-        st.info("Switch to **Live Cloud API** mode to add or manage real user accounts - the demo account is fixed.", icon="ℹ️")
+        st.info("Switch to **Production** mode to add or manage real user accounts - the demo account is fixed.", icon=":material/info:")
         return
 
-    with st.expander("➕ Add a new user", expanded=False):
+    with st.expander("Add a new user", icon=":material/person_add:", expanded=False):
         with st.form("add_user_form"):
             nu_username = st.text_input("Username")
             nu_display = st.text_input("Display name (optional)")
             nu_pw1 = st.text_input("Password", type="password")
             nu_pw2 = st.text_input("Confirm password", type="password")
-            nu_submit = st.form_submit_button("Add User", type="primary")
+            nu_submit = st.form_submit_button("Add User", icon=":material/person_add:", type="primary")
         if nu_submit:
             if not nu_username or not nu_pw1:
                 st.error("Username and password are both required.")
@@ -2956,14 +2960,14 @@ safety_buffer = safety_buffer_pct / 100.0
 # seeded tenant entry too, not just Production's real connections. Every
 # db.tenants call needs to know which one explicitly, same discipline as the
 # rest of the demo/live split.
-tenant_mode = "live" if env_mode == "Live Cloud API" else "demo"
+tenant_mode = "live" if env_mode == "Production" else "demo"
 
 # Check Live Credentials — the connected-tenant registry in SQL DB is the single
 # source of truth for "is live configured", not the .env file (which only exists
 # to pre-fill the connection form / support the cron function outside Streamlit).
 active_tenant = get_active_tenant(selected_provider, tenant_mode)
 is_live_configured = active_tenant is not None
-is_live_mode = (env_mode == "Live Cloud API")
+is_live_mode = (env_mode == "Production")
 
 @st.cache_data(show_spinner=False)
 def load_benchmark_data(days: int, buffer: float, provider: str, sp_eligible_types: tuple):
@@ -3027,7 +3031,7 @@ if is_live_mode and not is_live_configured:
     recs = [{
         "type": "ACTION_REQUIRED", "severity": "HIGH", "icon": "⚠️", "category": "Live Connection",
         "title": f"No Live {selected_provider} Connection Configured",
-        "detail": f"You are in **Live Cloud API** mode, but no tenant is connected for {selected_provider}. Please configure your API access on the **🏠 Home** page.",
+        "detail": f"You are in **Production** mode, but no tenant is connected for {selected_provider}. Please configure your API access on the **🏠 Home** page.",
         "action": "Connect a tenant on the Home page.",
         "financial_impact_hr": 0.0, "items": [],
     }]
