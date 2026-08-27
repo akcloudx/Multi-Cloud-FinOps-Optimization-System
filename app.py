@@ -993,7 +993,7 @@ def page_tenant_management():
         st.markdown(f"#### {selected_provider} Tenants")
     with hdr_r:
         add_disabled = (tenant_mode == "demo")
-        if st.button("➕ Add a new tenant", use_container_width=True, type="primary",
+        if st.button("Add a new tenant", icon=":material/add:", use_container_width=True, type="primary",
                      disabled=add_disabled,
                      help="Only available in Production Mode." if add_disabled else None):
             st.session_state["_show_add_tenant_form"] = not st.session_state.get("_show_add_tenant_form", False)
@@ -1001,12 +1001,12 @@ def page_tenant_management():
     if st.session_state.get("_show_add_tenant_form") and tenant_mode == "live":
         with st.container(border=True):
             if is_azure:
-                st.markdown("### ☁️ Azure Service Principal Integration")
+                st.markdown("### :material/cloud: Azure Service Principal Integration")
                 if _render_azure_connect_form("home_page", tenant_mode):
                     st.session_state["_show_add_tenant_form"] = False
                     st.rerun()
             else:
-                st.markdown("### 🟧 AWS IAM Credentials Integration")
+                st.markdown("### :material/dns: AWS IAM Credentials Integration")
                 if _render_aws_connect_form("home_page", tenant_mode):
                     st.session_state["_show_add_tenant_form"] = False
                     st.rerun()
@@ -1014,7 +1014,7 @@ def page_tenant_management():
     tenants = list_tenants(selected_provider, tenant_mode)
     if not tenants:
         st.info(
-            f"No {selected_provider} tenants connected yet. Click **➕ Add a new tenant** above."
+            f"No {selected_provider} tenants connected yet. Click **Add a new tenant** above."
             if tenant_mode == "live" else "No demo tenant seeded yet."
         )
         return
@@ -1025,42 +1025,60 @@ def page_tenant_management():
     # aws/connector.py's test_aws_connection) for AWS rows instead, per the
     # user's own call confirmed live 2026-08.
     fourth_col_label = "Subscriptions" if is_azure else "Account ID"
-    header_cols = st.columns([3, 1.3, 2, 1.3, 1.8, 2.2])
-    for c, label in zip(header_cols, ["Tenant name", "Status", "Authentication", fourth_col_label, "Last synced", "Actions"]):
-        c.caption(f"**{label}**")
-    for t in tenants:
-        fourth_col_value = len(list_subscriptions(selected_provider, tenant_mode, t.id)) if is_azure else (t.aws_account_id or "—")
-        cols = st.columns([3, 1.3, 2, 1.3, 1.8, 2.2])
-        cols[0].markdown(f"{'🟢' if t.is_active else '⚪'} {t.tenant_name}")
-        cols[1].caption("Active" if t.is_active else "Inactive")
-        cols[2].caption("Service principal" if is_azure else "IAM access key")
-        cols[3].caption(str(fourth_col_value))
-        cols[4].caption(t.last_synced_at[:16] if t.last_synced_at else "Never")
-        with cols[5]:
-            b1, b2 = st.columns(2)
-            if b1.button("Dashboard", key=f"home_dash_{t.id}", width="stretch"):
-                set_active_tenant(selected_provider, tenant_mode, t.id)
-                # st.switch_page() clears st.query_params on its way to the
-                # destination page, and the Cloud Platform segmented_control
-                # is treated as a fresh instantiation there too (its `default=`
-                # wins over any prior selection) - confirmed live via screen
-                # recording 2026-08-21: an AWS tenant's Dashboard button
-                # silently landed on the Azure dashboard instead, because
-                # BOTH of the app's usual "provider" persistence mechanisms
-                # (query param re-assertion, widget session_state) turned out
-                # not to survive switch_page specifically, unlike a plain
-                # sidebar-link click or refresh. A directly-assigned widget
-                # session_state key was tried first and raises
-                # StreamlitAPIException ("cannot be modified after the widget
-                # is instantiated") since the widget already rendered earlier
-                # in this same script run. _pending_provider is a plain,
-                # non-widget key instead - consumed once at the top of the
-                # script (see the "provider" persistence comment there) before
-                # the widget ever reads a default, so it can't be stale.
-                st.session_state["_pending_provider"] = selected_provider
-                st.switch_page(analyze_page)
-            if b2.button("Manage", key=f"home_manage_{t.id}", width="stretch"):
-                st.session_state["_manage_tenant_id"] = t.id
+    # Back to a table (fifth pass, 2026-08-27 - the card layout was tried
+    # and rejected). This time the Actions column genuinely gets more
+    # relative width (was 2.2/11.6 ≈ 19% of the row, now 3.0/10.4 ≈ 29%,
+    # by trimming the columns that can afford it - Status is a compact
+    # badge, Subscriptions/Account ID and Last synced are short values)
+    # instead of just shortening the button labels again, which is what
+    # failed twice before without ever addressing why the column was too
+    # narrow in the first place. Short label + icon ("Dash"/"Manage") on
+    # top of that real width margin, not stacked - single-row height,
+    # aligned with every other column, no misalignment. "Dash" not "Open" -
+    # a new user has no way to know what a bare "Open" opens; "Dash" reads
+    # as short for "Dashboard" instead, same length so it still fits.
+    with st.container(border=True):
+        col_ratios = [2.2, 1.1, 1.6, 1.1, 1.4, 3.0]
+        header_cols = st.columns(col_ratios)
+        for c, label in zip(header_cols, ["Tenant name", "Status", "Authentication", fourth_col_label, "Last synced", "Actions"]):
+            c.caption(f"**{label}**")
+        for t in tenants:
+            fourth_col_value = len(list_subscriptions(selected_provider, tenant_mode, t.id)) if is_azure else (t.aws_account_id or "—")
+            cols = st.columns(col_ratios)
+            cols[0].markdown(f"**{t.tenant_name}**")
+            with cols[1]:
+                if t.is_active:
+                    st.badge("Active", icon=":material/check_circle:", color="green")
+                else:
+                    st.badge("Inactive", icon=":material/radio_button_unchecked:", color="gray")
+            cols[2].caption("Service principal" if is_azure else "IAM access key")
+            cols[3].caption(str(fourth_col_value))
+            cols[4].caption(t.last_synced_at[:16] if t.last_synced_at else "Never")
+            with cols[5]:
+                b1, b2 = st.columns(2)
+                if b1.button("Dash", icon=":material/open_in_new:", key=f"home_dash_{t.id}", width="stretch"):
+                    set_active_tenant(selected_provider, tenant_mode, t.id)
+                    # st.switch_page() clears st.query_params on its way to the
+                    # destination page, and the Cloud Platform segmented_control
+                    # is treated as a fresh instantiation there too (its `default=`
+                    # wins over any prior selection) - confirmed live via screen
+                    # recording 2026-08-21: an AWS tenant's Dashboard button
+                    # silently landed on the Azure dashboard instead, because
+                    # BOTH of the app's usual "provider" persistence mechanisms
+                    # (query param re-assertion, widget session_state) turned out
+                    # not to survive switch_page specifically, unlike a plain
+                    # sidebar-link click or refresh. A directly-assigned widget
+                    # session_state key was tried first and raises
+                    # StreamlitAPIException ("cannot be modified after the widget
+                    # is instantiated") since the widget already rendered earlier
+                    # in this same script run. _pending_provider is a plain,
+                    # non-widget key instead - consumed once at the top of the
+                    # script (see the "provider" persistence comment there) before
+                    # the widget ever reads a default, so it can't be stale.
+                    st.session_state["_pending_provider"] = selected_provider
+                    st.switch_page(analyze_page)
+                if b2.button("Manage", icon=":material/settings:", key=f"home_manage_{t.id}", width="stretch"):
+                    st.session_state["_manage_tenant_id"] = t.id
 
     # Kept OUTSIDE the button's if-block and OUTSIDE the tenant loop above,
     # gated on session_state instead of the button's return value - a
