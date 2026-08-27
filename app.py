@@ -285,33 +285,37 @@ def _finops_tag(domain: str, capability: str):
 
 def _render_top_header():
     """Persistent KPI/status header shown once above the Analyze tabs."""
-    st.markdown("## ☁️ Multi-Cloud FinOps Optimization System")
-    st.caption(f"Enterprise Cost & Commitment Optimization Platform  ·  Provider: **{selected_provider}**  ·  Mode: **{env_mode}**")
+    st.markdown(f"## :material/cloud: {active_tenant.tenant_name}")
 
     if is_live_mode and not is_live_configured:
         st.warning(
-            f"⚠️ **Live Mode Active — No Connection Configured for {selected_provider}:** "
-            f"Please go to the **🏠 Home** page to configure your {selected_provider} credentials, "
+            f"**Production Mode Active — No Connection Configured for {selected_provider}:** "
+            f"Please go to the **:material/home: Home** page to configure your {selected_provider} credentials, "
             "or switch to **Demo / Benchmark Mode** in the sidebar to view sample data.",
-            icon="⚠️"
+            icon=":material/warning:",
         )
     elif is_live_mode and is_live_configured:
         st.success(
-            f"✅ **Connected to Live {selected_provider} API** — Tenant: **{active_tenant.tenant_name}** "
+            f"**Connected to Production {selected_provider} API** — Tenant: **{active_tenant.tenant_name}** "
             f"({len(inv_raw)} resource{'s' if len(inv_raw) != 1 else ''} synced)",
-            icon="✅",
+            icon=":material/check_circle:",
         )
 
+    # 2 decimals, not 4 - the same st.metric()-in-narrow-columns pattern
+    # already truncated real dollar values on the Home page (fixed
+    # 2026-08-27) before this header was ever looked at; applying that same
+    # fix here proactively rather than waiting for the identical bug to be
+    # reported a second time on a different page.
     with st.container(border=False):
         r1_col1, r1_col2, r1_col3 = st.columns(3)
         r1_col1.metric(f"Running {compute_label}", len(running_vms))
         r1_col2.metric(f"Running {db_label}",      len(running_dbs))
-        r1_col3.metric("Compute PAYG Rate",        fmt(total_vm_payg_hr, 4) + "/hr")
+        r1_col3.metric("Compute PAYG Rate",        fmt(total_vm_payg_hr, 2) + "/hr")
 
         st.write("") # small spacing
         r2_col1, r2_col2, r2_col3 = st.columns(3)
-        r2_col1.metric("Database PAYG Rate",       fmt(total_db_payg_hr, 4) + "/hr")
-        r2_col2.metric("Total SP Committed",       fmt(total_sp_commit, 4) + "/hr")
+        r2_col1.metric("Database PAYG Rate",       fmt(total_db_payg_hr, 2) + "/hr")
+        r2_col2.metric("Total SP Committed",       fmt(total_sp_commit, 2) + "/hr")
         r2_col3.metric("Critical Alerts",
                       f"{high_recs} items" if high_recs > 0 else "0 items",
                       delta="Action Required" if high_recs > 0 else "Optimal",

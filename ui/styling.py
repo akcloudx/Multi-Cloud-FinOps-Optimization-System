@@ -42,6 +42,21 @@ div[data-testid="stMetric"] {
     padding: 0.5rem 0.25rem;
 }
 
+/* App runs layout="wide" with no cap, so st.columns() always splits the
+   full browser width evenly - on an ultrawide monitor that stretches
+   short metric labels/values across huge gaps instead of just showing
+   more content. Capping+centering the real main container (confirmed via
+   the installed Streamlit 1.60 bundle: stMainBlockContainer carries both
+   this data-testid and the "block-container" class) fixes it app-wide
+   rather than patching every page's column layout individually. Wider
+   than the 1200px login-page cap since this holds tables/charts, not
+   marketing copy. */
+[data-testid="stMainBlockContainer"] {
+    max-width: 1600px;
+    margin-left: auto;
+    margin-right: auto;
+}
+
 /* Alert boxes (st.info/warning/success/error) toned down app-wide -
    2026-08-27, real user feedback: the default saturated tint read as
    jarring against this app's own dark theme. A CSS filter, not a
