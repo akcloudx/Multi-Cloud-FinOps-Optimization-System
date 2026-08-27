@@ -42,6 +42,17 @@ div[data-testid="stMetric"] {
     padding: 0.5rem 0.25rem;
 }
 
+/* st.dataframe's OUTER wrapper only - confirmed real via this Streamlit
+   build's own JS bundle (DataFrame.Wny8mRut.js: data-testid="stDataFrame").
+   The grid's actual cells/rows/borders are drawn on a <canvas>
+   (glide-data-grid) and CSS can't reach inside that at all - this rounds
+   just the wrapper so tables read as a card, matching the rest of the
+   app's card language, app-wide rather than one table at a time. */
+div[data-testid="stDataFrame"] {
+    border-radius: 12px;
+    overflow: hidden;
+}
+
 /* App runs layout="wide" with no cap, so st.columns() always splits the
    full browser width evenly - on an ultrawide monitor that stretches
    short metric labels/values across huge gaps instead of just showing
@@ -273,6 +284,34 @@ section[data-testid="stSidebar"] nav span {
     font-size: 11px !important; color: #BFDBFE !important;
 }
 .st-key-fl_signin_card [data-testid="stAlertContainer"] svg { color: #60A5FA !important; }
+
+/* Inventory tab's "Top Spend Categories" card (2026-08-28, round 2) -
+   approved via a quick HTML mockup before porting. Round 1 was a headcount
+   composition card (Compute/Database/Other) that still duplicated - and in
+   one case outright disagreed with - the KPI header above it; replaced
+   with this one, which reads its numbers off the same donut chart it sits
+   beside instead (top categories by real $ and %) and shares no numbers
+   with the header. Card shell reuses .fl-previewcard (same look as the
+   login page's teaser card); this is its own namespace since the
+   ranked-list-with-bars shape doesn't match that teaser's plain stat grid.
+   Reuses .fl-mono for tabular numbers rather than redefining a second one. */
+.topspend-title { font-size: 13px; font-weight: 700; margin-bottom: 14px; }
+.topspend-total { font-size: 22px; font-weight: 700; }
+.topspend-total .unit { font-size: 11px; font-weight: 600; color: #94A3B8; margin-left: 6px; }
+.topspend-sub { font-size: 11px; color: #526279; margin: 2px 0 18px; }
+.topspend-list { display: flex; flex-direction: column; gap: 12px; }
+.topspend-row { display: flex; align-items: center; gap: 10px; }
+.topspend-rank { width: 14px; font-size: 10px; font-weight: 700; color: #526279; }
+.topspend-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.topspend-label { font-size: 12.5px; color: #F1F5F9; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.topspend-pct { font-size: 12px; font-weight: 700; color: #94A3B8; width: 40px; text-align: right; }
+.topspend-value { font-size: 13px; font-weight: 700; width: 74px; text-align: right; }
+.topspend-bartrack { height: 4px; border-radius: 999px; background: #0F1A2E; overflow: hidden; margin-top: 3px; margin-left: 24px; }
+.topspend-barfill { height: 100%; border-radius: 999px; }
+.topspend-restrow {
+    display: flex; align-items: center; justify-content: space-between; margin-top: 4px;
+    padding-top: 14px; border-top: 1px solid #1E293B; font-size: 11.5px; color: #526279;
+}
 </style>
 """
 

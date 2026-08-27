@@ -8,7 +8,7 @@ Left sidebar (Workspace): Analyze — a single page whose top tabs are
   Recommendations | Maturity Assessment.
 """
 
-import sys, os, glob
+import sys, os, glob, html
 _PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _PROJECT_ROOT)
 sys.path.insert(0, os.getcwd())
@@ -284,7 +284,17 @@ def _finops_tag(domain: str, capability: str):
 
 
 def _render_top_header():
-    """Persistent KPI/status header shown once above the Analyze tabs."""
+    """Persistent tenant identity/connection-status strip shown once above
+    the Analyze tabs. Used to also carry a 6-metric grid (Running VMs/DBs,
+    PAYG rates, Total SP Committed, Critical Recommendations) - dropped
+    2026-08-28, real feedback: every one of those 6 numbers is already the
+    specific headline subject of one of the other 6 tabs (Inventory owns
+    the VM/DB counts, Savings Plan Analysis owns the PAYG rates and SP
+    commitment, Recommendations owns the critical count), so showing all of
+    them on every tab regardless of which one you're on was pure repetition
+    rather than useful cross-tab orientation. What's left here - tenant
+    identity and connection status - is genuinely cross-cutting, since no
+    single tab's job is to say which tenant you're looking at."""
     st.markdown(f"## :material/cloud: {active_tenant.tenant_name}")
 
     if is_live_mode and not is_live_configured:
@@ -300,27 +310,6 @@ def _render_top_header():
             f"({len(inv_raw)} resource{'s' if len(inv_raw) != 1 else ''} synced)",
             icon=":material/check_circle:",
         )
-
-    # 2 decimals, not 4 - the same st.metric()-in-narrow-columns pattern
-    # already truncated real dollar values on the Home page (fixed
-    # 2026-08-27) before this header was ever looked at; applying that same
-    # fix here proactively rather than waiting for the identical bug to be
-    # reported a second time on a different page.
-    with st.container(border=False):
-        r1_col1, r1_col2, r1_col3 = st.columns(3)
-        r1_col1.metric(f"Running {compute_label}", len(running_vms))
-        r1_col2.metric(f"Running {db_label}",      len(running_dbs))
-        r1_col3.metric("Compute PAYG Rate",        fmt(total_vm_payg_hr, 2) + "/hr")
-
-        st.write("") # small spacing
-        r2_col1, r2_col2, r2_col3 = st.columns(3)
-        r2_col1.metric("Database PAYG Rate",       fmt(total_db_payg_hr, 2) + "/hr")
-        r2_col2.metric("Total SP Committed",       fmt(total_sp_commit, 2) + "/hr")
-        r2_col3.metric("Critical Recommendations",
-                      f"{high_recs} items" if high_recs > 0 else "0 items",
-                      delta="Action Required" if high_recs > 0 else "Optimal",
-                      delta_color="inverse" if high_recs > 0 else "off")
-
     st.divider()
 
 
@@ -1330,13 +1319,26 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
     is_running = disp["Resource State"] == "Running"
     est_monthly = disp["PAYG Hourly Cost USD"] * (disp["Avg Daily Running Hours"] / 24.0) * MONTH_HOURS
 
-    def _monthly_cell(running: bool, x: float) -> str:
+    # 2026-08-28: switched from a pre-formatted string column to a raw
+    # numeric one so the table can render it as a real column_config
+    # ProgressColumn (a mini bar per cell, scaled to the currently-filtered
+    # rows' own max) instead of plain text - makes the biggest-cost
+    # resources visible at a glance instead of requiring reading every row.
+    # Stopped resources get an explicit 0.0 (a known fact, matching the old
+    # "(stopped)" string's own reasoning) rather than NaN/blank; a running
+    # resource with no cached pricing gets NaN so it renders blank, not a
+    # misleading $0 bar - was the "—" placeholder before. The "(stopped)"
+    # suffix itself is dropped: it's now redundant with the Power State
+    # column, which this same round color-codes (see below), so a $0 bar
+    # next to a colored "Stopped" cell doesn't need to say so twice.
+    def _monthly_numeric(running: bool, x: float) -> float:
         if not running:
-            return fmt(0, 2) + " (stopped)"   # explicit, not the generic "—" used for "no pricing data" - a stopped resource's $0 is a known fact, not a missing lookup.
-        return fmt(x, 2) if x else "—"
+            return 0.0
+        return float(x) if x else float("nan")
 
+    _currency_mult = _inr_rate if selected_currency == "INR" else 1.0
     disp["Est. Monthly PAYG Cost"] = [
-        _monthly_cell(r, x) for r, x in zip(is_running, est_monthly)
+        _monthly_numeric(r, x) * _currency_mult for r, x in zip(is_running, est_monthly)
     ]
 
     # Live mode: show which tenant a subscription ID belongs to, not just the raw GUID.
@@ -1518,6 +1520,28 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
             div.st-key-{key_prefix}_filter_bar div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] {{
                 width: fit-content !important; flex: 0 0 auto !important; min-width: 0 !important;
             }}
+            /* Bordered card wrapper around this whole toolbar was tried
+            2026-08-28 and reverted per direct feedback - back to plain
+            floating buttons on the bare page background, keeping only the
+            pill-shaped popover buttons and the right-aligned Columns fix
+            below. stPopoverButton confirmed real via this Streamlit
+            build's own JS bundle (index.BvGIeCyC.js). */
+            div.st-key-{key_prefix}_filter_bar button[data-testid="stPopoverButton"] {{
+                border-radius: 999px !important; border-color: #263349 !important;
+            }}
+            /* Push "Columns" to the right edge of its row, away from FOCUS
+            View (real feedback, 2026-08-28) - CSS-only (margin-left: auto
+            on a flex item pushes it to the far edge regardless of the
+            flex:0 0 auto rule above), deliberately NOT reordering the
+            underlying st.toggle()/popover() calls: FOCUS View must stay
+            the first widget instantiated in this function or its state
+            gets silently reset by any filter button's st.rerun() (real bug,
+            documented below at settings_row). This only targets the FIRST
+            stHorizontalBlock in this container (settings_row) so it can't
+            affect the Add filter/pills row underneath. */
+            div.st-key-{key_prefix}_filter_bar div[data-testid="stHorizontalBlock"]:nth-of-type(1) > div[data-testid="stColumn"]:nth-of-type(2) {{
+                margin-left: auto !important;
+            }}
             </style>""",
             unsafe_allow_html=True,
         )
@@ -1561,7 +1585,7 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
         # than anything that can call st.rerun() is the actual fix.
         settings_row = st.columns(2)
         with settings_row[0]:
-            focus_view = st.toggle("🔭 FOCUS View", key=f"{key_prefix}_focus", help="Show columns mapped to the FinOps Open Cost & Usage Specification (FOCUS) instead of the app's internal display names.")
+            focus_view = st.toggle(":material/center_focus_strong: FOCUS View", key=f"{key_prefix}_focus", help="Show columns mapped to the FinOps Open Cost & Usage Specification (FOCUS) instead of the app's internal display names.")
         # Re-asserted every rerun, not just once - same "provider"/"currency"
         # fix pattern used in the sidebar (see the comment there): a query
         # param only survives Streamlit's sidebar nav links if it's
@@ -1616,7 +1640,7 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
             # unchanged key.
             cols_list_gen_key = f"{key_prefix}_colslist_gen_{mode_tag}"
             cols_list_gen = st.session_state.get(cols_list_gen_key, 0)
-            with st.popover("⚙️ Columns", key=f"{key_prefix}_colspopover_{mode_tag}_{cols_gen}"):
+            with st.popover("Columns", icon=":material/view_column:", key=f"{key_prefix}_colspopover_{mode_tag}_{cols_gen}"):
                 # Same single-column scrollable checklist (+ search + Select
                 # all/Unselect all) as the filter Value picker below, reusing
                 # _value_checklist directly rather than the earlier
@@ -1657,7 +1681,7 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
         with filter_row[0]:
             add_gen_key = f"{key_prefix}_addfilter_gen"
             add_gen = st.session_state.get(add_gen_key, 0)
-            with st.popover("➕ Add filter", key=f"{key_prefix}_addfilter_popover_{add_gen}"):
+            with st.popover("Add filter", icon=":material/add:", key=f"{key_prefix}_addfilter_popover_{add_gen}"):
                 available = [l for _, l in filter_specs if l not in [f["label"] for f in active_filters]]
                 if not available:
                     st.caption("All filterable fields are already added.")
@@ -1788,13 +1812,60 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
         if _blank_col in show_df.columns:
             show_df[_blank_col] = show_df[_blank_col].apply(lambda v: str(v).strip() if pd.notna(v) and str(v).strip() else "N/A")
 
+    # Formatted back into a plain string here, not left as NumberColumn -
+    # real feedback, 2026-08-28: a numeric column right-aligns by default
+    # in this Streamlit build's grid (glide-data-grid), while PAYG Cost/hr
+    # next to it stays a TextColumn and left-aligns, since that one still
+    # needs to show a blank-pricing REASON string sometimes, not just a
+    # number - column_config has no per-column alignment override to force
+    # them to match the other way, so matching the two cost columns means
+    # formatting this one back to text. Values are already currency-
+    # converted (disp["Est. Monthly PAYG Cost"] above), so this must NOT
+    # call fmt() again - that would double-convert for INR.
+    _currency_symbol = "₹" if selected_currency == "INR" else "$"
+    if "Est. Monthly PAYG Cost" in show_df.columns:
+        show_df["Est. Monthly PAYG Cost"] = show_df["Est. Monthly PAYG Cost"].apply(
+            lambda v: f"{_currency_symbol}{v:,.2f}" if pd.notna(v) else "—"
+        )
+
+    # Color-code Power State so "Running" vs "Stopped" reads at a glance
+    # without adding a new column - pandas.Styler is explicitly supported
+    # as st.dataframe's `data` input (confirmed via this Streamlit build's
+    # own st.dataframe docstring) and composes fine with column_config
+    # below, which operates on column identity/formatting, not the cell
+    # styling values. .map() (not the deprecated .applymap()) since this
+    # app's pandas (3.0.5) has already dropped it.
+    def _status_color(val):
+        if val == "Running":
+            return "color: #34D399;"
+        if isinstance(val, str) and val.startswith("Stopped"):
+            return "color: #64748B;"
+        return ""
+
+    styled_df = show_df.style.map(_status_color, subset=["Status"]) if "Status" in show_df.columns else show_df
+
     st.dataframe(
-        show_df, hide_index=True, width="stretch", key=f"{key_prefix}_table_normal",
+        styled_df, hide_index=True, width="stretch", key=f"{key_prefix}_table_normal",
+        row_height=42,  # slightly taller than the grid's one-line default - approved via mockup, real param confirmed on st.dataframe's own docstring
         column_config={
-            "Resource Type":          st.column_config.TextColumn("Service"),
-            "Status":                 st.column_config.TextColumn("Power State"),
-            "Est. Monthly PAYG Cost": st.column_config.TextColumn("Est. Monthly PAYG Cost"),
-            "PAYG Cost/hr":           st.column_config.TextColumn("PAYG Cost/hr"),
+            # Pinned + width tuning (2026-08-28) - approved via mockup
+            # first. pinned/width confirmed real params on TextColumn's own
+            # docstring in this Streamlit build. Resource Name pinned so
+            # it's still visible while scrolling right through the other
+            # ~10 columns; widths tuned so long values (service names, SKU)
+            # get real room instead of the grid's default fit-to-content
+            # sizing, and short/numeric fields stay compact.
+            "Resource Name":          st.column_config.TextColumn(pinned=True, width=180),
+            "Subscription":           st.column_config.TextColumn(width="small"),
+            "Resource Type":          st.column_config.TextColumn("Service", width=180),
+            "Status":                 st.column_config.TextColumn("Power State", width="small"),
+            "Region":                 st.column_config.TextColumn(width="small"),
+            "Resource Group":         st.column_config.TextColumn(width="small"),
+            "Availability Zone":      st.column_config.TextColumn(width="small"),
+            "OS":                     st.column_config.TextColumn(width="small"),
+            "SKU":                    st.column_config.TextColumn(width=140),
+            "Est. Monthly PAYG Cost": st.column_config.TextColumn("Est. Monthly PAYG Cost", width="small"),
+            "PAYG Cost/hr":           st.column_config.TextColumn("PAYG Cost/hr", width="small"),
         },
     )
 
@@ -1806,22 +1877,13 @@ def _render_inventory_tab():
     )
     _finops_tag("Understand Usage & Cost", "Data Ingestion, Reporting & Analytics")
 
-    if not inv_raw.empty:
-        c_chart, c_meta = st.columns([1.5, 1])
-        with c_chart:
-            fig_donut = get_cost_distribution_chart(inv_raw, selected_provider, is_dark=is_dark_theme)
-            st.plotly_chart(fig_donut, use_container_width=True)
-        with c_meta:
-            st.markdown("#### 📊 Domain Summary")
-            st.markdown(f"• Total Managed Resources: **{len(inv_raw)}**")
-            st.markdown(f"• Active Compute Workloads: **{len(vm_inventory)}** ({compute_label})")
-            st.markdown(f"• Active Database Engines: **{len(db_inventory)}** ({db_label})")
-            if len(other_inventory) > 0:
-                st.markdown(f"• Other Managed Services: **{len(other_inventory)}**")
-            st.markdown(f"• Total PAYG Run Rate: **{fmt(total_vm_payg_hr + total_db_payg_hr, 4)}/hr**")
-            st.markdown(f"• Total Monthly Baseline: **{fmt((total_vm_payg_hr + total_db_payg_hr) * 730, 2)}/mo**")
-
-    st.divider()
+    # The donut chart + Top Spend Categories card that used to live here
+    # moved to the Cost Analysis tab, 2026-08-28 - real feedback + a look at
+    # how mature tools split this (Azure Portal's "All resources", AWS's
+    # own inventory views, CloudHealth/Cloudability): an asset inventory is
+    # a registry ("what do I have" - list, filter, search), spend-
+    # distribution charts belong in a dedicated cost view ("what does it
+    # cost and how is it distributed"). See _render_cost_analysis_tab().
 
     # Single unified table with a Resource Type filter, not a per-type tab
     # strip (2026-08-23, direct feedback: 24+ tabs were "very hard to
@@ -2290,8 +2352,89 @@ def _render_ri_coverage_tab():
 # ═══════════════════════════════════════════════════════════════════════════════
 def _render_cost_analysis_tab():
     st.subheader(f"{selected_provider} Cost Analysis")
-    st.caption("Current spend baseline and commitment coverage - see the Recommendations tab for the combined savings projection.")
+    st.caption("Spend distribution by category, current baseline, and commitment coverage - see the Recommendations tab for the combined savings projection.")
     _finops_tag("Optimize Usage & Cost", "Rate Optimization")
+
+    # Donut + Top Spend Categories card, moved here from the Inventory tab
+    # 2026-08-28 - real feedback + how mature tools split this (Azure
+    # Portal's "All resources", AWS's own inventory views, CloudHealth/
+    # Cloudability): an asset inventory is a registry ("what do I have"),
+    # spend-distribution charts belong in a dedicated cost view ("what does
+    # it cost and how is it distributed") - this tab's actual job. Doesn't
+    # duplicate the waterfall below it: this shows spend BY CATEGORY
+    # (composition lens), the waterfall shows spend BY COMMITMENT COVERAGE
+    # (optimization lens) - two different, complementary questions about
+    # cost, not the same one twice. Leads with composition, then coverage -
+    # overview before drilling into optimization.
+    if not inv_raw.empty:
+        c_chart, c_meta = st.columns([1.5, 1])
+        with c_chart:
+            fig_donut = get_cost_distribution_chart(inv_raw, selected_provider, is_dark=is_dark_theme)
+            # use_container_width is deprecated (confirmed via this
+            # Streamlit build's own st.plotly_chart docstring) and sets the
+            # figure's width via a static one-time value rather than the
+            # native CSS stretch width="stretch" (already the real default)
+            # uses - real bug this caused, 2026-08-28: the chart needed a
+            # full page reload to pick up a new container width after
+            # dragging the browser to a different monitor, instead of
+            # resizing live like everything else on the page.
+            st.plotly_chart(fig_donut, width="stretch")
+        with c_meta:
+            # Approved via a quick HTML mockup first (Artifact) before
+            # porting. This card is the donut chart's own numeric reading
+            # companion - top spend categories by real $ and %, using the
+            # EXACT same PAYG-Hourly-Cost x 730 formula ui/charts.py's
+            # get_cost_distribution_chart already uses to build the chart,
+            # so this card's total always agrees with what the chart shows.
+            # Card shell reuses .fl-previewcard (ui/styling.py, same look
+            # as the login page's teaser card); the category-list layout is
+            # its own .topspend-* namespace. One raw-HTML block, not split
+            # across markdown calls - no cross-call unclosed-tag risk.
+            _cat_spend = (inv_raw.groupby("Resource Type")["PAYG Hourly Cost USD"].sum() * 730).sort_values(ascending=False)
+            _cat_total = float(_cat_spend.sum())
+            _top_n = 4
+            _top_cats = _cat_spend.head(_top_n)
+            _rest_sum = float(_cat_spend.iloc[_top_n:].sum())
+            _rest_count = max(0, len(_cat_spend) - _top_n)
+            _rank_colors = ["#60A5FA", "#34D399", "#A78BFA", "#FBBF24"]
+
+            cat_rows_html = ""
+            for i, (cat_name, cat_val) in enumerate(_top_cats.items()):
+                cat_pct = (float(cat_val) / _cat_total * 100) if _cat_total > 0 else 0.0
+                color = _rank_colors[i % len(_rank_colors)]
+                cat_rows_html += (
+                    '<div><div class="topspend-row">'
+                    f'<span class="topspend-rank">{i + 1}</span>'
+                    f'<span class="topspend-dot" style="background:{color};"></span>'
+                    f'<span class="topspend-label" title="{html.escape(str(cat_name))}">{html.escape(str(cat_name))}</span>'
+                    f'<span class="topspend-pct">{cat_pct:.1f}%</span>'
+                    f'<span class="topspend-value fl-mono">{fmt(cat_val, 0)}</span>'
+                    "</div>"
+                    f'<div class="topspend-bartrack"><div class="topspend-barfill" style="width:{cat_pct:.0f}%;background:{color};"></div></div>'
+                    "</div>"
+                )
+            rest_row_html = ""
+            if _rest_count > 0:
+                rest_pct = (_rest_sum / _cat_total * 100) if _cat_total > 0 else 0.0
+                rest_row_html = (
+                    '<div class="topspend-restrow">'
+                    f'<span>+ {_rest_count} more categor{"y" if _rest_count == 1 else "ies"}</span>'
+                    f'<span class="fl-mono">{fmt(_rest_sum, 0)} ({rest_pct:.1f}%)</span>'
+                    "</div>"
+                )
+
+            st.markdown(
+                '<div class="fl-previewcard">'
+                '<div class="topspend-title">Top Spend Categories</div>'
+                f'<div class="topspend-total fl-mono">{fmt(_cat_total, 0)}<span class="unit">/mo across {len(_cat_spend)} categories</span></div>'
+                '<div class="topspend-sub">Reading the chart\'s biggest slices as real numbers</div>'
+                f'<div class="topspend-list">{cat_rows_html}</div>'
+                f'{rest_row_html}'
+                "</div>",
+                unsafe_allow_html=True,
+            )
+
+    st.divider()
 
     st.segmented_control(
         "Analysis Window (days)", options=[7, 14, 30],
@@ -2302,7 +2445,7 @@ def _render_cost_analysis_tab():
 
     if not inv_raw.empty:
         fig_waterfall = get_waterfall_savings_chart(total_vm_payg_hr, total_db_payg_hr, total_sp_commit, total_ri_commit, selected_provider, is_dark=is_dark_theme)
-        st.plotly_chart(fig_waterfall, use_container_width=True)
+        st.plotly_chart(fig_waterfall, width="stretch")
     else:
         st.info("No inventory data to chart yet.")
 
@@ -2379,7 +2522,7 @@ def _render_recommendations_tab():
         )
 
     fig_recs = get_recommendation_opportunity_chart(recs, is_dark=is_dark_theme)
-    st.plotly_chart(fig_recs, use_container_width=True)
+    st.plotly_chart(fig_recs, width="stretch")
 
     st.divider()
     actionable = [r for r in recs if r.get("type") != "OPTIMAL"]
@@ -2799,13 +2942,13 @@ def _render_rightsizing_tab():
 def page_analyze():
     _render_top_header()
     tabs = st.tabs([
-        "🔍 Inventory",
-        f"🎯 {'VM' if is_azure else 'EC2'} Rightsizing",
-        "💰 Savings Plan Analysis",
-        "🏷️ RI Coverage",
-        "📊 Cost Analysis",
-        "⚡ Recommendations",
-        "🧭 Maturity Assessment",
+        ":material/inventory_2: Inventory",
+        f":material/target: {'VM' if is_azure else 'EC2'} Rightsizing",
+        ":material/savings: Savings Plan Analysis",
+        ":material/local_offer: RI Coverage",
+        ":material/bar_chart: Cost Analysis",
+        ":material/lightbulb: Recommendations",
+        ":material/explore: Maturity Assessment",
     ])
     with tabs[0]:
         _render_inventory_tab()
