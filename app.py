@@ -316,7 +316,7 @@ def _render_top_header():
         r2_col1, r2_col2, r2_col3 = st.columns(3)
         r2_col1.metric("Database PAYG Rate",       fmt(total_db_payg_hr, 2) + "/hr")
         r2_col2.metric("Total SP Committed",       fmt(total_sp_commit, 2) + "/hr")
-        r2_col3.metric("Critical Alerts",
+        r2_col3.metric("Critical Recommendations",
                       f"{high_recs} items" if high_recs > 0 else "0 items",
                       delta="Action Required" if high_recs > 0 else "Optimal",
                       delta_color="inverse" if high_recs > 0 else "off")
