@@ -312,6 +312,32 @@ section[data-testid="stSidebar"] nav span {
     display: flex; align-items: center; justify-content: space-between; margin-top: 4px;
     padding-top: 14px; border-top: 1px solid #1E293B; font-size: 11.5px; color: #526279;
 }
+
+/* Savings Plan pool flow (2026-08-28) - approved via mockup first. Round 2
+   (same day): numbered circle badges on each step header were rejected as
+   UI clutter (real feedback) - removed, plain headings only. Reused for
+   all 3 pools (Compute/Database/SageMaker) since _render_sp_pool_economics
+   is shared. */
+.spflow-cardhead { font-size: 12.5px; color: #94A3B8; margin-bottom: 12px; }
+.spflow-cardhead b { color: #F1F5F9; }
+.spflow-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid #1E293B; font-size: 12.5px; }
+.spflow-row:last-child { border-bottom: none; }
+.spflow-rowname { flex: 1; }
+.spflow-rowcount { color: #94A3B8; width: 90px; }
+.spflow-rowrate { width: 90px; text-align: right; }
+.spflow-econrow { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 14px; }
+.spflow-econlabel { font-size: 10.5px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: #526279; }
+.spflow-econval { font-size: 15px; font-weight: 700; }
+.spflow-bridgetrack { height: 10px; border-radius: 999px; background: #0F1A2E; overflow: hidden; display: flex; margin-bottom: 8px; }
+.spflow-bridge-committed { background: #60A5FA; }
+.spflow-bridge-recommend { background: rgba(52,211,153,.5); }
+.spflow-legend { display: flex; gap: 16px; font-size: 11px; color: #94A3B8; flex-wrap: wrap; }
+.spflow-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.spflow-dot { width: 7px; height: 7px; border-radius: 2px; flex-shrink: 0; }
+.spflow-planrow { display: flex; align-items: center; gap: 14px; padding: 8px 0; font-size: 12.5px; flex-wrap: wrap; }
+.spflow-planid { font-family: 'JetBrains Mono', monospace; color: #F1F5F9; }
+.spflow-plandetail { color: #94A3B8; flex: 1; }
+.spflow-planrate { color: #F1F5F9; font-weight: 600; }
 </style>
 """
 

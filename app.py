@@ -280,7 +280,7 @@ def _finops_tag(domain: str, capability: str):
     """Traces a section back to its real FinOps Framework (finops.org/framework)
     Domain and Capability, so the mapping is explicit and citable rather than
     implied."""
-    st.caption(f"🧭 **FinOps Framework:** {domain} → *{capability}*")
+    st.caption(f":material/explore: **FinOps Framework:** {domain} → *{capability}*")
 
 
 def _render_top_header():
@@ -1914,18 +1914,32 @@ def _render_inventory_tab():
 # ANALYZE — SAVINGS PLAN ANALYSIS
 # ═══════════════════════════════════════════════════════════════════════════════
 def _render_sp_pool_economics(pool_label: str, pool_df: pd.DataFrame, existing_commitment_hr: float,
-                               key_prefix: str, safety_buffer_frac: float, available_terms=("1yr", "3yr")):
-    """Plain eligible -> committed -> remaining -> recommended flow for one
-    Savings Plan pool (Compute or Database):
-      1. which resources are eligible (shown as a table)
-      2. their total PAYG $/hr
-      3. how much of that is already committed
-      4. how much is left, and how much of THAT the safety buffer recommends
-         committing next.
-    Real 1yr/3yr committed-rate pricing (where cached) lives in a collapsed
-    detail section below - useful, but deliberately not driving the headline
-    numbers, which stay in directly-comparable PAYG-dollar terms instead of
-    silently mixing PAYG and committed-rate units the way the old version did.
+                               key_prefix: str, safety_buffer_frac: float, commitment_df: pd.DataFrame,
+                               available_terms=("1yr", "3yr")):
+    """Flow for one Savings Plan pool (Compute/Database/SageMaker) -
+    redesigned 2026-08-28, approved via mockup first, then simplified
+    further the same day after real feedback that even the reordered
+    version was "much more confusion... hard to understand for me even"
+    (from the person who built the app). Root cause wasn't the order, it
+    was density: 6 related dollar figures + a resource breakdown + a term
+    comparison table, all always visible and equally weighted. Current
+    shape - one always-visible headline answer, everything else collapsed:
+      - One-sentence answer + term choice + the committed/recommended/
+        eligible bridge visual, always on screen
+      - "What you already own" and "What's eligible" are collapsed
+        st.expanders (their hint text in the expander label itself), opened
+        only if someone wants the detail - same content as before, just not
+        forced onto the page by default
+      - "Detailed pricing by term" is its own small collapsed expander
+        right under the headline, since it's tied to the term choice, not
+        to ownership or eligibility
+
+    commitment_df is this pool's real purchased-plan rows (compute_sp_df /
+    db_sp_df / sagemaker_sp_df); existing_commitment_hr stays a separate
+    float param (not derived from commitment_df here) since callers already
+    compute it from the same source of truth used elsewhere in this app
+    (commitments/existing_commitments.py).
+
     available_terms restricts which term(s) can be modeled - e.g. Database
     Savings Plans are 1-year only per Azure policy, so that pool never gets a
     3-year option here."""
@@ -1938,71 +1952,192 @@ def _render_sp_pool_economics(pool_label: str, pool_df: pd.DataFrame, existing_c
     recommended_hr = round(remaining_hr * safety_buffer_frac, 4)
     leakage_hr = max(0.0, existing_commitment_hr - baseline_hr)
 
-    with st.expander(f"📋 {len(pool_df)} eligible resource(s) in this pool", expanded=len(pool_df) <= 6):
-        elig_show = pool_df[["Resource Name", "Resource Type", "SKU", "PAYG Hourly Cost USD"]].copy()
-        elig_show["PAYG Hourly Cost USD"] = elig_show["PAYG Hourly Cost USD"].apply(lambda x: fmt(x, 4))
-        elig_show = elig_show.rename(columns={"PAYG Hourly Cost USD": "PAYG Cost/hr"})
-        st.dataframe(elig_show, hide_index=True, width="stretch")
-
-    with st.container(border=True):
-        cc1, cc2, cc3, cc4 = st.columns(4)
-        cc1.metric("Eligible PAYG Cost/hr", fmt(baseline_hr) + "/hr")
-        cc2.metric("Already Committed", fmt(existing_commitment_hr) + "/hr")
-        cc3.metric(
-            "Not Yet Committed", fmt(remaining_hr) + "/hr",
-            delta=f"Over-committed by {fmt(leakage_hr)}/hr" if leakage_hr > 0 else None,
-            delta_color="inverse",
-        )
-        cc4.metric(
-            f"Recommended Purchase ({int(safety_buffer_frac*100)}% buffer)", fmt(recommended_hr) + "/hr",
-            help="The rest stays on pay-as-you-go as headroom, in case usage drops.",
-        )
-
+    # Term resolved from session_state BEFORE the widget renders (same
+    # pre-read pattern the term selector already used) so the headline
+    # sentence above the widget can use THIS render's term choice, not the
+    # previous one - avoids the sentence lagging a run behind the pills.
     if len(available_terms) > 1:
-        default_term = st.session_state.get(f"{key_prefix}_term_widget", "1yr")
-        term_choice = st.segmented_control(
-            f"Model {pool_label} commitment at term",
-            options=["1-Year", "3-Year"],
-            default=TERM_LABELS[default_term],
-            key=f"{key_prefix}_term_display",
-            help="Drives the detailed pricing below and the Recommendations tab's combined savings projection.",
-        )
-        term_key = "1yr" if term_choice == "1-Year" else "3yr"
+        term_key = st.session_state.get(f"{key_prefix}_term_widget", "1yr")
+        if term_key not in available_terms:
+            term_key = available_terms[0]
     else:
         term_key = available_terms[0]
-        # "(Azure policy)" used to be accurate since this branch only ever
-        # fired for Azure's Savings Plan for Databases - now also fires for
-        # AWS's Database Savings Plan (also 1-year-only, confirmed via
-        # AWS's own FAQ - see db_available_terms's comment above), so the
-        # wording needs to name whichever provider is actually active.
-        st.caption(f"{pool_label} Savings Plans only support a {TERM_LABELS[term_key]} term ({selected_provider} policy).")
-    st.session_state[f"{key_prefix}_term_widget"] = term_key
 
     cmp_df = savings_plan_term_comparison(pool_df, prices_df) if (is_azure and prices_df is not None and not prices_df.empty) else None
     if cmp_df is not None:
         cmp_df = cmp_df[cmp_df["term_key"].isin(available_terms)].reset_index(drop=True)
     has_real_pricing = cmp_df is not None and int(cmp_df["Priced Resources"].sum()) > 0
 
+    discount_pct = None
+    est_monthly_savings = None
     if has_real_pricing:
-        with st.expander("📊 Detailed pricing by term", expanded=False):
-            show_df = cmp_df[["Term", "PAYG $/hr", "Committed $/hr", "Discount %", "Monthly Savings"]].copy()
-            show_df["PAYG $/hr"] = cmp_df["PAYG $/hr"].apply(lambda x: fmt(x, 4))
-            show_df["Committed $/hr"] = cmp_df["Committed $/hr"].apply(lambda x: fmt(x, 4))
-            show_df["Discount %"] = cmp_df["Discount %"].apply(lambda x: f"{x:.1f}%")
-            show_df["Monthly Savings"] = cmp_df["Monthly Savings"].apply(lambda x: fmt(x, 2))
-            st.dataframe(show_df, hide_index=True, width="stretch")
+        chosen = cmp_df[cmp_df["term_key"] == term_key].iloc[0]
+        discount_pct = float(chosen["Discount %"])
+        est_monthly_savings = recommended_hr * (discount_pct / 100.0) * 730
 
-            chosen = cmp_df[cmp_df["term_key"] == term_key].iloc[0]
-            discount_pct = float(chosen["Discount %"])
-            est_monthly_savings = recommended_hr * (discount_pct / 100.0) * 730
-            st.caption(
-                f"At the {TERM_LABELS[term_key]} rate ({discount_pct:.1f}% off PAYG), committing "
-                f"{fmt(recommended_hr)}/hr is estimated to save about {fmt(est_monthly_savings, 2)}/month."
-            )
-    elif not is_azure:
-        st.caption("ℹ️ Illustrative only — real-time AWS Savings Plans pricing isn't wired up yet.")
+    # ── Headline: one answer, always visible ────────────────────────────
+    # fmt() prefixes USD values with a literal "$" - st.markdown treats a
+    # PAIRED "$...$" as LaTeX math (confirmed real, 2026-08-28: two fmt()
+    # values in the same headline rendered as italic serif text with
+    # spaces stripped and the bold ** markers swallowed, exactly KaTeX's
+    # math-mode behavior). _md() escapes "$" to "\$" so it renders as a
+    # literal currency symbol instead - safe for INR values too, which
+    # never contain "$" and pass through unchanged.
+    def _md(x: str) -> str:
+        return x.replace("$", "\\$")
+
+    # Semantic color on the key figure, not just bold - real polish pass,
+    # 2026-08-28: a warning (over-committed) and good news (savings) read
+    # identically at a glance before this, both just bold black text.
+    # :color[...] is a real Streamlit markdown directive (confirmed via
+    # st.markdown's own docstring), matching the red/green language already
+    # used for Power State and Classification elsewhere in this app.
+    if leakage_hr > 0:
+        headline = f"You've committed :red[**{_md(fmt(leakage_hr))}/hr**] more than is currently eligible — worth reviewing this plan."
+    elif recommended_hr <= 0.001:
+        headline = ":green[You're already well covered] — no additional commitment recommended right now."
+    elif has_real_pricing:
+        headline = (
+            f"Committing **{_md(fmt(recommended_hr))}/hr** more would save about "
+            f":green[**{_md(fmt(est_monthly_savings, 2))}/month**] at the {TERM_LABELS[term_key]} rate."
+        )
     else:
-        st.caption("ℹ️ Illustrative only — no cached commitment pricing yet for this pool's SKUs; re-run a sync from the tenant's Manage dialog on the Home page.")
+        headline = f"We recommend committing **{_md(fmt(recommended_hr))}/hr** more, based on your safety buffer setting."
+    st.markdown(f"#### {headline}")
+
+    if len(available_terms) > 1:
+        term_choice = st.segmented_control(
+            f"Model {pool_label} commitment at term",
+            options=["1-Year", "3-Year"],
+            default=TERM_LABELS[term_key],
+            key=f"{key_prefix}_term_display",
+            label_visibility="collapsed",  # help= tooltip is suppressed when the label is collapsed (confirmed via st.segmented_control's own docstring) - the headline sentence above already explains what this drives, so no help= here
+        )
+        st.session_state[f"{key_prefix}_term_widget"] = "1yr" if term_choice == "1-Year" else "3yr"
+    else:
+        # "(Azure policy)" used to be accurate since this branch only ever
+        # fired for Azure's Savings Plan for Databases - now also fires for
+        # AWS's Database Savings Plan (also 1-year-only, confirmed via
+        # AWS's own FAQ - see db_available_terms's comment above), so the
+        # wording needs to name whichever provider is actually active.
+        st.caption(f"{pool_label} Savings Plans only support a {TERM_LABELS[term_key]} term ({selected_provider} policy).")
+
+    # Total $ commitment over the full term, not just the monthly savings -
+    # real gap flagged directly, 2026-08-28: the headline says how much
+    # you'd SAVE, not what you'd actually be signing up to PAY. Computed
+    # per available term (not just the active one) from data already on
+    # this page: the recommended hourly amount at that term's real discount
+    # rate (cmp_df, same source the headline's own savings figure uses),
+    # times the real hours in that term (MONTH_HOURS x 12 or x 36).
+    if has_real_pricing and recommended_hr > 0.001:
+        term_cost_parts = []
+        for t in available_terms:
+            row = cmp_df[cmp_df["term_key"] == t].iloc[0]
+            t_discount_pct = float(row["Discount %"])
+            committed_rate = recommended_hr * (1 - t_discount_pct / 100.0)
+            hours_in_term = MONTH_HOURS * (12 if t == "1yr" else 36)
+            total_cost = committed_rate * hours_in_term
+            term_cost_parts.append(f"{TERM_LABELS[t]} {_md(fmt(total_cost, 0))}")
+        st.caption(f"Total commitment if purchased: {' · '.join(term_cost_parts)}")
+
+    if not has_real_pricing:
+        reason = (
+            "real-time AWS Savings Plans pricing isn't wired up yet" if not is_azure else
+            "no cached commitment pricing yet for this pool's SKUs - re-run a sync from the tenant's Manage dialog on the Home page"
+        )
+        st.caption(f":material/info: Estimate only — {reason}.")
+
+    committed_pct = min(100.0, (existing_commitment_hr / baseline_hr * 100)) if baseline_hr > 0 else 0.0
+    recommend_pct = max(0.0, min(100.0 - committed_pct, (recommended_hr / baseline_hr * 100) if baseline_hr > 0 else 0.0))
+    leftover_hr = max(0.0, remaining_hr - recommended_hr)
+    over_committed_html = (
+        f'<div class="spflow-cardhead" style="margin-top:10px;color:#F87171;">'
+        f'Over-committed by {fmt(leakage_hr)}/hr - committed more than is currently eligible.</div>'
+        if leakage_hr > 0 else ""
+    )
+    st.markdown(
+        '<div class="fl-previewcard" style="margin-top:14px;">'
+        f'<div class="spflow-econrow"><span class="spflow-econlabel">Eligible Hourly Spend</span><span class="spflow-econval fl-mono">{fmt(baseline_hr)}/hr</span></div>'
+        '<div class="spflow-bridgetrack">'
+        f'<div class="spflow-bridge-committed" style="width:{committed_pct:.1f}%;"></div>'
+        f'<div class="spflow-bridge-recommend" style="width:{recommend_pct:.1f}%;"></div>'
+        "</div>"
+        '<div class="spflow-legend">'
+        f'<span><span class="spflow-dot" style="background:#60A5FA;"></span>Committed — {fmt(existing_commitment_hr)}/hr</span>'
+        f'<span><span class="spflow-dot" style="background:rgba(52,211,153,.5);"></span>Recommended — {fmt(recommended_hr)}/hr</span>'
+        f'<span><span class="spflow-dot" style="background:#1E2A3F;"></span>Left uncommitted (buffer) — {fmt(leftover_hr)}/hr</span>'
+        "</div>"
+        f"{over_committed_html}"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    # "Detailed pricing by term" table removed entirely, 2026-08-28 - real
+    # feedback: explained twice (what it means, why it differs from the
+    # headline number) and it still didn't land, plus its own "PAYG $/hr"
+    # figure quietly disagreed with the bridge card's "Eligible Hourly
+    # Spend" right above it (this table uses cached retail pricing via
+    # savings_plan_term_comparison's _lookup_payg, the bridge uses actual
+    # inventory PAYG rates - a second, slightly different version of a
+    # number already on screen). The 1yr/3yr comparison this table existed
+    # to support is still available: click each term pill above and read
+    # the headline sentence for that term. cmp_df/has_real_pricing/
+    # discount_pct/est_monthly_savings are still computed above - still
+    # needed for the headline and the "Estimate only" caption, just no
+    # longer rendered as their own table.
+
+    commitment_hint = (
+        f"{len(commitment_df)} active plan{'s' if len(commitment_df) != 1 else ''}, covers {(existing_commitment_hr / baseline_hr * 100) if baseline_hr > 0 else 0.0:.0f}%"
+        if not commitment_df.empty else "none purchased yet"
+    )
+    with st.expander(f"What you already own — {commitment_hint}", icon=":material/receipt_long:", expanded=False):
+        st.caption("A record of your active Savings Plans - not a recommendation.")
+        if commitment_df.empty:
+            st.caption(f"No {pool_label} Savings Plans purchased yet.")
+        else:
+            sp_show = commitment_df[["commitment_id", "scope_sku", "scope_region", "hourly_usd_commitment", "term", "expiry_date"]].copy()
+            sp_show["hourly_usd_commitment"] = sp_show["hourly_usd_commitment"].apply(lambda x: fmt(x, 4) + "/hr")
+            st.dataframe(_with_mapping_caveat(commitment_df, sp_show), hide_index=True, width="stretch", column_config=_SP_COMMITMENT_COLUMN_CONFIG)
+
+    by_type = (
+        pool_df.groupby("Resource Type")
+        .agg(count=("Resource Name", "size"), rate=("PAYG Hourly Cost USD", "sum"))
+        .reset_index()
+        .sort_values("rate", ascending=False)
+    )
+    with st.expander(f"What's eligible — {len(pool_df)} resource{'s' if len(pool_df) != 1 else ''}, {fmt(baseline_hr)}/hr", icon=":material/checklist:", expanded=False):
+        type_rows_html = "".join(
+            '<div class="spflow-row">'
+            f'<span class="spflow-rowname">{html.escape(str(r["Resource Type"]))}</span>'
+            f'<span class="spflow-rowcount">{int(r["count"])} resource{"s" if r["count"] != 1 else ""}</span>'
+            f'<span class="spflow-rowrate fl-mono">{fmt(r["rate"], 4)}/hr</span>'
+            "</div>"
+            for _, r in by_type.iterrows()
+        )
+        st.markdown(f'<div class="spflow-cardhead">By resource type</div>{type_rows_html}', unsafe_allow_html=True)
+        st.markdown('<div class="spflow-cardhead" style="margin-top:16px;">Every resource</div>', unsafe_allow_html=True)
+        elig_show = pool_df[["Resource Name", "Resource Type", "SKU", "PAYG Hourly Cost USD"]].copy()
+        elig_show["PAYG Hourly Cost USD"] = elig_show["PAYG Hourly Cost USD"].apply(lambda x: fmt(x, 4))
+        elig_show = elig_show.rename(columns={"PAYG Hourly Cost USD": "PAYG Cost/hr"})
+        st.dataframe(elig_show, hide_index=True, width="stretch")
+
+
+# Shared by every "existing commitments" table in the Savings Plan tab
+# (Compute/Database/SageMaker pools) - these used to show raw snake_case
+# column names (commitment_id, scope_sku, ...) verbatim, the only tables in
+# this app that did, since no column_config was ever applied here (real gap
+# caught while reviewing this tab, 2026-08-28). Widths explicit per this
+# session's established finding that neither width="small" nor leaving
+# width unset reliably avoids clipping - sized to this app's real data
+# (commitment IDs, SKU/region strings, "$X.XXXX/hr" formatted values).
+_SP_COMMITMENT_COLUMN_CONFIG = {
+    "commitment_id":          st.column_config.TextColumn("Commitment ID", width=180),
+    "scope_sku":              st.column_config.TextColumn("SKU", width=140),
+    "scope_region":           st.column_config.TextColumn("Region", width=110),
+    "hourly_usd_commitment":  st.column_config.TextColumn("Hourly Commitment", width=140),
+    "term":                   st.column_config.TextColumn("Term", width=80),
+    "expiry_date":            st.column_config.TextColumn("Expiry Date", width=120),
+}
 
 
 def _with_mapping_caveat(source_df: pd.DataFrame, display_df: pd.DataFrame) -> pd.DataFrame:
@@ -2023,7 +2158,7 @@ def _render_savings_plan_tab():
     st.caption("Shows which resources run continuously, compares them to what you've already committed, and recommends how much more to commit.")
     _finops_tag("Optimize Usage & Cost", "Rate Optimization")
 
-    with st.expander(f"📋 {selected_provider} Savings Plan Coverage Policy", expanded=False):
+    with st.expander(f"{selected_provider} Savings Plan Coverage Policy", icon=":material/checklist:", expanded=False):
         if is_azure:
             sp_coverage_rows = [
                 {
@@ -2071,7 +2206,20 @@ def _render_savings_plan_tab():
                     "This App Tracks": "Real-Time Inference Endpoints, Notebook Instances ✅. Training/Processing/Data Wrangler/Batch Transform ❌ NOT tracked - ephemeral one-shot jobs, no persistent running/stopped identity to enumerate.",
                 },
             ]
-        st.dataframe(pd.DataFrame(sp_coverage_rows), hide_index=True, width="stretch")
+        # Cards, not a dataframe - real bug caught live, 2026-08-28: these
+        # cells are paragraph-length prose, and st.dataframe cells don't
+        # wrap text regardless of column width (confirmed this session on
+        # the Inventory/Rightsizing tables' clipping issues) - a table was
+        # never going to show this content in full, only trade off which
+        # part got cut. Real st.markdown text wraps naturally, so cards
+        # fully solve it rather than just widening columns.
+        for row in sp_coverage_rows:
+            with st.container(border=True):
+                st.markdown(f"**{row['Savings Plan Type']}**")
+                st.markdown(f":material/check_circle: **Covered:** {row['What Is Covered']}")
+                st.markdown(f":material/block: **Not covered:** {row['What Is NOT Covered']}")
+                if "This App Tracks" in row:
+                    st.markdown(f":material/info: **This app tracks:** {row['This App Tracks']}")
 
     safety_buffer_pct_local = st.slider(
         "Safety Buffer % — how much of the steady-state footprint to commit",
@@ -2082,118 +2230,120 @@ def _render_savings_plan_tab():
     )
     st.divider()
 
-    st.markdown("### A — Compute Savings Plan Pool")
-    st.caption("Resources below run 24 hours a day, so committing against them is safe — the usage won't drop. Resources that don't run continuously are excluded and stay on pay-as-you-go.")
+    # Sub-tabs per pool, not stacked sections (2026-08-28, real feedback:
+    # stacking full 4-part flows for every pool on one page was "too much
+    # information" regardless of the internal order) - only one pool's flow
+    # is on screen at a time. Pool headers ("### A - Compute Savings Plan
+    # Pool") dropped since the tab label already names the pool.
+    pool_tab_labels = ["Compute", db_sp_title] + (["SageMaker AI"] if not is_azure else [])
+    pool_tabs = st.tabs(pool_tab_labels)
 
-    _render_sp_pool_economics("Compute", compute_24x7, compute_sp_commit, "sp_compute", safety_buffer)
+    with pool_tabs[0]:
+        # Matches the Database pool's caption verbatim, per direct request
+        # 2026-08-28 - both pools now state the same plain "Running"
+        # eligibility rule, consistent with the live-mode data gap
+        # discussed this round (the 24x7-specific distinction isn't
+        # meaningfully enforceable yet outside demo data).
+        st.caption(
+            "A Savings Plan is a fixed hourly commitment, so only resources currently Running are eligible - "
+            "stopped resources stay on pay-as-you-go."
+        )
 
-    if is_live_mode and is_live_configured:
-        if compute_sp_pool_inventory.empty:
-            st.info(
-                "ℹ️ No Savings Plan for Compute-eligible resource types found in this tenant "
-                "(VMs, App Service, Functions Premium, Container Instances, Dedicated Host, "
-                "Container Apps, Spring Apps) - nothing to baseline yet.", icon="ℹ️",
-            )
-        elif compute_24x7_candidates.empty:
-            st.info(
-                f"ℹ️ {len(compute_sp_pool_inventory)} SP-eligible-type resource(s) found, but none are "
-                "both **Running** and **24x7** (Avg Daily Running Hours = 24) - Savings Plans are only "
-                "recommended against a steady-state 24x7 baseline to avoid over-committing.", icon="ℹ️",
-            )
-        elif compute_24x7.empty:
-            st.warning(
-                f"⚠️ {len(compute_24x7_candidates)} resource(s) are running 24x7, but none are actually "
-                "eligible for Savings Plan for Compute at their current SKU/tier - see the breakdown below.",
-                icon="⚠️",
-            )
+        _render_sp_pool_economics("Compute", compute_24x7, compute_sp_commit, "sp_compute", safety_buffer, compute_sp_df)
 
-        if not compute_sp_excluded.empty:
-            with st.expander(f"🚫 {len(compute_sp_excluded)} running resource(s) excluded from the Compute SP baseline", expanded=False):
-                st.dataframe(
-                    compute_sp_excluded[["Resource Name", "Resource Type", "SKU", "SP Eligibility Note"]],
-                    hide_index=True, width="stretch",
-                    column_config={"SP Eligibility Note": st.column_config.TextColumn("Why excluded", width="large")},
+        if is_live_mode and is_live_configured:
+            if compute_sp_pool_inventory.empty:
+                st.info(
+                    "No Savings Plan for Compute-eligible resource types found in this tenant "
+                    "(VMs, App Service, Functions Premium, Container Instances, Dedicated Host, "
+                    "Container Apps, Spring Apps) - nothing to baseline yet.", icon=":material/info:",
+                )
+            elif compute_24x7_candidates.empty:
+                st.info(
+                    f"{len(compute_sp_pool_inventory)} SP-eligible-type resource(s) found, but none are "
+                    "both **Running** and **24x7** (Avg Daily Running Hours = 24) - Savings Plans are only "
+                    "recommended against a steady-state 24x7 baseline to avoid over-committing.", icon=":material/info:",
+                )
+            elif compute_24x7.empty:
+                st.warning(
+                    f"{len(compute_24x7_candidates)} resource(s) are running 24x7, but none are actually "
+                    "eligible for Savings Plan for Compute at their current SKU/tier - see the breakdown below.",
+                    icon=":material/warning:",
                 )
 
-    if not compute_sp_df.empty:
-        sp_c = compute_sp_df[["commitment_id", "scope_sku", "scope_region", "hourly_usd_commitment", "term", "expiry_date"]].copy()
-        sp_c["hourly_usd_commitment"] = sp_c["hourly_usd_commitment"].apply(lambda x: fmt(x, 4) + "/hr")
-        st.dataframe(_with_mapping_caveat(compute_sp_df, sp_c), hide_index=True, width="stretch")
+            if not compute_sp_excluded.empty:
+                with st.expander(f"{len(compute_sp_excluded)} running resource(s) excluded from the Compute SP baseline", icon=":material/block:", expanded=False):
+                    st.dataframe(
+                        compute_sp_excluded[["Resource Name", "Resource Type", "SKU", "SP Eligibility Note"]],
+                        hide_index=True, width="stretch",
+                        column_config={"SP Eligibility Note": st.column_config.TextColumn("Why excluded", width="large")},
+                    )
 
-    st.divider()
+    with pool_tabs[1]:
+        # Same real-accuracy fix as the Compute pool's caption above - being
+        # currently Running doesn't guarantee it stays running for the
+        # commitment term, so this states the eligibility rule, not a
+        # safety claim the safety buffer already contradicts.
+        st.caption("A Savings Plan is a fixed hourly commitment, so only resources currently Running are eligible - stopped resources stay on pay-as-you-go.")
 
-    st.markdown(f"### B — {db_sp_title} Pool")
-    st.caption("Resources below run continuously, so committing against them is safe. Resources that aren't currently running are excluded and stay on pay-as-you-go.")
+        # Both providers' Database Savings Plan is 1-year ONLY - confirmed
+        # via AWS's own FAQ for the AWS side (aws.amazon.com/savingsplans/
+        # faqs), same restriction Azure's Savings Plan for Databases
+        # already has. This used to be AWS-conditional ("EC2 Instance
+        # Savings Plans genuinely do offer both terms") because the
+        # database pool's AWS bucket used to be EC2 Instance Savings Plan
+        # as a placeholder before Database Savings Plans were confirmed
+        # real - corrected 2026-08-22 alongside db_sp_title below and
+        # commitments/existing_commitments.py's bucketing.
+        db_available_terms = ("1yr",)
+        _render_sp_pool_economics(db_label, db_running, db_sp_commit, "sp_db", safety_buffer, db_sp_df, available_terms=db_available_terms)
 
-    # Both providers' Database Savings Plan is 1-year ONLY - confirmed via
-    # AWS's own FAQ for the AWS side (aws.amazon.com/savingsplans/faqs),
-    # same restriction Azure's Savings Plan for Databases already has. This
-    # used to be AWS-conditional ("EC2 Instance Savings Plans genuinely do
-    # offer both terms") because the database pool's AWS bucket used to be
-    # EC2 Instance Savings Plan as a placeholder before Database Savings
-    # Plans were confirmed real - corrected 2026-08-22 alongside db_sp_title
-    # below and commitments/existing_commitments.py's bucketing.
-    db_available_terms = ("1yr",)
-    _render_sp_pool_economics(db_label, db_running, db_sp_commit, "sp_db", safety_buffer, available_terms=db_available_terms)
-
-    if is_live_mode and is_live_configured:
-        if db_inventory.empty:
-            st.info(f"ℹ️ No {db_sp_title}-eligible resource types found in this tenant - nothing to baseline yet.", icon="ℹ️")
-        elif db_running_candidates.empty:
-            st.info(
-                f"ℹ️ {len(db_inventory)} SP-eligible-type database resource(s) found, but none are "
-                "currently Running.", icon="ℹ️",
-            )
-        elif db_running.empty:
-            st.warning(
-                f"⚠️ {len(db_running_candidates)} database resource(s) are running, but none are actually "
-                "eligible for Savings Plan for Databases at their current tier - see the breakdown below.",
-                icon="⚠️",
-            )
-
-        if not db_sp_excluded.empty:
-            with st.expander(f"🚫 {len(db_sp_excluded)} running resource(s) excluded from the {db_sp_title} baseline", expanded=False):
-                st.dataframe(
-                    db_sp_excluded[["Resource Name", "Resource Type", "SKU", "SP Eligibility Note"]],
-                    hide_index=True, width="stretch",
-                    column_config={"SP Eligibility Note": st.column_config.TextColumn("Why excluded", width="large")},
+        if is_live_mode and is_live_configured:
+            if db_inventory.empty:
+                st.info(f"No {db_sp_title}-eligible resource types found in this tenant - nothing to baseline yet.", icon=":material/info:")
+            elif db_running_candidates.empty:
+                st.info(
+                    f"{len(db_inventory)} SP-eligible-type database resource(s) found, but none are "
+                    "currently Running.", icon=":material/info:",
+                )
+            elif db_running.empty:
+                st.warning(
+                    f"{len(db_running_candidates)} database resource(s) are running, but none are actually "
+                    "eligible for Savings Plan for Databases at their current tier - see the breakdown below.",
+                    icon=":material/warning:",
                 )
 
-    if not db_sp_df.empty:
-        sp_d = db_sp_df[["commitment_id", "scope_sku", "scope_region", "hourly_usd_commitment", "term", "expiry_date"]].copy()
-        sp_d["hourly_usd_commitment"] = sp_d["hourly_usd_commitment"].apply(lambda x: fmt(x, 4) + "/hr")
-        st.dataframe(_with_mapping_caveat(db_sp_df, sp_d), hide_index=True, width="stretch")
+            if not db_sp_excluded.empty:
+                with st.expander(f"{len(db_sp_excluded)} running resource(s) excluded from the {db_sp_title} baseline", icon=":material/block:", expanded=False):
+                    st.dataframe(
+                        db_sp_excluded[["Resource Name", "Resource Type", "SKU", "SP Eligibility Note"]],
+                        hide_index=True, width="stretch",
+                        column_config={"SP Eligibility Note": st.column_config.TextColumn("Why excluded", width="large")},
+                    )
 
     # AWS-only - SageMaker Savings Plans have no Azure equivalent product.
     if not is_azure:
-        st.divider()
+        with pool_tabs[2]:
+            st.caption(
+                "Covers Real-Time Inference Endpoints and Notebook Instances only - Training, Processing, "
+                "Data Wrangler, and Batch Transform jobs are one-shot ephemeral executions with no persistent "
+                "running/stopped identity, so this app has no inventory row to baseline them against."
+            )
 
-        st.markdown("### C — SageMaker AI Savings Plan Pool")
-        st.caption(
-            "Covers Real-Time Inference Endpoints and Notebook Instances only - Training, Processing, "
-            "Data Wrangler, and Batch Transform jobs are one-shot ephemeral executions with no persistent "
-            "running/stopped identity, so this app has no inventory row to baseline them against."
-        )
+            _render_sp_pool_economics("SageMaker AI", sagemaker_24x7, sagemaker_sp_commit, "sp_sagemaker", safety_buffer, sagemaker_sp_df)
 
-        _render_sp_pool_economics("SageMaker AI", sagemaker_24x7, sagemaker_sp_commit, "sp_sagemaker", safety_buffer)
-
-        if is_live_mode and is_live_configured:
-            if sagemaker_sp_pool_inventory.empty:
-                st.info(
-                    "ℹ️ No SageMaker Endpoint/Notebook Instance resources found in this tenant - "
-                    "nothing to baseline yet.", icon="ℹ️",
-                )
-            elif sagemaker_24x7_candidates.empty:
-                st.info(
-                    f"ℹ️ {len(sagemaker_sp_pool_inventory)} SageMaker resource(s) found, but none are "
-                    "both **Running** and **24x7** (Avg Daily Running Hours = 24) - Savings Plans are only "
-                    "recommended against a steady-state 24x7 baseline to avoid over-committing.", icon="ℹ️",
-                )
-
-        if not sagemaker_sp_df.empty:
-            sp_sm = sagemaker_sp_df[["commitment_id", "scope_sku", "scope_region", "hourly_usd_commitment", "term", "expiry_date"]].copy()
-            sp_sm["hourly_usd_commitment"] = sp_sm["hourly_usd_commitment"].apply(lambda x: fmt(x, 4) + "/hr")
-            st.dataframe(_with_mapping_caveat(sagemaker_sp_df, sp_sm), hide_index=True, width="stretch")
+            if is_live_mode and is_live_configured:
+                if sagemaker_sp_pool_inventory.empty:
+                    st.info(
+                        "No SageMaker Endpoint/Notebook Instance resources found in this tenant - "
+                        "nothing to baseline yet.", icon=":material/info:",
+                    )
+                elif sagemaker_24x7_candidates.empty:
+                    st.info(
+                        f"{len(sagemaker_sp_pool_inventory)} SageMaker resource(s) found, but none are "
+                        "both **Running** and **24x7** (Avg Daily Running Hours = 24) - Savings Plans are only "
+                        "recommended against a steady-state 24x7 baseline to avoid over-committing.", icon=":material/info:",
+                    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2876,7 +3026,7 @@ def _render_rightsizing_tab():
     k1, k2, k3 = st.columns(3)
     k1.metric(":material/trending_down: Underutilized", under_count)
     k2.metric(":material/trending_up: Overutilized", over_count)
-    k3.metric(":material/savings: Est. Monthly Savings (downsizes)", fmt(total_savings, 2))
+    k3.metric(":material/payments: Est. Monthly Savings (downsizes)", fmt(total_savings, 2))
 
     st.divider()
 
@@ -3007,7 +3157,7 @@ def page_analyze():
     tabs = st.tabs([
         ":material/inventory_2: Inventory",
         f":material/target: {'VM' if is_azure else 'EC2'} Rightsizing",
-        ":material/savings: Savings Plan Analysis",
+        ":material/payments: Savings Plan Analysis",
         ":material/local_offer: RI Coverage",
         ":material/bar_chart: Cost Analysis",
         ":material/lightbulb: Recommendations",
