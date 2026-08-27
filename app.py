@@ -864,24 +864,128 @@ Missing this step is **not fatal** - Resource inventory and cost data (step 2) s
         st.rerun()
 
 
+def _compute_portfolio_kpis():
+    """Aggregates the same real per-tenant numbers the Analyze page already
+    computes (run_waterfall / savings_plan_analysis / reservation_analysis /
+    generate_recommendations - not a separate/approximate calculation) across
+    EVERY tenant on BOTH providers for the current mode, added 2026-08-27 for
+    the Home page redesign. This is deliberately the only new cross-tenant
+    view in the app - every other page is scoped to whichever single
+    provider/tenant is currently selected in the sidebar.
+
+    Demo mode always has exactly one seeded tenant per provider (tenant_id=
+    None) - same convention Tenant Management's own table already uses, not
+    a Home-specific special case. Live mode enumerates whatever's actually
+    connected via list_tenants(); a provider with nothing connected simply
+    contributes nothing, no fabricated zero-tenant row.
+
+    Sync staleness is only evaluated in live mode - a demo tenant has no
+    real "last synced" concept to flag."""
+    from datetime import datetime, timedelta
+    STALE_AFTER_DAYS = 7
+
+    total_tenants = 0
+    total_resources = 0
+    total_payg_hr = 0.0
+    total_committed_hr = 0.0
+    total_critical = 0
+    stale = []
+
+    for provider in ("Azure", "AWS"):
+        sp_types = COMPUTE_SP_ELIGIBLE_TYPES if provider == "Azure" else AWS_COMPUTE_SP_TYPES
+        if tenant_mode == "demo":
+            tenants = [(None, f"{provider} Demo Tenant", None)]
+        else:
+            tenants = [(t.id, t.tenant_name, t.last_synced_at) for t in list_tenants(provider, "live")]
+
+        for tenant_id, tname, last_synced in tenants:
+            total_tenants += 1
+            inv = get_compute_inventory(provider=provider, mode=tenant_mode, tenant_id=tenant_id)
+            total_resources += len(inv)
+            total_payg_hr += float(inv["PAYG Hourly Cost USD"].sum()) if not inv.empty else 0.0
+
+            sp_df = get_existing_savings_plans(provider=provider, mode=tenant_mode, tenant_id=tenant_id)
+            ri_df = get_existing_reservations(provider=provider, mode=tenant_mode, tenant_id=tenant_id)
+            total_committed_hr += float(sp_df["hourly_usd_commitment"].sum()) if not sp_df.empty else 0.0
+            total_committed_hr += float((ri_df["hourly_usd_commitment"] * ri_df["reserved_qty"]).sum()) if not ri_df.empty else 0.0
+
+            if not inv.empty:
+                inv = inv.copy()
+                inv["Is Orphaned"] = compute_orphaned_status(inv, ri_df)
+            wf = run_waterfall(inv, ri_df, sp_df, simulate_days=simulate_days)
+            sp_res = savings_plan_analysis(inv, sp_df, safety_buffer=safety_buffer, eligible_types=list(sp_types))
+            ri_res = reservation_analysis(inv, ri_df)
+            recs = generate_recommendations(sp_res, ri_res, wf, safety_buffer=safety_buffer)
+            total_critical += sum(1 for r in recs if r["severity"] == "HIGH")
+
+            if tenant_mode == "live" and last_synced:
+                try:
+                    synced_at = datetime.strptime(last_synced.replace(" UTC", ""), "%Y-%m-%d %H:%M:%S")
+                    if datetime.utcnow() - synced_at > timedelta(days=STALE_AFTER_DAYS):
+                        stale.append(tname)
+                except ValueError:
+                    pass
+
+    return {
+        "tenants": total_tenants, "resources": total_resources,
+        "payg_hr": total_payg_hr, "committed_hr": total_committed_hr,
+        "critical": total_critical, "stale": stale,
+    }
+
+
 def page_home():
-    """Pure landing page - no metrics, no tenant table. Everything
-    tenant-related (list, add, manage) moved to its own Tenant Management
-    page 2026-08, per approved sketch (Home / Tenant Management / User
-    Management as three flat sidebar entries, no "Workspace" section) -
-    Home had drifted into being a tenant-ops screen with a welcome banner
-    bolted on top, not an actual home page."""
-    st.markdown("## 🏠 Home")
-    st.caption(f"Welcome to Multi-Cloud FinOps Optimization System, hello {current_user['display_name'] or current_user['username']}!")
-    _finops_tag("Manage the FinOps Practice", "FinOps Practice Operations & Automation, Tools & Services")
-    st.divider()
+    """Portfolio overview - rebuilt 2026-08-27 (previously a pure landing
+    page with just a welcome line, no metrics, no tenant table - see git
+    history for that version's own reasoning, superseded here). The one
+    thing genuinely missing from the rest of the app is a cross-tenant
+    rollup - every other KPI anywhere is scoped to whichever single
+    provider/tenant the sidebar has selected - so that's Home's whole job
+    now: real aggregate numbers, a nudge if something needs attention, one
+    way in to Tenant Management for anything actionable.
+
+    Deliberately does NOT re-list tenants here (name/status/last-synced/
+    actions) - that's Tenant Management's table, verbatim, and duplicating
+    it here was flagged directly and removed during design review."""
+    st.markdown("## :material/home: Home")
+    st.caption(f"Welcome back, {current_user['display_name'] or current_user['username']} — here's your portfolio across Azure and AWS.")
+
+    kpis = _compute_portfolio_kpis()
+
+    if kpis["tenants"] == 0:
+        st.info("No tenants connected yet. Connect your first one to see your portfolio here.")
+    else:
+        # No divider, no bordered box - matches _render_top_header()'s own
+        # convention for the Analyze page's top-level KPI row
+        # (st.container(border=False)), not _render_sp_pool_economics'
+        # bordered sub-widget style, which was the wrong precedent to copy
+        # (real user feedback: the box + the divider above it read as more
+        # framing than a simple summary row needs). One row of 5 columns,
+        # 2-decimal values, is tight enough on its own without a container.
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("Tenants Connected", kpis["tenants"])
+        c2.metric("Resources Tracked", kpis["resources"])
+        c3.metric("Total PAYG Rate", fmt(kpis["payg_hr"], 2) + "/hr")
+        c4.metric("Total Committed", fmt(kpis["committed_hr"], 2) + "/hr")
+        c5.metric(
+            "Critical Alerts",
+            f"{kpis['critical']} items" if kpis["critical"] > 0 else "0 items",
+            delta="Action Required" if kpis["critical"] > 0 else "Optimal",
+            delta_color="inverse" if kpis["critical"] > 0 else "off",
+        )
+
+        if kpis["stale"]:
+            names = ", ".join(kpis["stale"])
+            plural = "s" if len(kpis["stale"]) > 1 else ""
+            st.warning(f"⚠️ {len(kpis['stale'])} tenant{plural} hasn't synced in over a week: **{names}**.", icon="⚠️")
+
+    st.write("")
     st.markdown("Connect a cloud tenant, review its sync status, or jump into its dashboard - all from Tenant Management.")
-    if st.button("🗂️ Go to Tenant Management", type="primary"):
+    if st.button("Go to Tenant Management", icon=":material/domain:", type="primary"):
         st.switch_page(tenant_mgmt_page)
 
 
 def page_tenant_management():
-    st.markdown("## 🗂️ Tenant Management")
+    st.markdown("## :material/domain: Tenant Management")
     st.caption(f"Connect, sync, and manage {selected_provider} tenants.")
 
     hdr_l, hdr_r = st.columns([4, 1])
@@ -982,7 +1086,7 @@ def page_tenant_management():
 # MANAGE — USER MANAGEMENT
 # ═══════════════════════════════════════════════════════════════════════════════
 def page_users():
-    st.subheader("👥 Dashboard User Accounts")
+    st.subheader(":material/group: Dashboard User Accounts")
     st.caption("Accounts that can sign in to this dashboard. Shared across everyone - not tied to a cloud tenant.")
     _finops_tag("Manage the FinOps Practice", "FinOps Practice Operations & Automation, Tools & Services")
 
@@ -2372,9 +2476,15 @@ def _render_maturity_tab():
 # ANALYZE — VM RIGHTSIZING (Azure only, v1 - see analysis/rightsizing.py)
 # ═══════════════════════════════════════════════════════════════════════════════
 def _render_rightsizing_tab():
-    st.subheader(f"{selected_provider} VM Rightsizing")
+    # "VM" is Azure-specific terminology - AWS's real compute resource is an
+    # EC2 instance, not a "VM" (same distinction the Inventory tab's own
+    # compute_label already makes: "Virtual Machines" vs "EC2 Instances").
+    # Real bug caught by the user (2026-08-27): this tab used to hardcode
+    # "VM Rightsizing" even while showing AWS EC2 rows.
+    rightsizing_noun = "VM" if is_azure else "EC2"
+    st.subheader(f"{selected_provider} {rightsizing_noun} Rightsizing")
     st.caption(
-        "Flags virtual machines that are under- or over-provisioned relative to their real "
+        f"Flags {compute_label.lower()} that are under- or over-provisioned relative to their real "
         "CPU/memory utilization, with configurable, industry-grounded thresholds."
     )
     _finops_tag("Optimize Usage & Cost", "Usage Optimization")
@@ -2664,7 +2774,7 @@ def page_analyze():
     _render_top_header()
     tabs = st.tabs([
         "🔍 Inventory",
-        "🎯 VM Rightsizing",
+        f"🎯 {'VM' if is_azure else 'EC2'} Rightsizing",
         "💰 Savings Plan Analysis",
         "🏷️ RI Coverage",
         "📊 Cost Analysis",
@@ -2696,10 +2806,10 @@ def page_analyze():
 # Tenant Management, never browsed to directly, since analyzing data only
 # makes sense once a specific tenant is active.
 # ─────────────────────────────────────────────────────────────────────────────
-home_page        = st.Page(page_home,              title="Home",              icon="🏠", default=True)
-tenant_mgmt_page = st.Page(page_tenant_management,  title="Tenant Management", icon="🗂️")
-users_page       = st.Page(page_users,              title="User Management",   icon="👥")
-analyze_page     = st.Page(page_analyze,            title="Analyze",           icon="📊", visibility="hidden")
+home_page        = st.Page(page_home,              title="Home",              icon=":material/home:", default=True)
+tenant_mgmt_page = st.Page(page_tenant_management,  title="Tenant Management", icon=":material/domain:")
+users_page       = st.Page(page_users,              title="User Management",   icon=":material/group:")
+analyze_page     = st.Page(page_analyze,            title="Analyze",           icon=":material/insights:", visibility="hidden")
 
 pg = st.navigation([home_page, tenant_mgmt_page, users_page, analyze_page], position="sidebar")
 

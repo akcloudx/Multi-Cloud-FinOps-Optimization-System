@@ -58,6 +58,8 @@ AWS_COMPUTE_INVENTORY = [
      "resource_type": "Amazon EC2", "resource_state": "Running",
      "region": "us-east-1", "os": "Linux", "sku": "m5.large",
      "payg_hourly_usd": 0.096, "avg_daily_running_hours": 24,
+     "avg_cpu_percent": 76.0, "p95_cpu_percent": 88.0,
+     "avg_memory_percent": 60.0, "p95_memory_percent": 52.0,   # -> Overutilized (CPU) - CloudWatch Agent present, mem_used avg 40%/p95 48%
      "subscription": "acc-aws-11223344", "availability_zone": "us-east-1a", "provider": "AWS", "is_orphaned": False},
 
     # Same SKU/region/OS as web-01/web-02 above, but a DIFFERENT Availability
@@ -72,6 +74,8 @@ AWS_COMPUTE_INVENTORY = [
      "resource_type": "Amazon EC2", "resource_state": "Running",
      "region": "us-east-1", "os": "Linux", "sku": "m5.large",
      "payg_hourly_usd": 0.096, "avg_daily_running_hours": 24,
+     "avg_cpu_percent": 35.0, "p95_cpu_percent": 55.0,   # CPU fine on its own
+     "avg_memory_percent": 12.0, "p95_memory_percent": 8.0,   # -> Overutilized (memory pressure alone) - mem_used avg 88%/p95 92%
      "subscription": "acc-aws-11223344", "availability_zone": "us-east-1b", "provider": "AWS", "is_orphaned": False},
 
     {"resource_id": "i-0123456789abcdef2", "resource_name": "aws-prod-app-01",
@@ -87,6 +91,8 @@ AWS_COMPUTE_INVENTORY = [
      "resource_type": "Amazon EC2", "resource_state": "Running",
      "region": "us-east-1", "os": "Linux", "sku": "c5.xlarge",
      "payg_hourly_usd": 0.170, "avg_daily_running_hours": 24,
+     "avg_cpu_percent": 50.0, "p95_cpu_percent": 68.0,
+     "avg_memory_percent": 45.0, "p95_memory_percent": 40.0,   # -> Optimal - mem_used avg 55%/p95 60%
      "subscription": "acc-aws-11223344", "availability_zone": "us-east-1b", "provider": "AWS", "is_orphaned": False},
 
     # Dev EC2 — 10 hrs/day → Compute Savings Plan candidates
