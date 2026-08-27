@@ -1852,20 +1852,35 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
             # first. pinned/width confirmed real params on TextColumn's own
             # docstring in this Streamlit build. Resource Name pinned so
             # it's still visible while scrolling right through the other
-            # ~10 columns; widths tuned so long values (service names, SKU)
-            # get real room instead of the grid's default fit-to-content
-            # sizing, and short/numeric fields stay compact.
-            "Resource Name":          st.column_config.TextColumn(pinned=True, width=180),
-            "Subscription":           st.column_config.TextColumn(width="small"),
-            "Resource Type":          st.column_config.TextColumn("Service", width=180),
-            "Status":                 st.column_config.TextColumn("Power State", width="small"),
-            "Region":                 st.column_config.TextColumn(width="small"),
-            "Resource Group":         st.column_config.TextColumn(width="small"),
-            "Availability Zone":      st.column_config.TextColumn(width="small"),
-            "OS":                     st.column_config.TextColumn(width="small"),
+            # ~10 columns, and given an explicit width since a wider (not
+            # narrower) width matches this column's own real values.
+            # "Service" (SKU too) similarly widened on purpose. Every other
+            # column below has NO width override - real bug caught live,
+            # 2026-08-28: forcing width="small" (75px) onto columns like
+            # "Power State"/"Est. Monthly PAYG Cost" clipped their OWN
+            # header label, which is longer than 75px, since that override
+            # replaces Streamlit's smart default (fit to the longer of
+            # header-or-value) with a fixed size smaller than the header
+            # itself. Round 2 (2026-08-28): leaving width unset didn't
+            # actually fix it either - "Power State"'s real longest value
+            # ("Stopped (deallocated)", 21 chars, azure_conn/connector.py's
+            # _map_power_state) still got clipped even though it's longer
+            # than the 11-char header, so width=None isn't reliably
+            # scanning full column content. Every column below now gets an
+            # explicit width sized to whichever is actually longer - this
+            # app's own real longest value or the header label - not a
+            # generic guess.
+            "Resource Name":          st.column_config.TextColumn(pinned=True, width=200),
+            "Subscription":           st.column_config.TextColumn(width=140),
+            "Resource Type":          st.column_config.TextColumn("Service", width=220),
+            "Status":                 st.column_config.TextColumn("Power State", width=170),
+            "Region":                 st.column_config.TextColumn(width=110),
+            "Resource Group":         st.column_config.TextColumn(width=120),
+            "Availability Zone":      st.column_config.TextColumn(width=120),
+            "OS":                     st.column_config.TextColumn(width=90),
             "SKU":                    st.column_config.TextColumn(width=140),
-            "Est. Monthly PAYG Cost": st.column_config.TextColumn("Est. Monthly PAYG Cost", width="small"),
-            "PAYG Cost/hr":           st.column_config.TextColumn("PAYG Cost/hr", width="small"),
+            "Est. Monthly PAYG Cost": st.column_config.TextColumn("Est. Monthly Cost", width=140),
+            "PAYG Cost/hr":           st.column_config.TextColumn("PAYG Cost/hr", width=140),
         },
     )
 
@@ -2679,19 +2694,26 @@ def _render_rightsizing_tab():
             for f in SETTINGS_FIELDS:
                 st.session_state[f"{key_prefix}_{f}"] = PRESETS[choice][f]
 
-    with st.popover("⚙️ Rightsizing Settings"):
-        st.caption(
-            "Defaults follow real industry practice (Azure Advisor's own resize thresholds, "
-            "AWS Compute Optimizer's percentile/headroom/lookback model) — override and save "
-            "per tenant below."
-        )
-        st.caption(
-            "A VM is **Overutilized** if CPU *or* memory shows high pressure. It's only "
-            "**Underutilized** if CPU *and* memory (when memory data exists) are both low — "
-            "same multi-metric rollup AWS Compute Optimizer uses, so a VM idle on CPU but "
-            "heavy on memory isn't wrongly flagged for a downsize."
-        )
-        st.selectbox("Preset", list(PRESETS.keys()) + ["Custom"], key=preset_key, on_change=_apply_preset)
+    # Both explanatory paragraphs that used to sit here (industry-practice
+    # justification for the defaults, the Overutilized-OR/Underutilized-AND
+    # classification rule) moved into a help tooltip - real feedback,
+    # 2026-08-28: always-visible prose took up most of the popover before
+    # you even reached the actual settings. First tried putting it on the
+    # popover's own trigger button, which had a real bug: hovering the
+    # trigger to open it leaves the tooltip stuck on screen since the
+    # cursor never left that spot, overlapping the now-open panel. Moved
+    # onto the Preset field instead, using the same (?) help-icon pattern
+    # every other setting in this popover already uses - only shows once
+    # the popover is already open, no overlap.
+    rightsizing_help = (
+        "Defaults follow real industry practice (Azure Advisor's resize thresholds, AWS Compute "
+        "Optimizer's percentile/headroom/lookback model). A VM is Overutilized if CPU OR memory "
+        "shows high pressure; it's only Underutilized if CPU AND memory (when memory data exists) "
+        "are both low, so a VM idle on CPU but heavy on memory isn't wrongly flagged for a downsize."
+    )
+    with st.popover("Rightsizing Settings", icon=":material/settings:"):
+        st.selectbox("Preset", list(PRESETS.keys()) + ["Custom"], key=preset_key,
+                     on_change=_apply_preset, help=rightsizing_help)
 
         r1c1, r1c2 = st.columns(2)
         with r1c1:
@@ -2729,7 +2751,7 @@ def _render_rightsizing_tab():
             st.number_input("Minimum days of data", min_value=1, max_value=93,
                              key=f"{key_prefix}_min_days")
 
-        if st.button("💾 Save for this tenant", key=f"{key_prefix}_save", width="stretch"):
+        if st.button("Save for this tenant", icon=":material/save:", key=f"{key_prefix}_save", width="stretch"):
             if active_tenant is None:
                 st.warning("No active tenant to save to yet — connect or select one first.")
             else:
@@ -2757,7 +2779,7 @@ def _render_rightsizing_tab():
     # differences without this, so nothing downstream is faked.
     live_metrics_service = "Azure Monitor Metrics" if is_azure else "Amazon CloudWatch"
     st.caption(
-        "ℹ️ Classification currently reads the stored P95 CPU/Memory values (this app's synced "
+        ":material/info: Classification currently reads the stored P95 CPU/Memory values (this app's synced "
         f"summary stats). Full arbitrary-percentile aggregation requires a live production-phase "
         f"{live_metrics_service} query — not built yet."
     )
@@ -2852,14 +2874,14 @@ def _render_rightsizing_tab():
         if "Monthly Savings" in rs_df and rs_df["Monthly Savings"].notna().any() else 0.0
 
     k1, k2, k3 = st.columns(3)
-    k1.metric("🔽 Underutilized", under_count)
-    k2.metric("🔼 Overutilized", over_count)
-    k3.metric("💰 Est. Monthly Savings (downsizes)", fmt(total_savings, 2))
+    k1.metric(":material/trending_down: Underutilized", under_count)
+    k2.metric(":material/trending_up: Overutilized", over_count)
+    k3.metric(":material/savings: Est. Monthly Savings (downsizes)", fmt(total_savings, 2))
 
     st.divider()
 
     class_opts = sorted(rs_df["Classification"].unique().tolist())
-    with st.popover("🔎 Filter by Classification"):
+    with st.popover("Filter by Classification", icon=":material/filter_alt:"):
         picked_classes = _value_checklist(class_opts, key=f"{key_prefix}_class_filter", defaults=class_opts,
                                            search_label="Search classifications")
     if picked_classes:
@@ -2909,18 +2931,58 @@ def _render_rightsizing_tab():
         lambda x: fmt(x, 2) if pd.notna(x) else "—"
     )
     st.caption(
-        "🔎 Use the table's own Search icon (toolbar) or the Classification filter above to narrow "
+        ":material/search: Use the table's own Search icon (toolbar) or the Classification filter above to narrow "
         "a large fleet — the **Why** column explains each VM's verdict inline instead of a separate list."
     )
+
+    # Same real pandas.Styler technique already approved for the Inventory
+    # tab's Power State column (2026-08-28) - color Classification instead
+    # of adding a badge column, since a canvas-rendered st.dataframe can't
+    # render badges anyway. Severity-matched to this app's established
+    # palette: Overutilized=critical red (needs action now), Underutilized
+    # =warning amber (wasting money, not urgent), Optimal=success green,
+    # Unknown=muted gray (no data to classify from).
+    def _class_color(val):
+        return {
+            "Optimal": "color: #34D399;",
+            "Overutilized": "color: #F87171;",
+            "Underutilized": "color: #FBBF24;",
+        }.get(val, "color: #64748B;")
+
+    styled_rs_df = show_df.style.map(_class_color, subset=["Classification"])
+
     st.dataframe(
-        show_df, hide_index=True, width="stretch",
+        styled_rs_df, hide_index=True, width="stretch",
+        row_height=42,  # matches the Inventory tab's own row height, approved via mockup there
         column_config={
+            # Pinned + width tuning (2026-08-28). Round 1 forced
+            # width="small" (75px) onto columns with longer headers,
+            # clipping the header itself. Round 2 tried leaving width unset
+            # to let Streamlit auto-size instead - didn't reliably work
+            # either (confirmed on the Inventory tab's table: its real
+            # longest value still got clipped even past its header length),
+            # so every column here gets an explicit width sized to whichever
+            # is actually longer - this app's own real longest value
+            # (_fmt_metric_cell's "Not synced"/"No agent"/"Stopped" labels,
+            # Classification's "Underutilized"/"Overutilized") or the header
+            # label - not a generic guess.
+            "VM Name":       st.column_config.TextColumn(pinned=True, width=200),
+            "SKU":           st.column_config.TextColumn(width=140),
+            "Avg CPU %":     st.column_config.TextColumn(width=100),
+            "P95 CPU %":     st.column_config.TextColumn(width=100),
+            "Avg Memory Available %": st.column_config.TextColumn("Avg Mem Avail %", width=130),
+            "P95 Memory Available %": st.column_config.TextColumn("P95 Mem Avail %", width=130),
+            "Classification": st.column_config.TextColumn(width=130),
+            "Why":           st.column_config.TextColumn(width=380),
+            "Suggested SKU": st.column_config.TextColumn(width=140),
             "CPU % After Resize": st.column_config.TextColumn(
+                "CPU After Resize", width=140,
                 help="CPU usage this VM would have if you applied the Suggested SKU — lets you "
                      "sanity-check a resize before making it (e.g. a downsize projecting above the "
                      "safe range wouldn't have been suggested at all)."
             ),
             "Memory % After Resize": st.column_config.TextColumn(
+                "Mem After Resize", width=140,
                 help="Available (free) memory % this VM would have after the Suggested SKU — same "
                      "units as the P95 Memory Available % column, so you can compare before/after "
                      "directly. Confirms whether the resize actually relieves memory pressure when "
@@ -2928,6 +2990,7 @@ def _render_rightsizing_tab():
                      "no memory reading to project from."
             ),
             "Monthly Savings": st.column_config.TextColumn(
+                width=130,
                 help="Estimated monthly cost change from applying the Suggested SKU, in your selected "
                      "display currency. Positive = savings (downsize). Negative = added cost (upsize "
                      "needed to relieve overutilization)."
