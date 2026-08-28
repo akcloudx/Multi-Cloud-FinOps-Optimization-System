@@ -37,6 +37,7 @@ from typing import Optional
 from analysis.ri_eligibility import check_eligibility, get_coverage_model
 from analysis.sp_eligibility import check_sp_eligibility
 from pricing.commitment_pricing import MONTH_HOURS
+from pricing.retail_pricing import fmt_currency as _fmt_currency
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 DEFAULT_SAFETY_BUFFER   = 0.80   # 80% — conservative buffer to avoid over-purchasing
@@ -1545,6 +1546,8 @@ def generate_recommendations(
     waterfall:    WaterfallResult,
     safety_buffer: float = DEFAULT_SAFETY_BUFFER,
     extra_sp_hr:  float = 0.0,    # What-If: additional SP commitment to model
+    currency:     str = "USD",    # Currency-aware $ text - see below
+    inr_rate:     float = 84.0,
 ) -> list[dict]:
     """
     Generates prioritized, actionable FinOps recommendations - one card per
@@ -1564,7 +1567,26 @@ def generate_recommendations(
     `items` list (empty when there's nothing to drill into) alongside the
     existing title/detail/financial_impact_hr fields, so callers that only
     knew the old shape still work.
+
+    currency/inr_rate (2026-08-29, real feedback): title/detail/action text
+    below embeds real $ amounts inline in prose (not a separate table
+    column this app can format at render time the way every other $ figure
+    here works) - previously always hardcoded a literal "$" via an
+    f-string, ignoring this app's own Display Currency toggle entirely,
+    same bug class already fixed once for the orphaned-RI-drain table.
+    Deliberately plain hashable primitives, NOT app.py's own fmt()
+    callable passed straight through - load_benchmark_data/load_live_data
+    (app.py) are @st.cache_data-decorated, and a freshly-defined closure
+    would either break caching outright or (if excluded from the cache
+    key via a leading underscore) silently return STALE cached text after
+    a currency switch, since the argument that actually changed wouldn't
+    be part of the cache key. currency/inr_rate are simple, correctly
+    hashable values instead - switching currency correctly busts the
+    cache and regenerates this text. Formatting itself reuses
+    pricing/retail_pricing.py's own fmt_currency() (imported below) rather
+    than reimplementing "$"/"₹" formatting a second time.
     """
+    fmt_money = lambda x, decimals=2: _fmt_currency(x, decimals=decimals, currency=currency, inr_rate=inr_rate)
     recommendations = []
 
     # ── RI Leakage Alert ──────────────────────────────────────────────────────
@@ -1587,7 +1609,7 @@ def generate_recommendations(
             "category": "RI Leakage",
             "title":    "Cancel or modify underutilized Reserved Instances",
             "detail": (
-                f"${ri_leakage:,.2f}/month of RI commitment is going unutilized "
+                f"{fmt_money(ri_leakage, 2)}/month of RI commitment is going unutilized "
                 f"(efficiency: {ri_efficiency:.1f}%). Intermittent workloads (Dev VMs shut "
                 f"down after business hours) leave rigid RI hours idle overnight."
             ),
@@ -1609,7 +1631,7 @@ def generate_recommendations(
             "title":    f"{n} stopped resource{'s' if n != 1 else ''} draining active RI capacity",
             "detail": (
                 f"{n} resource{'s are' if n != 1 else ' is'} STOPPED (deallocated) but still "
-                f"covered by an active Reserved Instance, wasting ${total_monthly_drain:,.2f}/month "
+                f"covered by an active Reserved Instance, wasting {fmt_money(total_monthly_drain, 2)}/month "
                 f"in unused RI capacity."
             ),
             "action": "Restart each resource to use the RI it's paying for, or cancel/exchange the RI if it's staying off.",
@@ -1692,14 +1714,14 @@ def generate_recommendations(
             "severity": "MEDIUM",
             "icon":     "🟡",
             "category": "Savings Plan Purchase",
-            "title":    f"Purchase ${recommended_purchase:.4f}/hr of additional Savings Plan",
+            "title":    f"Purchase {fmt_money(recommended_purchase, 4)}/hr of additional Savings Plan",
             "detail": (
-                f"Average hourly PAYG overage of ${avg_hourly_overage:.4f}/hr detected. "
+                f"Average hourly PAYG overage of {fmt_money(avg_hourly_overage, 4)}/hr detected. "
                 f"At the {int(safety_buffer * 100)}% safety buffer (a conservative anchor to "
                 f"steady-state baseline, excluding business-hours peak spikes), this protects "
                 f"the financial baseline when Dev VMs go offline at night."
             ),
-            "action": f"Purchase ${recommended_purchase:.4f}/hr of additional Savings Plan commitment.",
+            "action": f"Purchase {fmt_money(recommended_purchase, 4)}/hr of additional Savings Plan commitment.",
             "financial_impact_hr": recommended_purchase,
             "items": [],
         })
@@ -1711,11 +1733,11 @@ def generate_recommendations(
             "category": "Savings Plan Leakage",
             "title":    "Reduce Savings Plan commitment — leakage detected",
             "detail": (
-                f"Current SP commitment (${sp_result.existing_commitment_hr:.4f}/hr) exceeds "
-                f"the steady-state baseline (${sp_result.baseline_spend_hr:.4f}/hr) by "
-                f"${sp_result.leakage_hr:.4f}/hr - you're paying for unused SP commitment."
+                f"Current SP commitment ({fmt_money(sp_result.existing_commitment_hr, 4)}/hr) exceeds "
+                f"the steady-state baseline ({fmt_money(sp_result.baseline_spend_hr, 4)}/hr) by "
+                f"{fmt_money(sp_result.leakage_hr, 4)}/hr - you're paying for unused SP commitment."
             ),
-            "action": f"Reduce commitment to the recommended ${sp_result.recommended_commitment_hr:.4f}/hr ({int(safety_buffer*100)}% safety buffer applied).",
+            "action": f"Reduce commitment to the recommended {fmt_money(sp_result.recommended_commitment_hr, 4)}/hr ({int(safety_buffer*100)}% safety buffer applied).",
             "financial_impact_hr": sp_result.leakage_hr,
             "items": [],
         })

@@ -954,19 +954,42 @@ def page_home():
         # (st.container(border=False)), not _render_sp_pool_economics'
         # bordered sub-widget style, which was the wrong precedent to copy
         # (real user feedback: the box + the divider above it read as more
-        # framing than a simple summary row needs). One row of 5 columns,
-        # 2-decimal values, is tight enough on its own without a container.
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("Tenants Connected", kpis["tenants"])
-        c2.metric("Resources Tracked", kpis["resources"])
-        c3.metric("Total PAYG Rate", fmt(kpis["payg_hr"], 2) + "/hr")
-        c4.metric("Total Committed", fmt(kpis["committed_hr"], 2) + "/hr")
-        c5.metric(
-            "Critical Alerts",
-            f"{kpis['critical']} items" if kpis["critical"] > 0 else "0 items",
-            delta="Action Required" if kpis["critical"] > 0 else "Optimal",
-            delta_color="inverse" if kpis["critical"] > 0 else "off",
-        )
+        # framing than a simple summary row needs).
+        # Back to one row of 5 equal columns (2026-08-29, real feedback -
+        # 2 rounds of column-width juggling both failed and the 2-row
+        # split that avoided the tradeoff read as misaligned/"floating"
+        # instead: round 1 clipped the $ VALUES, round 2's weighted
+        # columns fixed that but clipped the count metrics' LABELS
+        # instead, and the 2-row split fixed both but broke the single
+        # clean row's visual alignment the user actually wanted kept).
+        # Real fix instead of another layout guess: st.metric's value
+        # text just doesn't wrap by default (confirmed via this
+        # Streamlit build's own real stMetricValue/stMetricLabel
+        # data-testids, Metric.CmkuJai4.js) - ui/styling.py's
+        # .st-key-fl_home_kpis rule below lets it wrap onto a second line
+        # instead of ellipsis-clipping, so a long INR value has somewhere
+        # to go without needing extra column width at all.
+        with st.container(key="fl_home_kpis"):
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.metric("Tenants Connected", kpis["tenants"])
+            c2.metric("Resources Tracked", kpis["resources"])
+            c3.metric("Total PAYG Rate", fmt(kpis["payg_hr"], 2) + "/hr")
+            c4.metric("Total Committed", fmt(kpis["committed_hr"], 2) + "/hr")
+            # "Critical Recommendations" (2026-08-29, real feedback) -
+            # matches this app's own established label for this exact
+            # metric (the count of HIGH-severity
+            # generate_recommendations() items), used before it was
+            # dropped from the Analyze top header's own 6-metric grid
+            # (see _render_top_header()'s docstring above) - this Home
+            # page reintroduced the same count under a different,
+            # inconsistent name ("Critical Alerts") when it was rebuilt
+            # the next day.
+            c5.metric(
+                "Critical Recommendations",
+                f"{kpis['critical']} items" if kpis["critical"] > 0 else "0 items",
+                delta="Action Required" if kpis["critical"] > 0 else "Optimal",
+                delta_color="inverse" if kpis["critical"] > 0 else "off",
+            )
 
         if kpis["stale"]:
             names = ", ".join(kpis["stale"])
@@ -3745,7 +3768,7 @@ is_live_configured = active_tenant is not None
 is_live_mode = (env_mode == "Production")
 
 @st.cache_data(show_spinner=False)
-def load_benchmark_data(days: int, buffer: float, provider: str, sp_eligible_types: tuple):
+def load_benchmark_data(days: int, buffer: float, provider: str, sp_eligible_types: tuple, currency: str, inr_rate: float):
     inv_raw          = get_compute_inventory(provider=provider, mode="demo")
     sp_df            = get_existing_savings_plans(provider=provider, mode="demo")
     compute_sp_df    = get_compute_savings_plans(provider=provider, mode="demo")
@@ -3763,11 +3786,17 @@ def load_benchmark_data(days: int, buffer: float, provider: str, sp_eligible_typ
     sp_res        = savings_plan_analysis(inv_raw, sp_df, safety_buffer=buffer, eligible_types=list(sp_eligible_types))
     flex_groups_df = get_vm_flexibility_groups(get_engine(provider, "demo")) if provider == "Azure" else None
     ri_res        = reservation_analysis(inv_raw, ri_df, flex_groups_df)
-    recs          = generate_recommendations(sp_res, ri_res, wf, safety_buffer=buffer)
+    # currency/inr_rate (2026-08-29, real feedback) - explicit params on
+    # THIS cached function too, not just generate_recommendations() - a
+    # @st.cache_data function's return value is cached by its OWN
+    # argument set, so if currency weren't part of THIS signature,
+    # switching Display Currency wouldn't invalidate this cache and would
+    # keep returning recs with stale-currency text baked in.
+    recs          = generate_recommendations(sp_res, ri_res, wf, safety_buffer=buffer, currency=currency, inr_rate=inr_rate)
     return inv_raw, sp_df, compute_sp_df, db_sp_df, sagemaker_sp_df, ri_df, sp_res, ri_res, recs
 
 @st.cache_data(show_spinner=False)
-def load_live_data(provider: str, tenant_id: int, days: int, buffer: float, sp_eligible_types: tuple):
+def load_live_data(provider: str, tenant_id: int, days: int, buffer: float, sp_eligible_types: tuple, currency: str, inr_rate: float):
     """Same shape as load_benchmark_data, but reads ONLY the given tenant's
     live-ingested rows (tenant_id FK) from SQL DB - never demo/seed rows, and
     never another tenant's rows. The app never calls cloud APIs directly here;
@@ -3790,7 +3819,10 @@ def load_live_data(provider: str, tenant_id: int, days: int, buffer: float, sp_e
     sp_res        = savings_plan_analysis(inv_raw, sp_df, safety_buffer=buffer, eligible_types=list(sp_eligible_types))
     flex_groups_df = get_vm_flexibility_groups(get_engine(provider, "live")) if provider == "Azure" else None
     ri_res        = reservation_analysis(inv_raw, ri_df, flex_groups_df)
-    recs          = generate_recommendations(sp_res, ri_res, wf, safety_buffer=buffer)
+    # currency/inr_rate - see load_benchmark_data's own comment on why
+    # these must be explicit params of THIS cached function, not just
+    # generate_recommendations()'s.
+    recs          = generate_recommendations(sp_res, ri_res, wf, safety_buffer=buffer, currency=currency, inr_rate=inr_rate)
     return inv_raw, sp_df, compute_sp_df, db_sp_df, sagemaker_sp_df, ri_df, sp_res, ri_res, recs
 
 if is_live_mode and not is_live_configured:
@@ -3816,6 +3848,7 @@ elif is_live_mode and is_live_configured:
     inv_raw, sp_df, compute_sp_df, db_sp_df, sagemaker_sp_df, ri_df, sp_result, ri_result, recs = load_live_data(
         selected_provider, active_tenant.id, simulate_days, safety_buffer,
         tuple(compute_sp_eligible_types | db_eligible_types | sagemaker_sp_eligible_types),
+        selected_currency, _inr_rate,
     )
     if inv_raw.empty:
         recs = [{
@@ -3829,6 +3862,7 @@ else:
     inv_raw, sp_df, compute_sp_df, db_sp_df, sagemaker_sp_df, ri_df, sp_result, ri_result, recs = load_benchmark_data(
         simulate_days, safety_buffer, selected_provider,
         tuple(compute_sp_eligible_types | db_eligible_types | sagemaker_sp_eligible_types),
+        selected_currency, _inr_rate,
     )
 
 # Real Savings Plan / Reserved Instance commitment pricing cache (Phase A) -

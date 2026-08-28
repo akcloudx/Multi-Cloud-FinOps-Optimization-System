@@ -308,6 +308,27 @@ section[data-testid="stSidebar"] nav span {
 }
 .st-key-fl_ri_drain_alert [data-testid="stAlertContainer"] svg { color: #F87171 !important; }
 
+/* Home page's 5-metric KPI row (2026-08-29, real feedback across 3
+   rounds): st.metric doesn't wrap either its value or its label by
+   default (confirmed real via this Streamlit build's own
+   Metric.CmkuJai4.js - stMetricValue/stMetricLabel are real, stable
+   data-testids) - a long value (INR figures like "₹5,068.89/hr" are
+   notably longer than their USD equivalent) or a long label
+   ("Critical Recommendations") ellipsis-clips instead on a narrower
+   (laptop-width) screen. Two rounds of column-width tuning (wider $
+   columns, then two separate rows) each fixed one symptom while
+   breaking something else or reading as visually disjointed - letting
+   the text wrap onto a second line instead needs no column-width
+   guessing at all, and keeps the original clean single-row-of-5 layout
+   the user actually wanted kept. */
+.st-key-fl_home_kpis [data-testid="stMetricValue"],
+.st-key-fl_home_kpis [data-testid="stMetricLabel"] {
+    white-space: normal !important;
+    overflow-wrap: break-word !important;
+    text-overflow: unset !important;
+    overflow: visible !important;
+}
+
 /* Inventory tab's "Top Spend Categories" card (2026-08-28, round 2) -
    approved via a quick HTML mockup before porting. Round 1 was a headcount
    composition card (Compute/Database/Other) that still duplicated - and in
