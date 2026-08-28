@@ -27,6 +27,7 @@ Math (from README):
   Efficiency% = (Utilized / Potential) × 100
 """
 
+import re
 import pandas as pd
 import numpy as np
 from datetime import date, timedelta
@@ -659,6 +660,208 @@ def _resolve_missing_resource_type(supply: pd.DataFrame, inventory_df: pd.DataFr
     return supply
 
 
+# ── AWS EC2/RDS RI instance-size-flexibility ────────────────────────────────
+# Real AWS Regional EC2 RIs and most RDS RIs auto-apply their discount across
+# ANY size within the same instance family/class-type, proportional to a
+# normalization-factor table AWS publishes - not just the exact SKU
+# purchased (e.g. one m5.xlarge RI fully covers two running m5.large
+# instances). Verified directly against AWS's own docs (2026-08-29), not
+# guessed:
+#   EC2: https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/apply_ri.html
+#   RDS: https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_WorkingWithReservedDBInstances.html
+# Applied as a post-processing reconciliation pass over the main tenant-wide
+# coverage layer's already-merged gap/excess numbers (see
+# _apply_aws_size_flexibility below) - NOT a rewrite of the demand/supply
+# merge itself, which stays exact-match for every other case (Azure,
+# non-eligible AWS services, Zonal RIs - already isolated into their own
+# merge layer before this ever runs - ineligible OS/engine rows).
+
+_EC2_NORM_FACTOR = {
+    "nano": 0.25, "micro": 0.5, "small": 1, "medium": 2, "large": 4,
+    "xlarge": 8, "2xlarge": 16, "3xlarge": 24, "4xlarge": 32, "6xlarge": 48,
+    "8xlarge": 64, "9xlarge": 72, "10xlarge": 80, "12xlarge": 96,
+    "16xlarge": 128, "18xlarge": 144, "24xlarge": 192, "32xlarge": 256,
+    "48xlarge": 384, "56xlarge": 448, "96xlarge": 768, "112xlarge": 896,
+}
+
+# Regional EC2 RI instance size flexibility is explicitly NOT supported for
+# these families, regardless of OS/tenancy - confirmed via AWS's own
+# "Limitations" list (apply_ri.html), not assumed.
+_EC2_FLEX_EXCLUDED_FAMILIES = {
+    "g4ad", "g4dn", "g5", "g5g", "g6", "g6e", "g6f", "gr6", "gr6f",
+    "hpc7a", "p5", "inf1", "inf2", "u7i-6tb", "u7i-8tb",
+}
+
+_EC2_SKU_RE = re.compile(r"^([a-z0-9]+)\.([a-z0-9]+)$")
+
+
+def _parse_ec2_sku(sku: str):
+    """Returns (family, size) e.g. ("m5", "large") for a real EC2 SKU, or
+    None if it doesn't match the expected shape/known size ladder. New,
+    string-based parser - deliberately NOT a reuse of
+    analysis/rightsizing.py's private _parse_ec2_size, which returns a
+    ladder INDEX rather than the real size string and was built for
+    rightsizing suggestions, not a normalization-factor lookup."""
+    m = _EC2_SKU_RE.match((sku or "").strip().lower())
+    if not m:
+        return None
+    family, size = m.groups()
+    if size not in _EC2_NORM_FACTOR:
+        return None
+    return family, size
+
+
+_RDS_SKU_RE = re.compile(r"^db\.([a-z0-9]+)\.([a-z0-9]+)$")
+
+# Single-AZ / Multi-AZ-instance normalized units per hour, by instance size -
+# confirmed via AWS's own RDS RI docs. A row's "Redundancy" value
+# ("Zone Redundant" -> Multi-AZ instance, anything else -> Single-AZ)
+# selects which table applies - see _rds_norm_factor below. Multi-AZ DB
+# CLUSTER (3-instance, a separate real AWS deployment option with its own
+# even-higher multiplier) isn't a concept this app's inventory currently
+# distinguishes from 2-instance Multi-AZ Redundancy, so only these two
+# columns are modeled.
+_RDS_NORM_FACTOR_SINGLE_AZ = {
+    "micro": 0.5, "small": 1, "medium": 2, "large": 4, "xlarge": 8,
+    "2xlarge": 16, "4xlarge": 32, "6xlarge": 48, "8xlarge": 64,
+    "10xlarge": 80, "12xlarge": 96, "16xlarge": 128, "24xlarge": 192,
+    "32xlarge": 256,
+}
+_RDS_NORM_FACTOR_MULTI_AZ = {k: v * 2 for k, v in _RDS_NORM_FACTOR_SINGLE_AZ.items()}
+
+# RDS size flexibility is only available for these engines (this app's own
+# resource_type labels - both the live-fetch taxonomy, aws/connector.py's
+# _RDS_ENGINE_LABELS, and the older demo-seed labels, db/aws_seed.py) -
+# confirmed via AWS's own docs. SQL Server is excluded. "Amazon RDS for
+# Oracle" is ALSO excluded here even though Oracle BYOL specifically IS
+# eligible - this app's own _RDS_ENGINE_LABELS maps every Oracle engine
+# variant (BYOL and License Included alike) to that one flat resource_type,
+# so there's no way to tell them apart from resource_type alone; treated
+# conservatively (excluded) rather than guessed.
+_RDS_FLEX_ELIGIBLE_TYPES = {
+    "Amazon RDS for MariaDB", "AWS RDS MariaDB",
+    "Amazon RDS for MySQL", "AWS RDS MySQL",
+    "Amazon RDS for PostgreSQL", "AWS RDS PostgreSQL",
+    "Amazon Aurora", "Amazon Aurora (MySQL)", "Amazon Aurora (PostgreSQL)",
+}
+
+
+def _parse_rds_sku(sku: str):
+    """Returns (class_type, size) e.g. ("r6i", "large") for a real RDS
+    DBInstanceClass string. AWS's own docs are explicit that flexibility
+    only applies within the same "instance class type" - db.r6i.large
+    flexes to db.r6i.xlarge, but NOT to db.r6id.large or db.r7g.large
+    despite the superficial similarity, so this deliberately captures the
+    full class-type token (e.g. "r6i", "r6id", "r7g"), not just a leading
+    letter/family guess."""
+    m = _RDS_SKU_RE.match((sku or "").strip().lower())
+    if not m:
+        return None
+    return m.groups()
+
+
+def _rds_norm_factor(size: str, redundancy: str):
+    table = _RDS_NORM_FACTOR_MULTI_AZ if redundancy == "Zone Redundant" else _RDS_NORM_FACTOR_SINGLE_AZ
+    return table.get(size)
+
+
+def _allocate_size_flexible_group(rows: list) -> float:
+    """Mutates `rows` (list of dicts with 'running_count'/'reserved_qty'/
+    'norm_units') in place, setting 'covered_count' on each - greedily
+    allocates the group's total RI normalized-units smallest-to-largest,
+    AWS's own documented allocation order ("applied from the smallest to
+    the largest instance size within the family"). Returns the group's
+    leftover (unconsumed) normalized-units after every row's demand is
+    satisfied or supply runs out."""
+    remaining_units = sum(r["reserved_qty"] * r["norm_units"] for r in rows)
+    for r in sorted(rows, key=lambda x: x["norm_units"]):
+        full_units_coverable = int(remaining_units // r["norm_units"]) if r["norm_units"] else 0
+        covered = min(r["running_count"], full_units_coverable)
+        r["covered_count"] = covered
+        remaining_units -= covered * r["norm_units"]
+    return remaining_units
+
+
+def _apply_aws_size_flexibility(merged: pd.DataFrame) -> pd.DataFrame:
+    """Reconciles gap/excess for Regional EC2 (Linux, non-excluded family)
+    and flexibility-eligible RDS rows to reflect AWS's real instance-size
+    flexibility, instead of the exact-SKU-match numbers
+    _finalize_coverage_layer already computed - see this module's own
+    top-of-file comment block above for the full research trail. Every
+    other row (Azure, non-eligible AWS services/engines/OS, rows whose SKU
+    doesn't parse) passes through completely unchanged - this never makes a
+    gap/excess number worse, only resolves false cross-SKU signals for the
+    eligible subset.
+
+    Known, disclosed simplification: gap/excess stay integer instance
+    counts (this app's existing coverage-table model), so a genuinely
+    PARTIAL coverage case (AWS's own worked example: one t2.large running
+    against a t2.medium RI is really 50% covered, a real fractional
+    billing discount) still reports as gap=1 here - same direction of
+    imprecision the exact-match code already had, just now correctly
+    resolved to 0 for every FULL-coverage cross-SKU case instead of every
+    cross-SKU case unconditionally.
+
+    Only called on the main tenant-wide layer, before it's concatenated
+    with any other scope layer - Zonal EC2 RIs are already excluded from
+    this layer's supply entirely (see ri_df_unscoped in
+    reservation_analysis()), and every Azure-scoped layer never reaches
+    this function at all.
+    """
+    if merged.empty:
+        return merged
+
+    is_ec2 = merged["Resource Type"] == "Amazon EC2"
+    is_rds = merged["Resource Type"].isin(_RDS_FLEX_ELIGIBLE_TYPES)
+    candidate_mask = is_ec2 | is_rds
+    if not candidate_mask.any():
+        return merged
+
+    groups: dict = {}
+    norm_units: dict = {}
+    for idx in merged.index[candidate_mask]:
+        row = merged.loc[idx]
+        if row["Resource Type"] == "Amazon EC2":
+            if row["OS"] != "Linux":
+                continue
+            parsed = _parse_ec2_sku(row["SKU"])
+            if parsed is None:
+                continue
+            family, size = parsed
+            if family in _EC2_FLEX_EXCLUDED_FAMILIES:
+                continue
+            key = ("EC2", row["Region"], family)
+            units = _EC2_NORM_FACTOR[size]
+        else:
+            parsed = _parse_rds_sku(row["SKU"])
+            if parsed is None:
+                continue
+            class_type, size = parsed
+            units = _rds_norm_factor(size, row["Redundancy"])
+            if units is None:
+                continue
+            key = ("RDS", row["Region"], row["Resource Type"], class_type)
+        groups.setdefault(key, []).append(idx)
+        norm_units[idx] = units
+
+    for idx_group in groups.values():
+        if len(idx_group) < 2:
+            continue  # only one SKU present in this family/class-type - nothing to reconcile
+        rows = [
+            {"idx": i, "running_count": int(merged.at[i, "running_count"]),
+             "reserved_qty": int(merged.at[i, "reserved_qty"]), "norm_units": norm_units[i]}
+            for i in idx_group
+        ]
+        leftover = _allocate_size_flexible_group(rows)
+        largest = max(rows, key=lambda r: r["norm_units"])
+        for r in rows:
+            merged.at[r["idx"], "gap"] = max(0, r["running_count"] - r["covered_count"])
+            merged.at[r["idx"], "excess"] = 0
+        merged.at[largest["idx"], "excess"] = int(leftover // largest["norm_units"]) if largest["norm_units"] else 0
+
+    return merged
+
+
 def _finalize_coverage_layer(merged: pd.DataFrame) -> pd.DataFrame:
     """Shared eligibility/coverage-model/gap-zeroing finalization applied to
     a demand-supply merged DataFrame, regardless of which layer produced it
@@ -870,6 +1073,15 @@ def reservation_analysis(
     # also keeps generate_recommendations() from suggesting a purchase that
     # Azure wouldn't actually let you make.
     merged = _finalize_coverage_layer(merged)
+
+    # AWS EC2/RDS RI instance-size-flexibility reconciliation (2026-08-29) -
+    # see _apply_aws_size_flexibility's own docstring and this module's
+    # top-of-file comment block above _finalize_coverage_layer for the full
+    # research trail. Deliberately placed HERE, only on the main tenant-wide
+    # layer - Zonal EC2 RIs (not size-flexible in real AWS) are already
+    # isolated out of ri_df_unscoped before this point, and every
+    # Azure-scoped layer below never passes through this function at all.
+    merged = _apply_aws_size_flexibility(merged)
 
     # Globally-scoped commitments (split off above) - Cosmos DB Reservations
     # have no per-region purchase concept at all (real quantity is a
