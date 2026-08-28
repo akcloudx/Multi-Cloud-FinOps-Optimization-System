@@ -1511,7 +1511,23 @@ def reservation_analysis(
                         # that rule was written to prevent.
                         "Daily RI Drain":   round(ri["hourly_usd_commitment"] * 24, 4),
                         "Monthly RI Drain": round(ri["hourly_usd_commitment"] * MONTH_HOURS, 2),
-                        "Recommendation":   "CANCEL / EXCHANGE this RI or restart the resource",
+                        # No "Recommendation" column (removed 2026-08-29,
+                        # real feedback + screenshot: this was a genuine
+                        # rendering bug, not a width-tuning problem - a
+                        # global CSS rule (ui/styling.py's
+                        # div[data-testid="stDataFrame"] { overflow:
+                        # hidden }, needed to round the wrapper's corners
+                        # around glide-data-grid's canvas) hard-clips any
+                        # table whose canvas content is wider than its
+                        # rendered wrapper, with no scrollbar - no amount
+                        # of per-column width tuning fixes that once the
+                        # total exceeds the real available width. This
+                        # value was also identical on every single row
+                        # (never varied per resource), so it didn't belong
+                        # in a per-resource record to begin with - it's
+                        # now a single caption in app.py, next to the
+                        # alert box, instead of repeated N times as the
+                        # widest column in the table.
                     })
 
     return RIAnalysisResult(

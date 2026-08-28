@@ -2381,28 +2381,37 @@ def _render_savings_plan_tab():
 # ANALYZE — RI COVERAGE
 # ═══════════════════════════════════════════════════════════════════════════════
 def _render_ri_coverage_tab():
-    """Mirrors the Savings Plan tab's clarity principles: a clean, primary
-    table for the resources where a gap is a literal purchase recommendation
-    (coverage_model == 'instance'), with pooled-capacity, volume-based, and
-    not-eligible resources moved out of it into their own labeled sections
-    instead of all being crammed into one wide table with paragraph-length
-    notes stuffed into a 'Coverage Note' column.
+    """One unified "Reservation Coverage" table (2026-08-29, real feedback:
+    Per-Instance and Pooled resources used to be two separate tables - the
+    primary table here (then titled "Per-Resource Coverage" - renamed the
+    same day once that stopped being accurate, see below), plus a
+    "pooled-capacity" table tucked inside "not shown above" - even though
+    both answer the same question, "what's my coverage for this
+    resource," just with different precision). Instance, Pooled, and
+    Volume-Based rows (coverage_model "instance"/"capacity"/
+    "unmeasurable") now all sit in one table, distinguished by a "Coverage
+    Type" column and a per-row "Note" explaining anything non-obvious -
+    matching how reference documentation typically handles this kind of
+    exception (a flag/column, not a separate page section per exception).
+    Volume-Based rows' Running/Reserved/Status are blanked to "—" rather
+    than shown, since a resource-COUNT gap genuinely isn't meaningful for
+    a service sold in DATA-VOLUME blocks. Only genuinely ineligible
+    resources ("can this ever have a Reservation at all" - a different
+    question from coverage type) stay in their own separate expander.
 
     Page order (2026-08-29 restructure, real feedback: "too cluttered, too
-    much to understand" - 9 stacked top-level sections, with the single
-    most actionable item on the page, real $ actively wasted on a stopped
-    resource with an active RI, buried dead last): headline+badges (the
-    answer) -> orphaned-RI drain alert (the most urgent issue, if any) ->
-    term toggle -> Per-Resource Coverage (the primary table) -> one
-    consolidated "not shown above" expander (pooled-capacity/volume-based/
-    not-eligible, previously 3 separate expanders) -> Reservation Coverage
-    Rules and Active Reservation Contracts, each its own expander at the
-    very bottom (previously 2 separate expanders sitting BEFORE the main
-    table; briefly merged into one shared expander, then split back apart
-    same day per follow-up feedback - they're different kinds of content,
-    methodology guidance vs. a raw data table, and read better each with
-    their own header). Same content throughout, just reordered - nothing
-    was cut."""
+    much to understand" - was 9 stacked top-level sections, with the
+    single most actionable item on the page, real $ actively wasted on a
+    stopped resource with an active RI, buried dead last): headline+badges
+    (the answer) -> orphaned-RI drain alert (the most urgent issue, if
+    any) -> term toggle -> the unified Reservation Coverage table ->
+    "N resource(s) not eligible for any Reservation" expander -> Reservation
+    Coverage Rules and Active Reservation Contracts, each its own expander
+    at the very bottom (previously 2 separate expanders sitting BEFORE the
+    main table; briefly merged into one shared expander, then split back
+    apart same day - they're different kinds of content, methodology
+    guidance vs. a raw data table, and read better each with their own
+    header)."""
     st.subheader(f"{selected_provider} Reserved Instance & Reserved Capacity Coverage")
     st.caption("Compares what's running against what you've already reserved, resource by resource, and flags real gaps to fix.")
     _finops_tag("Optimize Usage & Cost", "Rate Optimization")
@@ -2530,13 +2539,39 @@ def _render_ri_coverage_tab():
             # established for "Monthly Savings" elsewhere in this file) -
             # fmt() applied here, at display time, same as every other $
             # figure in this app.
+            # No "Recommendation" column (2026-08-29, real feedback + a
+            # screenshot proving this was a genuine rendering bug, not a
+            # width-tuning problem: ui/styling.py's global
+            # div[data-testid="stDataFrame"] { overflow: hidden } (needed
+            # to round the wrapper's corners around glide-data-grid's
+            # canvas) hard-clips any table whose canvas content is wider
+            # than its rendered wrapper, with no scrollbar - confirmed
+            # live by the user: scrolling revealed nothing, the content
+            # was genuinely gone. No per-column width fixes that once the
+            # total exceeds the real available width, and this column's
+            # text was identical on every row anyway (see
+            # analysis/engine.py's orphan_rows comment) - moved out of the
+            # table into one caption instead of being the single widest,
+            # fully-repeated column in it.
+            st.caption("**Recommended action:** CANCEL / EXCHANGE each affected RI, or restart the resource to use it.")
             drain_disp = ri_result.orphaned_ri_drain.copy()
             for _dcol in ("Daily RI Drain", "Monthly RI Drain"):
                 if _dcol in drain_disp.columns:
                     drain_disp[_dcol] = drain_disp[_dcol].apply(lambda x: fmt(x, 2))
             st.dataframe(
                 drain_disp, hide_index=True, width="stretch",
-                column_config={"Resource Name": st.column_config.TextColumn(width=200), "SKU": st.column_config.TextColumn(width=140)},
+                # Explicit widths for every column (2026-08-29, real
+                # feedback - a full pass across every table on this tab).
+                column_config={
+                    "Resource ID":       st.column_config.TextColumn(width=160),
+                    "Resource Name":     st.column_config.TextColumn(width=200),
+                    "SKU":               st.column_config.TextColumn(width=140),
+                    "Region":            st.column_config.TextColumn(width=110),
+                    "OS":                st.column_config.TextColumn(width=80),
+                    "Matching RI":       st.column_config.TextColumn(width=180),
+                    "Daily RI Drain":    st.column_config.TextColumn(width=120),
+                    "Monthly RI Drain":  st.column_config.TextColumn(width=140),
+                },
             )
 
     st.segmented_control(
@@ -2553,14 +2588,77 @@ def _render_ri_coverage_tab():
     # (Recommendations tab), which reads it on a later, separate render.
     st.session_state["ri_term_widget"] = ri_term_key
 
-    st.markdown("#### Per-Resource Coverage")
-    st.caption("Each row is one resource profile (SKU + region + OS). Reservations for these types are bought per unit, so a gap here is a real, literal purchase recommendation.")
-    if not instance_cov.empty:
-        has_pricing_cols = rate_col in instance_cov.columns
-        show = instance_cov.rename(columns={
+    # Header renamed from "Per-Resource Coverage" (2026-08-29, real
+    # feedback: that title stopped being accurate the moment this table
+    # gained a "Coverage Type" column that explicitly says some rows are
+    # "Pooled"/"Volume-Based" - i.e. shared, not per-resource at all. This
+    # section explains coverage for every resource, whichever way that
+    # coverage actually applies.
+    st.markdown("#### Reservation Coverage")
+    # Unified table (2026-08-29, real feedback: Per-Instance and Pooled
+    # resources were two separate tables - "Per-Resource Coverage" above,
+    # "N pooled-capacity resource(s)" tucked in "not shown above" below -
+    # even though they're the same underlying question ("what's my
+    # coverage for this resource"), just answered with different
+    # precision. Merged into one table with a "Coverage Type" column
+    # (Per-Instance/Pooled/Volume-Based) instead, matching how reference
+    # documentation typically handles this - one table, a column that
+    # flags the exception, not a separate page section per exception.
+    # Volume-Based rows (Storage/Files/etc., previously their own
+    # "not tracked" section) are included here too, for the same reason -
+    # their Running/Reserved/Status are blanked to "—" rather than shown
+    # (see below), since a resource-COUNT gap is genuinely not meaningful
+    # for a service sold in DATA-VOLUME blocks - showing a real-looking
+    # number there would be worse than showing none.
+    st.caption(
+        "Each row is one resource profile (SKU + region + OS). \"Coverage Type\" shows how the Reservation "
+        "applies - Per-Instance rows are a literal purchase recommendation; Pooled and Volume-Based rows apply "
+        "automatically across your subscription, so treat their Status as a rough signal only (see Note)."
+    )
+    _shown_cov = pd.concat([instance_cov, capacity_cov, unmeasurable_cov], ignore_index=True) \
+        if not (instance_cov.empty and capacity_cov.empty and unmeasurable_cov.empty) else pd.DataFrame()
+    if not _shown_cov.empty:
+        has_pricing_cols = rate_col in _shown_cov.columns
+        show = _shown_cov.rename(columns={
             "Resource Type": "Service", "SKU": "SKU / Tier",
             "running_count": "Running", "reserved_qty": "Reserved",
         }).copy()
+        _COVERAGE_TYPE_LABEL = {"instance": "Per-Instance", "capacity": "Pooled", "unmeasurable": "Volume-Based"}
+        # Short phrases, not sentences (2026-08-29, real feedback + a
+        # screenshot showing a different long-text column on this same
+        # table clipped with no closing border when given width="large" -
+        # this table already carries 10 other explicit-width columns, and
+        # a "large" 11th column competing for the remainder isn't reliable
+        # here, same lesson already applied to that other column below.
+        # Sized to the real longest value below (~40 chars) rather than a
+        # relative keyword; the FULL explanation still lives in the
+        # Reservation Coverage Rules expander's per-service cards - this
+        # is a pointer, not a restatement.
+        _COVERAGE_TYPE_NOTE = {
+            "instance": "",
+            "capacity": "Rough signal only, not a purchase instruction",
+            "unmeasurable": "No per-resource gap possible - see Coverage Rules",
+        }
+        show["Coverage Type"] = show["coverage_model"].map(_COVERAGE_TYPE_LABEL)
+        show["Note"] = show["coverage_model"].map(_COVERAGE_TYPE_NOTE)
+        # Volume-Based rows' running_count/reserved_qty/gap ARE computed
+        # internally (same merge every other row goes through), but
+        # deliberately not shown - a service sold in 100 TB/1 PiB blocks
+        # doesn't have a meaningful per-resource-COUNT gap (this app has
+        # no way to know the actual data volume needed), so a real-looking
+        # "Short by 1" here would be actively misleading, not just
+        # imprecise. Same "can't determine, don't guess" discipline used
+        # throughout this app - blanked, not computed-and-shown.
+        # Running/Reserved cast to object BEFORE assignment - real bug
+        # caught by a direct script (not the browser, per standing
+        # instruction) before this ever reached app code: they come in as
+        # int64 (running_count/reserved_qty are explicitly cast to int in
+        # analysis/engine.py), and pandas raises a hard TypeError trying
+        # to .loc-assign a string into an int64 column directly.
+        _is_volume_based = show["coverage_model"] == "unmeasurable"
+        for _col in ("Running", "Reserved", "Status"):
+            show[_col] = show[_col].astype(object)
+            show.loc[_is_volume_based, _col] = "—"
         if has_pricing_cols:
             # Displayed as a monthly-equivalent (2026-08-29, real feedback:
             # a Reserved Instance isn't billed hour-by-hour the way a
@@ -2573,12 +2671,16 @@ def _render_ri_coverage_tab():
             # and caches, needed as-is for the underlying $ math (gap *
             # (payg - rate) * 730) - only the DISPLAYED value is converted
             # (* 730) and re-labeled via column_config below; nothing about
-            # the actual computation changes.
+            # the actual computation changes. Pooled/Volume-Based rows
+            # already come through as NaN here (ri_gap_pricing() only ever
+            # prices coverage_model == "instance" rows) - "—" for both,
+            # same as a genuinely un-priced Per-Instance row.
             show[rate_col] = show[rate_col].apply(lambda x: fmt(x * 730, 2) if pd.notna(x) else "—")
             show[savings_col] = show[savings_col].apply(lambda x: fmt(x, 2) if pd.notna(x) else "—")
-        cols = ["Service", "SKU / Tier", "Region", "OS", "Running", "Reserved", "Status"]
+        cols = ["Service", "SKU / Tier", "Region", "OS", "Coverage Type", "Running", "Reserved", "Status"]
         if has_pricing_cols:
             cols += [rate_col, savings_col]
+        cols += ["Note"]
         show = show[[c for c in cols if c in show.columns]]
 
         # Same real pandas.Styler technique already used for the Inventory
@@ -2586,6 +2688,8 @@ def _render_ri_coverage_tab():
         # - color Status instead of adding a badge column, since a
         # canvas-rendered st.dataframe can't render real badge widgets.
         def _status_color(val):
+            if val == "—":
+                return "color: #64748B;"
             if val.startswith("⚠️"):
                 return "color: #FBBF24;"
             if val.startswith("ℹ️"):
@@ -2596,25 +2700,26 @@ def _render_ri_coverage_tab():
         st.dataframe(
             styled_show, hide_index=True, width="stretch", row_height=42,
             column_config={
-                # Explicit widths sized to this app's own real longest
-                # values (this session's established finding: neither
-                # width="small" nor leaving width unset reliably avoids
-                # clipping - see the Inventory/Rightsizing tables' own
-                # column_config comments).
-                "Service":    st.column_config.TextColumn(pinned=True, width=230),
-                "SKU / Tier": st.column_config.TextColumn(width=140),
-                "Region":     st.column_config.TextColumn(width=110),
-                "OS":         st.column_config.TextColumn(width=80),
-                "Running":    st.column_config.TextColumn(width=90),
-                "Reserved":   st.column_config.TextColumn(width=90),
+                # Explicit widths for every column (2026-08-29, real
+                # feedback - a full pass across every table on this tab:
+                # sized to this app's own real longest values, same rule
+                # established this session for every other table here.
+                "Service":       st.column_config.TextColumn(pinned=True, width=230),
+                "SKU / Tier":    st.column_config.TextColumn(width=140),
+                "Region":        st.column_config.TextColumn(width=110),
+                "OS":            st.column_config.TextColumn(width=80),
+                "Coverage Type": st.column_config.TextColumn(width=110),
+                "Running":       st.column_config.TextColumn(width=90),
+                "Reserved":      st.column_config.TextColumn(width=90),
                 # Widened 2026-08-29 (was 140) - Status can now carry a
                 # "· NN% pre-covered" partial-credit suffix (see _status()
                 # above), sized to fit that longest realistic real value
                 # rather than a generic guess - same "explicit width sized
                 # to the real longest value" rule established this session.
-                "Status":     st.column_config.TextColumn(width=260),
-                rate_col:     st.column_config.TextColumn(f"RI Rate ({ri_term_choice}) $/mo", width=140),
-                savings_col:  st.column_config.TextColumn("Monthly Savings", width=140),
+                "Status":        st.column_config.TextColumn(width=260),
+                rate_col:        st.column_config.TextColumn(f"RI Rate ({ri_term_choice}) $/mo", width=140),
+                savings_col:     st.column_config.TextColumn("Monthly Savings", width=140),
+                "Note":          st.column_config.TextColumn(width=280),
             },
         )
         if not has_pricing_cols:
@@ -2623,72 +2728,31 @@ def _render_ri_coverage_tab():
                 "re-run a sync from the tenant's Manage dialog on the Home page."
             )
     else:
-        st.caption("No per-instance-reservable resources in inventory yet.")
+        st.caption("No reservation-trackable resources in inventory yet.")
 
-    # ── "Not shown above" - consolidated (2026-08-29, real feedback: "too
-    # cluttered, too much to understand" - these were 3 separate top-level
-    # expanders, each reading as one more thing demanding attention on an
-    # already-busy page. Merged into one, since all three answer the same
-    # underlying question ("why isn't this resource in the table above"),
-    # just for 3 different reasons - nothing was cut, each keeps its own
-    # real explanatory caption, just grouped under one header with
-    # dividers between sub-sections instead of one expander header per
-    # reason. Streamlit doesn't support nesting an expander inside another
-    # expander, so sub-sections use a plain bold st.markdown label instead
-    # of a second expander level.
-    _not_shown_count = len(capacity_cov) + len(unmeasurable_cov) + len(ineligible)
-    if _not_shown_count > 0:
-        with st.expander(f"{_not_shown_count} resource(s) not shown above", icon=":material/visibility_off:", expanded=False):
-            if not capacity_cov.empty:
-                st.markdown(f"**{len(capacity_cov)} pooled-capacity resource(s)** - not a per-instance purchase")
-                st.caption(
-                    "Azure applies these reservations automatically across ALL matching resources in your "
-                    "subscription (RU/s, DBCU, cDWU, or vCore-hours), not to one specific resource - so the gap "
-                    "below is a rough signal, not a literal purchase instruction. Compare actual usage against "
-                    "your reservation size in Azure Cost Management before buying more."
-                )
-                show_c = capacity_cov.rename(columns={
-                    "Resource Type": "Service", "SKU": "SKU / Tier",
-                    "running_count": "Running", "reserved_qty": "Reserved",
-                })
-                st.dataframe(
-                    show_c[["Service", "SKU / Tier", "Region", "Running", "Reserved", "Status"]], hide_index=True, width="stretch",
-                    column_config={"Service": st.column_config.TextColumn(width=230), "SKU / Tier": st.column_config.TextColumn(width=140)},
-                )
-
-            if not unmeasurable_cov.empty:
-                if not capacity_cov.empty:
-                    st.divider()
-                st.markdown(f"**{len(unmeasurable_cov)} volume-based resource(s)** - not tracked here")
-                st.caption(
-                    "Reserved capacity for these services is sold in blocks far larger than a single resource "
-                    "(Storage: 100 TB / 1 PB; Files: 10 TiB / 100 TiB) and applies across your whole "
-                    "subscription's usage, not per resource. This dashboard tracks resource count, not data "
-                    "volume, so coverage genuinely can't be assessed here - check total volume in Azure Cost "
-                    "Management or Storage metrics before considering a purchase."
-                )
-                show_u = unmeasurable_cov.rename(columns={"Resource Type": "Service", "SKU": "SKU / Tier"})
-                st.dataframe(
-                    show_u[["Service", "SKU / Tier", "Region"]], hide_index=True, width="stretch",
-                    column_config={"Service": st.column_config.TextColumn(width=230), "SKU / Tier": st.column_config.TextColumn(width=140)},
-                )
-
-            if not ineligible.empty:
-                if not capacity_cov.empty or not unmeasurable_cov.empty:
-                    st.divider()
-                st.markdown(f"**{len(ineligible)} resource(s) not eligible for any Reservation**")
-                show_i = ineligible.rename(columns={"Resource Type": "Service", "SKU": "SKU / Tier", "eligibility_reason": "Why not eligible"})
-                st.dataframe(
-                    show_i[["Service", "SKU / Tier", "Region", "Why not eligible"]], hide_index=True, width="stretch",
-                    column_config={
-                        "Service": st.column_config.TextColumn(width=230),
-                        "SKU / Tier": st.column_config.TextColumn(width=140),
-                        # "large" keyword width (not a pixel value) - same fix
-                        # already used for the Savings Plan tab's own "why
-                        # excluded" long-prose column.
-                        "Why not eligible": st.column_config.TextColumn(width="large"),
-                    },
-                )
+    # ── Not-eligible resources (2026-08-29, real feedback) - the ONLY
+    # thing left down here now that Pooled/Volume-Based rows moved into
+    # the unified Per-Resource Coverage table above. Eligibility ("can
+    # this resource type ever have a Reservation at all") is a genuinely
+    # different question from coverage type ("how does an existing
+    # Reservation apply to it"), so it stays its own section rather than
+    # folding in too - a resource here has no coverage story to tell at
+    # all, unlike every row in the table above.
+    if not ineligible.empty:
+        with st.expander(f"{len(ineligible)} resource(s) not eligible for any Reservation", icon=":material/block:", expanded=False):
+            show_i = ineligible.rename(columns={"Resource Type": "Service", "SKU": "SKU / Tier", "eligibility_reason": "Why not eligible"})
+            st.dataframe(
+                show_i[["Service", "SKU / Tier", "Region", "Why not eligible"]], hide_index=True, width="stretch",
+                column_config={
+                    "Service":    st.column_config.TextColumn(width=230),
+                    "SKU / Tier": st.column_config.TextColumn(width=140),
+                    "Region":     st.column_config.TextColumn(width=110),
+                    # "large" keyword width (not a pixel value) - same fix
+                    # already used for the Savings Plan tab's own "why
+                    # excluded" long-prose column.
+                    "Why not eligible": st.column_config.TextColumn(width="large"),
+                },
+            )
 
     # ── Reference & Methodology - moved to the bottom (2026-08-29, real
     # feedback: this used to sit BEFORE the main table, meaning a user had
@@ -2776,6 +2840,14 @@ def _render_ri_coverage_tab():
                     ":material/visibility_off: Genuinely EC2 RI-eligible, but not shown as a gap/coverage row - "
                     "AWS exposes only pool-level configuration, never a per-instance count to compare against a reservation."
                 )
+        # No separate volume-based note here (2026-08-29, real follow-up
+        # feedback: a standalone caption was added here first, then moved
+        # again the same day) - Volume-Based rows now sit directly in the
+        # unified Per-Resource Coverage table above, each with its own
+        # "Note" column carrying this exact explanation per row. The
+        # per-service Covers/Excludes cards above (Blob Storage, Files,
+        # etc.) already cover what the reservation itself covers/excludes -
+        # no third restatement needed here.
 
     with st.expander("Active Reservation Contracts", icon=":material/description:", expanded=False):
         if not ri_df.empty:
