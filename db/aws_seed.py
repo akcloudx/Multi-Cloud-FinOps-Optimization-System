@@ -716,15 +716,18 @@ def seed_aws_demo_tenant_if_empty():
     # shipped, unlike Azure's demo (which ships with real cached
     # CommitmentPriceCache rows). Bounded by AWS's own published NO_UPFRONT
     # discount ranges (Compute SP up to 66%, SageMaker SP up to 64% at
-    # ALL_UPFRONT/3yr per this app's own Coverage Policy card) - NO_UPFRONT
-    # rates are meaningfully lower than that ceiling, not scraped from a
-    # real account, so treated as reasonable illustrative demo figures,
-    # not a live-verified precision claim.
+    # ALL_UPFRONT/3yr, Database SP up to 35% (1yr only) per this app's own
+    # Coverage Policy card) - NO_UPFRONT rates are meaningfully lower than
+    # that ceiling, not scraped from a real account, so treated as
+    # reasonable illustrative demo figures, not a live-verified precision
+    # claim. database_1yr (12.0%) keeps roughly the same ceiling-fraction
+    # as compute's/sagemaker's own 1yr figures (~0.3x their ceiling).
     from datetime import datetime
     update_aws_sp_pricing(
         "AWS", "demo", tenant_db_id,
         compute_1yr=20.0, compute_3yr=40.0,
         sagemaker_1yr=18.0, sagemaker_3yr=38.0,
+        database_1yr=12.0,
         updated_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
     )
     print("[OK] Seeded demo tenant 'Demo AWS Tenant'.")

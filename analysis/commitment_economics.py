@@ -149,12 +149,18 @@ def aws_savings_plan_term_comparison(pool_df: pd.DataFrame, tenant_row, sp_type:
     no per-SKU rate table to look up the way Azure's CommitmentPriceCache
     stores.
 
-    sp_type is "compute" or "sagemaker" - the two pools with a clean
-    one-to-one mapping onto a single real AWS SavingsPlansType value (see
-    fetch_savings_plans_recommendation's own docstring for why the
-    Database pool isn't covered here). Returns None if pool_df is empty
-    or tenant_row is None, matching savings_plan_term_comparison's own
-    "nothing to compare" behavior.
+    sp_type is "compute", "sagemaker", or "database" - each maps
+    one-to-one onto a single real AWS SavingsPlansType value (COMPUTE_SP /
+    SAGEMAKER / DB_COMPUTE_SP respectively; verified against AWS's own
+    Savings Plans documentation and botocore's service definition -
+    Database Savings Plans is a single unified commitment spanning
+    Aurora/RDS/DynamoDB/ElastiCache/DocumentDB/Neptune/Keyspaces/DMS/
+    OpenSearch, not per-service). Returns None if pool_df is empty or
+    tenant_row is None, matching savings_plan_term_comparison's own
+    "nothing to compare" behavior. Note: for "database", only the "1yr"
+    term will ever have a cached discount_pct - Database Savings Plans
+    are 1-year-term-only, and the caller (app.py) only ever asks for the
+    "1yr" term for this pool.
 
     A term with no cached discount yet (sync hasn't run, or that one
     fetch failed) falls back to 0% discount for just that term

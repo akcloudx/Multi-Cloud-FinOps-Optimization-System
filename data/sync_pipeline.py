@@ -356,17 +356,17 @@ def run_ingestion_pipeline(provider: str = "Azure", creds=None, force_mock: bool
                 except Exception as e:
                     subscription_sync_error = str(e)[:300]
 
-            # AWS real-time Savings Plans pricing (Compute + SageMaker pools
-            # only - see analysis/commitment_economics.py's
-            # aws_savings_plan_term_comparison for why the Database pool
-            # isn't covered here). Isolated in its own try/except, same
+            # AWS real-time Savings Plans pricing (Compute, SageMaker, and
+            # Database pools). Isolated in its own try/except, same
             # reasoning as the RI/SP fetch above - a failure here must not
             # blow up an otherwise-successful inventory sync. Staleness-
             # checked (skips re-fetching if refreshed within the last 7
             # days) since ce:GetSavingsPlansPurchaseRecommendation is a
             # PAID Cost Explorer call (see aws/connector.py's
             # fetch_savings_plans_recommendation docstring) - not worth
-            # spending 4 calls on every single sync.
+            # spending 5 calls on every single sync. Database is fetched
+            # 1yr-only - Database Savings Plans are a 1-year-term-only
+            # product (confirmed via AWS's own Savings Plans FAQ).
             if not is_azure and tenant_db_id is not None:
                 try:
                     with Session(engine) as sp_session:
@@ -392,6 +392,9 @@ def run_ingestion_pipeline(provider: str = "Azure", creds=None, force_mock: bool
                             )
                             tenant.aws_sp_sagemaker_discount_3yr = fetch_savings_plans_recommendation(
                                 live_creds, "SAGEMAKER", "THREE_YEARS"
+                            )
+                            tenant.aws_sp_database_discount_1yr = fetch_savings_plans_recommendation(
+                                live_creds, "DB_COMPUTE_SP", "ONE_YEAR"
                             )
                             tenant.aws_sp_pricing_updated_at = now_iso
                             sp_session.commit()

@@ -156,15 +156,18 @@ def update_aws_account_id(provider: str, mode: str, tenant_db_id: int, account_i
 def update_aws_sp_pricing(provider: str, mode: str, tenant_db_id: int,
                            compute_1yr: Optional[float], compute_3yr: Optional[float],
                            sagemaker_1yr: Optional[float], sagemaker_3yr: Optional[float],
+                           database_1yr: Optional[float],
                            updated_at: str) -> None:
     """AWS-only - stores the real cached Savings Plans discount % per
     pool/term (aws/connector.py's fetch_savings_plans_recommendation,
     ce:GetSavingsPlansPurchaseRecommendation), read by
     analysis/commitment_economics.py's aws_savings_plan_term_comparison.
-    Called by the sync pipeline after a live fetch, and once by
-    db/aws_seed.py to pre-seed the demo tenant with illustrative-but-
-    realistic values (same reasoning as Azure's demo shipping with cached
-    CommitmentPriceCache rows instead of an empty table)."""
+    database_1yr only (no 3yr) - Database Savings Plans are a 1-year-term-
+    only product (confirmed via AWS's own Savings Plans FAQ). Called by
+    the sync pipeline after a live fetch, and once by db/aws_seed.py to
+    pre-seed the demo tenant with illustrative-but-realistic values (same
+    reasoning as Azure's demo shipping with cached CommitmentPriceCache
+    rows instead of an empty table)."""
     init_db(provider, mode)
     engine = get_engine(provider, mode)
     with Session(engine) as session:
@@ -173,6 +176,7 @@ def update_aws_sp_pricing(provider: str, mode: str, tenant_db_id: int,
             "aws_sp_compute_discount_3yr": compute_3yr,
             "aws_sp_sagemaker_discount_1yr": sagemaker_1yr,
             "aws_sp_sagemaker_discount_3yr": sagemaker_3yr,
+            "aws_sp_database_discount_1yr": database_1yr,
             "aws_sp_pricing_updated_at": updated_at,
         })
         session.commit()

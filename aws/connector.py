@@ -128,7 +128,7 @@ REQUIRED_AWS_POLICIES = [
         "Policy / Action": "ce:GetSavingsPlansPurchaseRecommendation",
         "AWS Managed Policy": "(no dedicated managed policy - attach a custom inline policy, or the broad ReadOnlyAccess policy)",
         "Required":        "Yes — For real-time Savings Plan pricing",
-        "Purpose":         "Get AWS's own real discount %/savings estimate for Compute and SageMaker Savings Plans, based on the account's actual usage history - confirmed not covered by AWSBillingReadOnlyAccess or AWSSavingsPlansReadOnlyAccess (checked both policies' live JSON, 2026-08-28)",
+        "Purpose":         "Get AWS's own real discount %/savings estimate for Compute, SageMaker, and Database Savings Plans, based on the account's actual usage history - confirmed not covered by AWSBillingReadOnlyAccess or AWSSavingsPlansReadOnlyAccess (checked both policies' live JSON, 2026-08-28)",
     },
     # 2026-08-22 additions - closing the Database/Compute Savings Plan
     # coverage gap: DocumentDB/Neptune deliberately have NO entry here at
@@ -1787,13 +1787,20 @@ def fetch_savings_plans_recommendation(
     service definition (github.com/boto/botocore, data/ce/2017-10-25/
     service-2.json), not guessed:
       - savings_plans_type: one of the real SavingsPlansType enum values.
-        This app only ever passes "COMPUTE_SP" or "SAGEMAKER" - those are
-        the two pools with a clean one-to-one mapping onto this app's own
-        pool tabs (see analysis/commitment_economics.py's
-        aws_savings_plan_term_comparison for why the Database pool isn't
-        covered - AWS's own enum splits "database" into six separate
-        types that don't map onto this app's single Database pool tab).
-      - term_years: "ONE_YEAR" or "THREE_YEARS".
+        This app passes "COMPUTE_SP", "SAGEMAKER", or "DB_COMPUTE_SP" -
+        each a clean one-to-one mapping onto this app's own pool tabs
+        (confirmed via AWS's own official Savings Plans docs,
+        docs.aws.amazon.com/savingsplans/latest/userguide/plan-types.html:
+        Database Savings Plans is a single unified commitment spanning
+        Aurora/RDS/DynamoDB/ElastiCache/DocumentDB/Timestream/Neptune/
+        Keyspaces/DMS/OpenSearch, matching this app's Database pool - the
+        other database-adjacent enum values, RDS/ELASTICACHE/REDSHIFT/
+        OPENSEARCH/DYNAMODB_RESERVATIONS, are older per-service Reserved
+        Instance-style recommendations, a separate AWS product not used
+        here).
+      - term_years: "ONE_YEAR" or "THREE_YEARS" - Database Savings Plans
+        are 1-year-only (confirmed via AWS's own Savings Plans FAQ), so
+        this app never requests "THREE_YEARS" for "DB_COMPUTE_SP".
       - Returns SavingsPlansPurchaseRecommendationSummary's
         EstimatedSavingsPercentage - the account-level discount % for
         that type/term/payment-option, computed by AWS from the

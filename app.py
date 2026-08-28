@@ -1944,12 +1944,10 @@ def _render_sp_pool_economics(pool_label: str, pool_df: pd.DataFrame, existing_c
     Savings Plans are 1-year only per Azure policy, so that pool never gets a
     3-year option here.
 
-    aws_sp_type ("compute" | "sagemaker" | None) - which real AWS
-    SavingsPlansType this pool maps to for aws_savings_plan_term_comparison
-    (2026-08-28 addition). None for Azure pools (unused there) and for the
-    Database pool on AWS (no clean one-to-one AWS SavingsPlansType mapping
-    - see aws_savings_plan_term_comparison's own docstring), which keeps
-    using today's existing "not wired up yet" fallback."""
+    aws_sp_type ("compute" | "sagemaker" | "database" | None) - which real
+    AWS SavingsPlansType this pool maps to for
+    aws_savings_plan_term_comparison (2026-08-28 addition). None for Azure
+    pools (unused there)."""
     if pool_df.empty:
         st.caption(f"No resources are currently eligible for {pool_label} Savings Plan.")
         return
@@ -1973,9 +1971,7 @@ def _render_sp_pool_economics(pool_label: str, pool_df: pd.DataFrame, existing_c
     # AWS branch added 2026-08-28: real per-term discount % cached on the
     # tenant row (aws_sp_pricing, see db/schema.py + data/sync_pipeline.py),
     # not a per-SKU cache lookup the way Azure's works - see
-    # aws_savings_plan_term_comparison's own docstring for why. aws_sp_type
-    # is None for the Database pool (no clean AWS SavingsPlansType mapping
-    # yet), which falls through to the existing "not wired up" caption.
+    # aws_savings_plan_term_comparison's own docstring for why.
     if is_azure:
         cmp_df = savings_plan_term_comparison(pool_df, prices_df) if (prices_df is not None and not prices_df.empty) else None
     elif aws_sp_type is not None:
@@ -2314,7 +2310,7 @@ def _render_savings_plan_tab():
         # real - corrected 2026-08-22 alongside db_sp_title below and
         # commitments/existing_commitments.py's bucketing.
         db_available_terms = ("1yr",)
-        _render_sp_pool_economics(db_label, db_running, db_sp_commit, "sp_db", safety_buffer, db_sp_df, available_terms=db_available_terms)
+        _render_sp_pool_economics(db_label, db_running, db_sp_commit, "sp_db", safety_buffer, db_sp_df, available_terms=db_available_terms, aws_sp_type=(None if is_azure else "database"))
 
         if is_live_mode and is_live_configured:
             if db_inventory.empty:
@@ -2643,14 +2639,19 @@ def _real_projected_savings():
     None when real pricing genuinely isn't available so the caller can fall
     back to the heuristic total instead of showing a wrong/absent number.
 
-    AWS branch added 2026-08-28: real Compute Savings Plan pricing is now
-    available (aws_savings_plan_term_comparison, cached per-tenant - see
-    _render_sp_pool_economics). RI pricing stays Azure-only (ri_gap_pricing
-    is a separate, explicitly deferred gap - not this pass), so the AWS
-    branch always passes an empty ri_priced DataFrame, which
-    combined_monthly_savings already handles gracefully (contributes $0,
-    not an error) - this returns a genuinely partial-but-real figure (SP
-    only) for AWS rather than the previous flat None."""
+    AWS branch added 2026-08-28: real Compute, SageMaker, and Database
+    Savings Plan pricing is now available (aws_savings_plan_term_comparison,
+    cached per-tenant - see _render_sp_pool_economics). RI pricing stays
+    Azure-only (ri_gap_pricing is a separate, explicitly deferred gap - not
+    this pass), so the AWS branch always passes an empty ri_priced
+    DataFrame, which combined_monthly_savings already handles gracefully
+    (contributes $0, not an error) - this returns a genuinely
+    partial-but-real figure (SP only) for AWS rather than the previous
+    flat None. Database's comparison DataFrame only has a real (non-$0)
+    row for the "1yr" term_key (Database Savings Plans are 1-year-only) -
+    combined_monthly_savings filters by the single shared sp_term, so if
+    the Compute pool's term selector is set to "3yr" the Database
+    contribution for that combined figure is correctly $0, not an error."""
     sp_term = st.session_state.get("sp_compute_term_widget", "1yr")
     ri_term = st.session_state.get("ri_term_widget", "1yr")
     if is_azure:
@@ -2669,6 +2670,10 @@ def _real_projected_savings():
             aws_cmp = aws_savings_plan_term_comparison(compute_24x7, active_tenant, "compute")
             if aws_cmp is not None:
                 sp_pool_cmps.append(aws_cmp)
+        if not db_running.empty:
+            aws_db_cmp = aws_savings_plan_term_comparison(db_running, active_tenant, "database")
+            if aws_db_cmp is not None:
+                sp_pool_cmps.append(aws_db_cmp)
         if not sp_pool_cmps:
             return None
         return combined_monthly_savings(sp_pool_cmps, pd.DataFrame(), sp_term, ri_term)
