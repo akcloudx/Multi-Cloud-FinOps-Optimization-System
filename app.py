@@ -1957,12 +1957,22 @@ def _render_sp_pool_economics(pool_label: str, pool_df: pd.DataFrame, existing_c
     recommended_hr = round(remaining_hr * safety_buffer_frac, 4)
     leakage_hr = max(0.0, existing_commitment_hr - baseline_hr)
 
-    # Term resolved from session_state BEFORE the widget renders (same
-    # pre-read pattern the term selector already used) so the headline
-    # sentence above the widget can use THIS render's term choice, not the
-    # previous one - avoids the sentence lagging a run behind the pills.
+    # Term read directly from the WIDGET'S OWN session_state key
+    # (f"{key_prefix}_term_display", set further down), not a separate
+    # manually-mirrored key - real bug fixed 2026-08-28 (same root cause
+    # caught and fixed on the RI Coverage tab the same day): the previous
+    # version read a separate "..._term_widget" mirror key that was only
+    # written AFTER the widget call far below, so it was always one full
+    # render stale relative to whatever term the user had just clicked -
+    # the "avoids... lagging a run behind" comment this replaced was the
+    # intent, but the mirror-key approach didn't actually achieve it.
+    # Streamlit updates a keyed widget's session_state entry to the
+    # CURRENT (post-click) value before the script body starts executing
+    # on every rerun, so reading it directly here reflects a click
+    # immediately.
     if len(available_terms) > 1:
-        term_key = st.session_state.get(f"{key_prefix}_term_widget", "1yr")
+        term_label = st.session_state.get(f"{key_prefix}_term_display", "1-Year")
+        term_key = "1yr" if term_label == "1-Year" else "3yr"
         if term_key not in available_terms:
             term_key = available_terms[0]
     else:
@@ -2020,14 +2030,19 @@ def _render_sp_pool_economics(pool_label: str, pool_df: pd.DataFrame, existing_c
     st.markdown(f"#### {headline}")
 
     if len(available_terms) > 1:
-        term_choice = st.segmented_control(
+        st.segmented_control(
             f"Model {pool_label} commitment at term",
             options=["1-Year", "3-Year"],
             default=TERM_LABELS[term_key],
             key=f"{key_prefix}_term_display",
             label_visibility="collapsed",  # help= tooltip is suppressed when the label is collapsed (confirmed via st.segmented_control's own docstring) - the headline sentence above already explains what this drives, so no help= here
         )
-        st.session_state[f"{key_prefix}_term_widget"] = "1yr" if term_choice == "1-Year" else "3yr"
+        # term_key already reflects this widget's live state (read above,
+        # before the widget call) - no need to re-derive it from the
+        # return value here. Still mirrored into "..._term_widget" for
+        # _real_projected_savings() (Recommendations tab), which reads
+        # "sp_compute_term_widget" on a later, separate render.
+        st.session_state[f"{key_prefix}_term_widget"] = term_key
     else:
         # "(Azure policy)" used to be accurate since this branch only ever
         # fired for Azure's Savings Plan for Databases - now also fires for
@@ -2376,53 +2391,10 @@ def _render_ri_coverage_tab():
     st.caption("Compares what's running against what you've already reserved, resource by resource, and flags real gaps to fix.")
     _finops_tag("Optimize Usage & Cost", "Rate Optimization")
 
-    if not is_azure:
-        st.info(
-            "**Simplified view:** this table matches reservations to running resources by exact instance type. "
-            "In reality, most EC2 Regional RIs and most RDS RIs (all engines except SQL Server and Oracle "
-            "License-Included) are **size-flexible** - one RI can partially or fully cover *different-sized* "
-            "instances in the same family, so a mixed-size fleet's real AWS bill may be better covered than the "
-            "gaps shown here suggest. Zonal EC2 RIs are not size-flexible and are matched correctly as-is.",
-            icon="ℹ️",
-        )
-
-    with st.expander(f"📋 {selected_provider} Reservation Coverage Rules", expanded=False):
-        if is_azure:
-            from db.seed import RI_COVERAGE_NOTES
-        else:
-            from db.aws_seed import AWS_RI_COVERAGE_NOTES as RI_COVERAGE_NOTES
-
-        coverage_rows = [
-            {"Service Domain": svc, "Coverage Scope": covers, "Exclusions": excludes}
-            for svc, (covers, excludes) in RI_COVERAGE_NOTES.items()
-        ]
-        st.dataframe(pd.DataFrame(coverage_rows), hide_index=True, width="stretch")
-
-    default_ri_term = st.session_state.get("ri_term_widget", "1yr")
-    ri_term_choice = st.segmented_control(
-        "Model new-purchase pricing at term",
-        options=["1-Year", "3-Year"],
-        default=TERM_LABELS[default_ri_term],
-        key="ri_term_display",
-        help="Drives the purchase-cost columns below and the Recommendations tab's combined savings projection.",
-    )
-    ri_term_key = "1yr" if ri_term_choice == "1-Year" else "3yr"
-    st.session_state["ri_term_widget"] = ri_term_key
-
-    with st.expander("📄 Active Reservation Contracts", expanded=False):
-        if not ri_df.empty:
-            ri_disp = ri_df[["commitment_id", "commitment_type", "scope_sku", "scope_region", "scope_os", "reserved_qty", "hourly_usd_commitment", "term", "expiry_date", "offering_class"]].copy()
-            ri_disp["hourly_usd_commitment"] = ri_disp["hourly_usd_commitment"].apply(lambda x: fmt(x, 4) + "/hr each")
-            # EC2-only (AWS): "standard"/"convertible" from AWS's own OfferingClass
-            # field. N/A for Azure and for AWS RDS/ElastiCache/Redshift, which
-            # have no such split - not a display gap, those services genuinely
-            # don't have this concept per AWS's own docs.
-            ri_disp["offering_class"] = ri_disp["offering_class"].fillna("N/A").apply(lambda v: v.title() if v != "N/A" else v)
-            ri_disp = ri_disp.rename(columns={"offering_class": "Offering Class"})
-            st.dataframe(_with_mapping_caveat(ri_df, ri_disp), hide_index=True, width="stretch")
-        else:
-            st.info("No active Reserved Instance contracts found.")
-
+    # cov/elig computed BEFORE the headline (2026-08-28 redesign) - the
+    # headline sentence and badge row below need these counts, so they can't
+    # wait until after the old metric-grid position the way this used to be
+    # ordered.
     raw_cov = ri_result.coverage_table
     if prices_df is not None and not prices_df.empty and not raw_cov.empty:
         cov = ri_gap_pricing(raw_cov, inv_raw, prices_df).copy()
@@ -2442,34 +2414,176 @@ def _render_ri_coverage_tab():
 
     cov["Status"] = cov.apply(_status, axis=1)
 
-    if not is_azure and "Amazon DynamoDB" in cov["Resource Type"].values:
-        st.warning(
-            "**DynamoDB Reserved Capacity can't be verified:** it's a real, current AWS product (up to 54%/77% off), "
-            "but AWS never exposed purchasing or viewing it through any API, CLI, or SDK - confirmed across multiple "
-            "AWS SDKs' own issue trackers, going back to 2020. Management is Console-only. This app can't fetch what "
-            "Reserved Capacity a tenant already owns, so the gap shown below for DynamoDB may recommend a purchase "
-            "you already have - verify directly in the AWS Console before buying.",
-            icon="⚠️",
-        )
-
     elig = cov[cov["is_eligible"]]
     ineligible = cov[~cov["is_eligible"]]
     instance_cov = elig[elig["coverage_model"] == "instance"]
     capacity_cov = elig[elig["coverage_model"] == "capacity"]
     unmeasurable_cov = elig[elig["coverage_model"] == "unmeasurable"]
 
-    with st.container(border=True):
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Fully Covered", int(((instance_cov["gap"] == 0) & (instance_cov["excess"] == 0)).sum()))
-        m2.metric("Needs More RI", int((instance_cov["gap"] > 0).sum()))
-        m3.metric("Idle / Unused RI", int((instance_cov["excess"] > 0).sum()))
-        m4.metric("Not RI-Eligible", len(ineligible))
+    fully_covered = int(((instance_cov["gap"] == 0) & (instance_cov["excess"] == 0)).sum())
+    needs_more = int((instance_cov["gap"] > 0).sum())
+    idle = int((instance_cov["excess"] > 0).sum())
+    not_eligible = len(ineligible)
+
+    # Term read directly from the WIDGET'S OWN session_state key
+    # ("ri_term_display", set further down), not a separate manually-
+    # mirrored key - real bug fixed 2026-08-28, caught by the user via
+    # screenshot: clicking a term pill showed the OTHER term's headline/
+    # rate, exactly one click behind. Streamlit updates a keyed widget's
+    # session_state entry to the CURRENT (post-click) value before the
+    # script body starts executing on every rerun, so reading it directly
+    # here reflects a click immediately; the previous approach read a
+    # separate "ri_term_widget" mirror key that was only written AFTER the
+    # widget call far below, which was therefore always one full render
+    # stale relative to what the user just clicked.
+    ri_term_choice = st.session_state.get("ri_term_display", "1-Year")
+    ri_term_key = "1yr" if ri_term_choice == "1-Year" else "3yr"
+    rate_col = f"RI Rate {ri_term_choice} ($/hr)"
+    savings_col = f"Monthly Savings if Purchased ({ri_term_choice})"
+    has_pricing_cols = rate_col in instance_cov.columns
+
+    # ── Headline: one answer, badges for the rest ───────────────────────
+    def _md(x: str) -> str:
+        return x.replace("$", "\\$")
+
+    plural = "s" if needs_more != 1 else ""
+    if needs_more == 0:
+        headline = ":green[You're already well covered] — no additional Reserved Instance purchases recommended right now."
+    else:
+        total_gap_savings = instance_cov.loc[instance_cov["gap"] > 0, savings_col].dropna().sum() if has_pricing_cols else 0.0
+        if total_gap_savings > 0:
+            headline = (
+                f"Purchasing RIs for **{needs_more} resource profile{plural}** would save about "
+                f":green[**{_md(fmt(total_gap_savings, 2))}/month**] at the {ri_term_choice} rate."
+            )
+        else:
+            headline = f":orange[**{needs_more} resource profile{plural}**] {'is' if needs_more == 1 else 'are'} running without a matching Reservation."
+    st.markdown(f"#### {headline}")
+
+    badge_cols = st.columns(4)
+    badge_cols[0].badge(f"{fully_covered} Fully Covered", icon=":material/check_circle:", color="green")
+    badge_cols[1].badge(f"{needs_more} Need More RI", icon=":material/trending_up:", color="orange")
+    badge_cols[2].badge(f"{idle} Idle / Unused", icon=":material/pause_circle:", color="blue")
+    badge_cols[3].badge(f"{not_eligible} Not RI-Eligible", icon=":material/block:", color="gray")
+
+    with st.expander(f"{selected_provider} Reservation Coverage Rules", icon=":material/checklist:", expanded=False):
+        if is_azure:
+            from db.seed import RI_COVERAGE_NOTES
+        else:
+            from db.aws_seed import AWS_RI_COVERAGE_NOTES as RI_COVERAGE_NOTES
+            # Moved here from a standalone always-visible st.info() box
+            # (2026-08-28, real feedback: two dense paragraph boxes sitting
+            # above the headline read as clutter) - this is methodology/
+            # interpretation guidance for the table below (a known
+            # matching-algorithm limitation, not a product-scope note the
+            # way the per-service cards below are), so it belongs with the
+            # rest of this tab's coverage-rule caveats, not its own banner.
+            # Shortened 2026-08-29 (real feedback: the original 4-sentence
+            # version, with its SQL Server/Oracle and Zonal-vs-Regional
+            # exceptions spelled out inline, was too dense to skim) - down
+            # to the one point that actually matters for reading the table
+            # below. The dropped detail was real/verified, not fluff, but
+            # there's no natural widget here to hang a help= tooltip off,
+            # so it's cut rather than relocated.
+            st.caption(
+                "**Gaps below may be overstated** - most EC2/RDS RIs are size-flexible within an instance family, "
+                "so a mixed-size fleet may already be better covered than this exact-match table shows."
+            )
+
+        # Filtered to genuinely RI-eligible services (AWS only) + rendered
+        # 2-up (2026-08-29, real feedback: this list was long, and ~6 of
+        # the AWS entries were explicitly "NOT RI-eligible" in their own
+        # text - duplicating the separate "Not RI-Eligible" section further
+        # down this same tab verbatim, same conclusion shown twice). "AWS
+        # Lambda (Managed Instances)" is a deliberate documentation-only
+        # exception (see its own dict comment) - not a tracked
+        # resource_type at all, so check_eligibility() would default it to
+        # True for the wrong reason (no rule encoded, not "confirmed
+        # eligible"); shown separately below instead of via this filter.
+        #
+        # AWS-only: Azure's RI_COVERAGE_NOTES has no such duplication (every
+        # entry is a genuinely eligible service already) - applying the
+        # same filter there was tried and reverted, since several Azure
+        # eligibility rules pattern-match the real SKU (e.g. Synapse's
+        # "DW<n>c" check, Data Explorer's Standard-vs-Basic check) and
+        # return a defensive False for a placeholder "N/A" sku, which
+        # would have wrongly hidden real, eligible Azure services that
+        # simply don't special-case an unknown SKU the way VM/SQL DB/SQL
+        # MI/App Service/Disk Storage's rules already do.
+        _LAMBDA_NOTE_KEY = "AWS Lambda (Managed Instances)"
+        if is_azure:
+            eligible_notes = RI_COVERAGE_NOTES
+        else:
+            eligible_notes = {
+                svc: note for svc, note in RI_COVERAGE_NOTES.items()
+                if svc != _LAMBDA_NOTE_KEY and check_eligibility(svc, "N/A")[0]
+            }
+
+        # Cards, not a dataframe - same real bug already fixed on the
+        # Savings Plan Coverage Policy card (2026-08-28): these Covers/
+        # Excludes cells are paragraph-length prose, and st.dataframe cells
+        # don't wrap text regardless of column width. 2-column grid - each
+        # card is only 2-3 short lines, one-per-row wasted half the width
+        # for no reason once the list was trimmed to eligible services only.
+        grid_cols = st.columns(2)
+        for i, (svc, (covers, excludes)) in enumerate(eligible_notes.items()):
+            with grid_cols[i % 2].container(border=True):
+                st.markdown(f"**{svc}**")
+                st.markdown(f":material/check_circle: **Covers:** {covers}")
+                st.markdown(f":material/block: **Excludes:** {excludes}")
+
+        if _LAMBDA_NOTE_KEY in RI_COVERAGE_NOTES:
+            # Shortened 2026-08-29 (real feedback: the full dict text -
+            # pricing formula, "Not tracked: NOT TRACKED..." redundancy,
+            # the tangential classic-Lambda aside - was too dense for a
+            # footnote). Down to the one point this footnote exists to
+            # make: it's real and eligible, but this app can't see it.
+            st.caption(
+                f":material/visibility_off: **{_LAMBDA_NOTE_KEY}** is genuinely EC2 RI-eligible, but isn't shown "
+                f"above - AWS exposes only pool-level configuration, never a per-instance count this app could "
+                f"compare against a reservation."
+            )
+
+    with st.expander("Active Reservation Contracts", icon=":material/description:", expanded=False):
+        if not ri_df.empty:
+            ri_disp = ri_df[["commitment_id", "commitment_type", "scope_sku", "scope_region", "scope_os", "reserved_qty", "hourly_usd_commitment", "term", "expiry_date", "offering_class"]].copy()
+            ri_disp["hourly_usd_commitment"] = ri_disp["hourly_usd_commitment"].apply(lambda x: fmt(x, 4) + "/hr each")
+            # EC2-only (AWS): "standard"/"convertible" from AWS's own OfferingClass
+            # field. N/A for Azure and for AWS RDS/ElastiCache/Redshift, which
+            # have no such split - not a display gap, those services genuinely
+            # don't have this concept per AWS's own docs.
+            ri_disp["offering_class"] = ri_disp["offering_class"].fillna("N/A").apply(lambda v: v.title() if v != "N/A" else v)
+            ri_disp = ri_disp.rename(columns={"offering_class": "Offering Class"})
+            st.dataframe(
+                _with_mapping_caveat(ri_df, ri_disp), hide_index=True, width="stretch",
+                column_config={
+                    **_SP_COMMITMENT_COLUMN_CONFIG,
+                    "commitment_type": st.column_config.TextColumn("Type", width=170),
+                    "scope_os":        st.column_config.TextColumn("OS", width=90),
+                    "reserved_qty":    st.column_config.TextColumn("Reserved Qty", width=110),
+                    "Offering Class":  st.column_config.TextColumn(width=120),
+                },
+            )
+        else:
+            st.info("No active Reserved Instance contracts found.")
+
+    st.segmented_control(
+        "Model new-purchase pricing at term",
+        options=["1-Year", "3-Year"],
+        default=ri_term_choice,
+        key="ri_term_display",
+        help="Drives the purchase-cost columns below and the Recommendations tab's combined savings projection.",
+    )
+    # ri_term_choice/ri_term_key/rate_col/savings_col were already read
+    # live above (before this widget call) and are guaranteed identical to
+    # this widget's value - no need to re-derive them from its return.
+    # Still mirrored into "ri_term_widget" for _real_projected_savings()
+    # (Recommendations tab), which reads it on a later, separate render.
+    st.session_state["ri_term_widget"] = ri_term_key
 
     st.markdown("#### Per-Resource Coverage")
     st.caption("Each row is one resource profile (SKU + region + OS). Reservations for these types are bought per unit, so a gap here is a real, literal purchase recommendation.")
     if not instance_cov.empty:
-        rate_col = f"RI Rate {ri_term_choice} ($/hr)"
-        savings_col = f"Monthly Savings if Purchased ({ri_term_choice})"
         has_pricing_cols = rate_col in instance_cov.columns
         show = instance_cov.rename(columns={
             "Resource Type": "Service", "SKU": "SKU / Tier",
@@ -2481,17 +2595,49 @@ def _render_ri_coverage_tab():
         cols = ["Service", "SKU / Tier", "Region", "OS", "Running", "Reserved", "Status"]
         if has_pricing_cols:
             cols += [rate_col, savings_col]
-        st.dataframe(show[[c for c in cols if c in show.columns]], hide_index=True, width="stretch")
+        show = show[[c for c in cols if c in show.columns]]
+
+        # Same real pandas.Styler technique already used for the Inventory
+        # tab's Power State and the Rightsizing tab's Classification columns
+        # - color Status instead of adding a badge column, since a
+        # canvas-rendered st.dataframe can't render real badge widgets.
+        def _status_color(val):
+            if val.startswith("⚠️"):
+                return "color: #FBBF24;"
+            if val.startswith("ℹ️"):
+                return "color: #60A5FA;"
+            return "color: #34D399;"
+
+        styled_show = show.style.map(_status_color, subset=["Status"])
+        st.dataframe(
+            styled_show, hide_index=True, width="stretch", row_height=42,
+            column_config={
+                # Explicit widths sized to this app's own real longest
+                # values (this session's established finding: neither
+                # width="small" nor leaving width unset reliably avoids
+                # clipping - see the Inventory/Rightsizing tables' own
+                # column_config comments).
+                "Service":    st.column_config.TextColumn(pinned=True, width=230),
+                "SKU / Tier": st.column_config.TextColumn(width=140),
+                "Region":     st.column_config.TextColumn(width=110),
+                "OS":         st.column_config.TextColumn(width=80),
+                "Running":    st.column_config.TextColumn(width=90),
+                "Reserved":   st.column_config.TextColumn(width=90),
+                "Status":     st.column_config.TextColumn(width=140),
+                rate_col:     st.column_config.TextColumn(f"RI Rate ({ri_term_choice})", width=130),
+                savings_col:  st.column_config.TextColumn("Monthly Savings", width=140),
+            },
+        )
         if not has_pricing_cols:
             st.caption(
-                "ℹ️ Purchase-cost columns aren't shown - no cached pricing yet for these SKUs; "
+                ":material/info: Purchase-cost columns aren't shown - no cached pricing yet for these SKUs; "
                 "re-run a sync from the tenant's Manage dialog on the Home page."
             )
     else:
         st.caption("No per-instance-reservable resources in inventory yet.")
 
     if not capacity_cov.empty:
-        with st.expander(f"ℹ️ {len(capacity_cov)} pooled-capacity resource(s) - not a per-instance purchase", expanded=False):
+        with st.expander(f"{len(capacity_cov)} pooled-capacity resource(s) - not a per-instance purchase", icon=":material/info:", expanded=False):
             st.caption(
                 "Azure applies these reservations automatically across ALL matching resources in your "
                 "subscription (RU/s, DBCU, cDWU, or vCore-hours), not to one specific resource - so the gap "
@@ -2502,10 +2648,13 @@ def _render_ri_coverage_tab():
                 "Resource Type": "Service", "SKU": "SKU / Tier",
                 "running_count": "Running", "reserved_qty": "Reserved",
             })
-            st.dataframe(show_c[["Service", "SKU / Tier", "Region", "Running", "Reserved", "Status"]], hide_index=True, width="stretch")
+            st.dataframe(
+                show_c[["Service", "SKU / Tier", "Region", "Running", "Reserved", "Status"]], hide_index=True, width="stretch",
+                column_config={"Service": st.column_config.TextColumn(width=230), "SKU / Tier": st.column_config.TextColumn(width=140)},
+            )
 
     if not unmeasurable_cov.empty:
-        with st.expander(f"📏 {len(unmeasurable_cov)} volume-based resource(s) - not tracked here", expanded=False):
+        with st.expander(f"{len(unmeasurable_cov)} volume-based resource(s) - not tracked here", icon=":material/straighten:", expanded=False):
             st.caption(
                 "Reserved capacity for these services is sold in blocks far larger than a single resource "
                 "(Storage: 100 TB / 1 PB; Files: 10 TiB / 100 TiB) and applies across your whole "
@@ -2514,16 +2663,32 @@ def _render_ri_coverage_tab():
                 "Management or Storage metrics before considering a purchase."
             )
             show_u = unmeasurable_cov.rename(columns={"Resource Type": "Service", "SKU": "SKU / Tier"})
-            st.dataframe(show_u[["Service", "SKU / Tier", "Region"]], hide_index=True, width="stretch")
+            st.dataframe(
+                show_u[["Service", "SKU / Tier", "Region"]], hide_index=True, width="stretch",
+                column_config={"Service": st.column_config.TextColumn(width=230), "SKU / Tier": st.column_config.TextColumn(width=140)},
+            )
 
     if not ineligible.empty:
-        with st.expander(f"🚫 {len(ineligible)} resource(s) not eligible for any Reservation", expanded=False):
+        with st.expander(f"{len(ineligible)} resource(s) not eligible for any Reservation", icon=":material/block:", expanded=False):
             show_i = ineligible.rename(columns={"Resource Type": "Service", "SKU": "SKU / Tier", "eligibility_reason": "Why not eligible"})
-            st.dataframe(show_i[["Service", "SKU / Tier", "Region", "Why not eligible"]], hide_index=True, width="stretch")
+            st.dataframe(
+                show_i[["Service", "SKU / Tier", "Region", "Why not eligible"]], hide_index=True, width="stretch",
+                column_config={
+                    "Service": st.column_config.TextColumn(width=230),
+                    "SKU / Tier": st.column_config.TextColumn(width=140),
+                    # "large" keyword width (not a pixel value) - same fix
+                    # already used for the Savings Plan tab's own "why
+                    # excluded" long-prose column.
+                    "Why not eligible": st.column_config.TextColumn(width="large"),
+                },
+            )
 
     if not ri_result.orphaned_ri_drain.empty:
-        st.error(f"**{len(ri_result.orphaned_ri_drain)} stopped resource(s) draining active reservations**!")
-        st.dataframe(ri_result.orphaned_ri_drain, hide_index=True, width="stretch")
+        st.error(f"**{len(ri_result.orphaned_ri_drain)} stopped resource(s) draining active reservations**!", icon=":material/warning:")
+        st.dataframe(
+            ri_result.orphaned_ri_drain, hide_index=True, width="stretch",
+            column_config={"Resource Name": st.column_config.TextColumn(width=200), "SKU": st.column_config.TextColumn(width=140)},
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
