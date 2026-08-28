@@ -1488,16 +1488,30 @@ def reservation_analysis(
             if not match.empty:
                 for _, ri in match.iterrows():
                     orphan_rows.append({
-                        "Resource ID":            sres["Resource ID"],
-                        "Resource Name":          sres["Resource Name"],
-                        "SKU":                    sres["SKU"],
-                        "Region":                 sres["Region"],
-                        "OS":                     sres["OS"],
-                        "Matching RI":            ri["commitment_id"],
-                        "RI Rate/hr (USD)":       ri["hourly_usd_commitment"],
-                        "Daily RI Drain (USD)":   round(ri["hourly_usd_commitment"] * 24, 4),
-                        "Monthly RI Drain (USD)": round(ri["hourly_usd_commitment"] * MONTH_HOURS, 2),
-                        "Recommendation":         "CANCEL / EXCHANGE this RI or restart the resource",
+                        "Resource ID":     sres["Resource ID"],
+                        "Resource Name":   sres["Resource Name"],
+                        "SKU":             sres["SKU"],
+                        "Region":          sres["Region"],
+                        "OS":              sres["OS"],
+                        "Matching RI":     ri["commitment_id"],
+                        # No "RI Rate/hr" column (removed 2026-08-29, real
+                        # feedback) - an RI isn't billed hour-by-hour, and
+                        # it was a redundant restatement of the same
+                        # commitment rate "Daily"/"Monthly RI Drain" below
+                        # already express (a plain multiple, no new
+                        # information). "(USD)" also dropped from these two
+                        # column NAMES - raw numeric here, currency symbol
+                        # applied only at display time (app.py's fmt()),
+                        # same "never bake a currency into a column name"
+                        # rule already established elsewhere in this app
+                        # (see app.py's own "Monthly Savings" column
+                        # comment) - a hardcoded "(USD)" here would lie the
+                        # moment a user switches the display currency to
+                        # INR, same bug class as the header mislabeling
+                        # that rule was written to prevent.
+                        "Daily RI Drain":   round(ri["hourly_usd_commitment"] * 24, 4),
+                        "Monthly RI Drain": round(ri["hourly_usd_commitment"] * MONTH_HOURS, 2),
+                        "Recommendation":   "CANCEL / EXCHANGE this RI or restart the resource",
                     })
 
     return RIAnalysisResult(
@@ -1569,7 +1583,7 @@ def generate_recommendations(
     # ── Orphaned RI Drain Alert — one card, N resources ──────────────────────
     if not ri_result.orphaned_ri_drain.empty:
         drain_df = ri_result.orphaned_ri_drain
-        total_monthly_drain = float(drain_df["Monthly RI Drain (USD)"].sum())
+        total_monthly_drain = float(drain_df["Monthly RI Drain"].sum())
         n = len(drain_df)
         recommendations.append({
             "type":     "ACTION_REQUIRED",

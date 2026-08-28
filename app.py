@@ -2520,8 +2520,22 @@ def _render_ri_coverage_tab():
     if not ri_result.orphaned_ri_drain.empty:
         with st.container(key="fl_ri_drain_alert"):
             st.error(f"**{len(ri_result.orphaned_ri_drain)} stopped resource(s) draining active reservations**!", icon=":material/warning:")
+            # Currency-aware display (2026-08-29, real feedback: this table
+            # showed a redundant "RI Rate/hr" column - dropped at the
+            # source, see analysis/engine.py's orphan_rows comment - and
+            # ignored the Display Currency toggle entirely, always showing
+            # raw USD even with INR selected. analysis/engine.py returns
+            # raw numeric "Daily RI Drain"/"Monthly RI Drain" now (no
+            # currency baked into the column name, same rule already
+            # established for "Monthly Savings" elsewhere in this file) -
+            # fmt() applied here, at display time, same as every other $
+            # figure in this app.
+            drain_disp = ri_result.orphaned_ri_drain.copy()
+            for _dcol in ("Daily RI Drain", "Monthly RI Drain"):
+                if _dcol in drain_disp.columns:
+                    drain_disp[_dcol] = drain_disp[_dcol].apply(lambda x: fmt(x, 2))
             st.dataframe(
-                ri_result.orphaned_ri_drain, hide_index=True, width="stretch",
+                drain_disp, hide_index=True, width="stretch",
                 column_config={"Resource Name": st.column_config.TextColumn(width=200), "SKU": st.column_config.TextColumn(width=140)},
             )
 
@@ -3029,7 +3043,19 @@ def _render_recommendations_tab():
                 items = r.get("items") or []
                 if items:
                     with st.expander(f"📋 {len(items)} affected resource{'s' if len(items) != 1 else ''}"):
-                        st.dataframe(pd.DataFrame(items), hide_index=True, width="stretch")
+                        items_df = pd.DataFrame(items)
+                        # Currency-aware (2026-08-29, real feedback) - only
+                        # the Orphaned Capacity recommendation's items carry
+                        # real $ figures today (analysis/engine.py's
+                        # orphan_rows, raw numeric, no currency baked into
+                        # the column name - same reasoning as the RI
+                        # Coverage tab's own drain-alert table above).
+                        # Every other recommendation type's items are plain
+                        # counts/labels, so this is a no-op for them.
+                        for _dcol in ("Daily RI Drain", "Monthly RI Drain"):
+                            if _dcol in items_df.columns:
+                                items_df[_dcol] = items_df[_dcol].apply(lambda x: fmt(x, 2))
+                        st.dataframe(items_df, hide_index=True, width="stretch")
 
     with st.expander(f"📋 Full recommendation table ({len(recs)} categories)", expanded=False):
         master_data = [
