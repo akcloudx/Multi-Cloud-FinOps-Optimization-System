@@ -2407,7 +2407,23 @@ def _render_ri_coverage_tab():
 
     def _status(row):
         if row["gap"] > 0:
-            return f"⚠️ Short by {int(row['gap'])}"
+            base = f"⚠️ Short by {int(row['gap'])}"
+            # partial_ri_credit_fraction (2026-08-29, analysis/engine.py's
+            # size-flexibility reconciliation) - a real, verified AWS
+            # mechanic: a smaller-size RI can already be giving one of
+            # these "short" instances a genuine partial discount (AWS's
+            # own worked example: a t2.medium RI gives a running t2.large
+            # a real 50%-off credit), even though it's not enough to
+            # resolve the gap to 0. NaN-safe via pd.notna() - only the
+            # main tenant-wide merge layer sets this column at all
+            # (Global/Single-subscription/Single-resource-group/AWS
+            # Zonal-scope rows never pass through that reconciliation, so
+            # they carry NaN here after the layers are concatenated, not
+            # a real 0.0 - both must read as "no partial credit").
+            frac = row.get("partial_ri_credit_fraction")
+            if pd.notna(frac) and frac > 0:
+                base += f" · {frac * 100:.0f}% pre-covered"
+            return base
         if row["excess"] > 0:
             return f"ℹ️ {int(row['excess'])} Idle"
         return "✅ Fully Covered"
@@ -2623,7 +2639,12 @@ def _render_ri_coverage_tab():
                 "OS":         st.column_config.TextColumn(width=80),
                 "Running":    st.column_config.TextColumn(width=90),
                 "Reserved":   st.column_config.TextColumn(width=90),
-                "Status":     st.column_config.TextColumn(width=140),
+                # Widened 2026-08-29 (was 140) - Status can now carry a
+                # "· NN% pre-covered" partial-credit suffix (see _status()
+                # above), sized to fit that longest realistic real value
+                # rather than a generic guess - same "explicit width sized
+                # to the real longest value" rule established this session.
+                "Status":     st.column_config.TextColumn(width=260),
                 rate_col:     st.column_config.TextColumn(f"RI Rate ({ri_term_choice})", width=130),
                 savings_col:  st.column_config.TextColumn("Monthly Savings", width=140),
             },

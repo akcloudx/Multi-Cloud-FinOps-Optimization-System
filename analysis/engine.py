@@ -775,13 +775,30 @@ def _allocate_size_flexible_group(rows: list) -> float:
     AWS's own documented allocation order ("applied from the smallest to
     the largest instance size within the family"). Returns the group's
     leftover (unconsumed) normalized-units after every row's demand is
-    satisfied or supply runs out."""
+    satisfied or supply runs out.
+
+    Also sets 'partial_fraction' (2026-08-29) on the one row, if any,
+    where a genuine PARTIAL credit applies - AWS's own worked example
+    (one t2.large running against a t2.medium RI) is a real 50%-off
+    discount, not a binary covered/not, but this app's gap/excess stay
+    integer instance counts (see _apply_aws_size_flexibility's own
+    docstring for why a fractional gap/excess display is out of scope).
+    A partial credit can only ever apply to the CURRENT row being
+    processed when there's leftover supply too small to cover one more
+    whole unit of it: sorted ascending means that leftover is smaller
+    than every later (larger) row's norm_units too, so it can never
+    fully cover another whole unit of a bigger row either - it's
+    genuinely "spent" here, not carryable forward, hence remaining_units
+    is zeroed once recorded."""
     remaining_units = sum(r["reserved_qty"] * r["norm_units"] for r in rows)
     for r in sorted(rows, key=lambda x: x["norm_units"]):
         full_units_coverable = int(remaining_units // r["norm_units"]) if r["norm_units"] else 0
         covered = min(r["running_count"], full_units_coverable)
         r["covered_count"] = covered
         remaining_units -= covered * r["norm_units"]
+        if covered < r["running_count"] and remaining_units > 0:
+            r["partial_fraction"] = remaining_units / r["norm_units"]
+            remaining_units = 0
     return remaining_units
 
 
@@ -803,7 +820,11 @@ def _apply_aws_size_flexibility(merged: pd.DataFrame) -> pd.DataFrame:
     billing discount) still reports as gap=1 here - same direction of
     imprecision the exact-match code already had, just now correctly
     resolved to 0 for every FULL-coverage cross-SKU case instead of every
-    cross-SKU case unconditionally.
+    cross-SKU case unconditionally. The new "partial_ri_credit_fraction"
+    column (2026-08-29) surfaces exactly that gap=1-but-partially-covered
+    case as a readable fraction (0.0-1.0) for app.py's Status column to
+    show - a deliberately display-only fix (gap/excess numbers themselves
+    are unchanged), not an attempt at fully fractional gap/excess.
 
     Only called on the main tenant-wide layer, before it's concatenated
     with any other scope layer - Zonal EC2 RIs are already excluded from
@@ -813,6 +834,12 @@ def _apply_aws_size_flexibility(merged: pd.DataFrame) -> pd.DataFrame:
     """
     if merged.empty:
         return merged
+
+    # Set uniformly for EVERY row (not just size-flexibility-touched ones) -
+    # 2026-08-29 - so downstream code (app.py's Status column) always finds
+    # a real 0.0 rather than a missing column/NaN on Azure rows, non-
+    # eligible AWS rows, or rows never grouped below.
+    merged["partial_ri_credit_fraction"] = 0.0
 
     is_ec2 = merged["Resource Type"] == "Amazon EC2"
     is_rds = merged["Resource Type"].isin(_RDS_FLEX_ELIGIBLE_TYPES)
@@ -860,6 +887,7 @@ def _apply_aws_size_flexibility(merged: pd.DataFrame) -> pd.DataFrame:
         for r in rows:
             merged.at[r["idx"], "gap"] = max(0, r["running_count"] - r["covered_count"])
             merged.at[r["idx"], "excess"] = 0
+            merged.at[r["idx"], "partial_ri_credit_fraction"] = r.get("partial_fraction", 0.0)
         merged.at[largest["idx"], "excess"] = int(leftover // largest["norm_units"]) if largest["norm_units"] else 0
 
     return merged
