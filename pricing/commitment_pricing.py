@@ -24,19 +24,22 @@ against the API (see that module's per-service notes) since Resource Graph's
 reported SKU name frequently doesn't match the Retail API's naming for
 non-VM services at all.
 
-AWS deliberately doesn't populate this table (stale claim as of 2026-08-28
-corrected: AWS live inventory ingestion has existed for a while - see
-aws/connector.py::fetch_live_inventory). The reason is architectural, not a
-gap: AWS Savings Plans apply one flat account-level discount across any
-eligible instance type for a given plan type + term + payment option, not a
-per-SKU rate the way Azure's Retail Prices API exposes - so there's no
-per-resource rate to cache here. AWS's real-time Savings Plan pricing comes
-from a different mechanism instead: aws/connector.py's
+AWS Savings Plans deliberately don't populate this table (architectural,
+not a gap): AWS Savings Plans apply one flat account-level discount across
+any eligible instance type for a given plan type + term + payment option,
+not a per-SKU rate the way Azure's Retail Prices API exposes - so there's
+no per-resource rate to cache here. AWS's real-time Savings Plan pricing
+comes from a different mechanism instead: aws/connector.py's
 fetch_savings_plans_recommendation (ce:GetSavingsPlansPurchaseRecommendation)
 caches a per-term discount % directly on the CloudTenant row, read by
 analysis/commitment_economics.py's aws_savings_plan_term_comparison - not
-this cache table. AWS Reserved Instance real pricing is a separate,
-not-yet-built gap (ri_gap_pricing() is still Azure-only today).
+this cache table.
+
+AWS Reserved Instances DO populate this table (added 2026-08-28) - unlike
+Savings Plans, RIs genuinely price per SKU/region/OS, the same shape Azure's
+RIs already use here. See pricing/aws_ri_offerings.py for the real API
+(each AWS service's own free Describe*Offerings call) and this module's
+_fetch_aws_ri_rates for the per-resource-type dispatch.
 """
 
 from datetime import datetime, timedelta
@@ -376,18 +379,70 @@ def _fetch_azure_ri_rates(resource_type: str, sku: str, region: str, os_: str, r
 
 
 def _fetch_aws_sp_rates(resource_type: str, sku: str, region: str, os_: str, redundancy: str = "N/A") -> dict:
-    """AWS Savings Plans (Compute SP / EC2 Instance SP) pricing - not
-    implemented yet. Live AWS inventory ingestion doesn't exist yet either
-    (aws/connector.py), so there's nothing to look this up against in
-    practice; returns all-None so callers degrade gracefully rather than
-    crash."""
+    """Deliberately stays a stub - AWS Savings Plans pricing has its own
+    separate, already-built mechanism instead of this cache table: a flat
+    account-level discount % cached on the CloudTenant row (see
+    aws/connector.py::fetch_savings_plans_recommendation and
+    analysis/commitment_economics.py::aws_savings_plan_term_comparison) -
+    AWS Savings Plans apply one flat discount across any eligible instance
+    type for a plan type + term + payment option, not a per-SKU rate the
+    way this cache table (and Azure's Retail Prices API) models. This
+    stub's `payg` is also unused: ri_gap_pricing()'s PAYG lookup already
+    falls back to inventory's own "PAYG Hourly Cost USD" (populated by
+    pricing/aws_price_list.py) when this cache has no payg rate - see
+    analysis/commitment_economics.py::_lookup_payg."""
     return {"payg": None, "1yr": None, "3yr": None}
 
 
-def _fetch_aws_ri_rates(resource_type: str, sku: str, region: str, os_: str, redundancy: str = "N/A") -> dict:
-    """AWS Reserved Instances (EC2 Standard/Convertible, RDS) pricing - not
-    implemented yet, same reasoning as _fetch_aws_sp_rates."""
-    return {"1yr": None, "3yr": None}
+def _fetch_aws_ri_rates(resource_type: str, sku: str, region: str, os_: str, redundancy: str = "N/A",
+                         aws_creds=None) -> dict:
+    """AWS Reserved Instance pricing, via pricing/aws_ri_offerings.py -
+    each AWS service's own free Describe*Offerings API (typed fields,
+    no new IAM permission - see that module's docstring for the full
+    verification trail). Dispatches by resource_type, mirroring
+    pricing/aws_price_list.py::_fetch_from_api's own per-resource-type
+    dispatch. redundancy carries RDS's Multi-AZ/Single-AZ distinction
+    ("Zone Redundant"/"Locally Redundant" - see
+    pricing/aws_commitment_mapping.py::derive_aws_reservation_commitment_fields),
+    a genuine price difference RDS's own API models via a MultiAZ filter.
+    Returns all-None for unmapped resource types or when aws_creds is
+    missing, same graceful-degradation discipline as every other fetch
+    in this module."""
+    result = {"1yr": None, "3yr": None}
+    if not aws_creds or not sku or sku == "N/A" or not region:
+        return result
+
+    from pricing.aws_ri_offerings import (
+        fetch_ec2_ri_rates, fetch_rds_ri_rates, fetch_elasticache_ri_rates,
+        fetch_redshift_ri_rates, fetch_opensearch_ri_rates, fetch_memorydb_ri_rates,
+    )
+    if resource_type == "Amazon EC2":
+        return fetch_ec2_ri_rates(aws_creds, sku, region, os_)
+    if resource_type in _RDS_RI_RESOURCE_TYPES:
+        multi_az = redundancy == "Zone Redundant"
+        return fetch_rds_ri_rates(aws_creds, sku, region, resource_type, multi_az)
+    if resource_type in _ELASTICACHE_RI_RESOURCE_TYPES:
+        return fetch_elasticache_ri_rates(aws_creds, sku, region, resource_type)
+    if resource_type == "Amazon Redshift":
+        return fetch_redshift_ri_rates(aws_creds, sku, region)
+    if resource_type == "Amazon OpenSearch":
+        return fetch_opensearch_ri_rates(aws_creds, sku, region)
+    if resource_type == "Amazon MemoryDB":
+        return fetch_memorydb_ri_rates(aws_creds, sku, region)
+    return result
+
+
+# resource_type sets used by _fetch_aws_ri_rates' dispatch above - same
+# labels aws/connector.py's map_rds_engine/map_elasticache_engine produce
+# (this app's own per-engine inventory taxonomy), not raw AWS engine ids.
+_RDS_RI_RESOURCE_TYPES = {
+    "Amazon RDS for MySQL", "Amazon RDS for PostgreSQL", "Amazon RDS for MariaDB",
+    "Amazon RDS for Oracle", "Amazon RDS for SQL Server",
+    "Amazon Aurora (MySQL)", "Amazon Aurora (PostgreSQL)",
+}
+_ELASTICACHE_RI_RESOURCE_TYPES = {
+    "Amazon ElastiCache for Redis", "Amazon ElastiCache for Memcached", "Amazon ElastiCache for Valkey",
+}
 
 
 def _upsert(session: Session, cached: dict, provider: str, instrument: str,
@@ -409,7 +464,7 @@ def _upsert(session: Session, cached: dict, provider: str, instrument: str,
         ))
 
 
-def refresh_commitment_prices(engine, resource_rows: list[dict], provider: str = "Azure") -> None:
+def refresh_commitment_prices(engine, resource_rows: list[dict], provider: str = "Azure", aws_creds=None) -> None:
     """
     For each unique (resource_type, sku, region, os, redundancy) in
     resource_rows, fetches real 1yr/3yr Savings Plan and Reserved Instance
@@ -420,6 +475,11 @@ def refresh_commitment_prices(engine, resource_rows: list[dict], provider: str =
     sku_mapping.py. Redundancy is needed because Zone-Redundant SQL
     Database/Elastic Pool meters are genuinely different (often cheaper)
     prices than Standard, not a surcharge - see _filter_by_redundancy.
+
+    aws_creds is required for provider="AWS" (ignored for Azure, whose
+    Retail Prices API is public/unauthenticated) - AWS's RI Offerings
+    APIs need the tenant's own real credentials, same as
+    pricing/aws_price_list.py's on-demand lookups already do.
     """
     combos = {
         (
@@ -455,7 +515,12 @@ def refresh_commitment_prices(engine, resource_rows: list[dict], provider: str =
                 continue
 
             sp_rates = sp_fetch(resource_type, sku, region, os_, redundancy) if not sp_fresh else None
-            ri_rates = ri_fetch(resource_type, sku, region, os_, redundancy) if not ri_fresh else None
+            if ri_fresh:
+                ri_rates = None
+            elif provider == "AWS":
+                ri_rates = ri_fetch(resource_type, sku, region, os_, redundancy, aws_creds=aws_creds)
+            else:
+                ri_rates = ri_fetch(resource_type, sku, region, os_, redundancy)
 
             if sp_rates:
                 _upsert(session, cached, provider, "SavingsPlan", resource_type, region, sku, os_, redundancy, "1yr", sp_rates.get("1yr"), sp_rates.get("payg"), now_iso)

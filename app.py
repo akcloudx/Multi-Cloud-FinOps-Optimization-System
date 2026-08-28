@@ -2424,7 +2424,7 @@ def _render_ri_coverage_tab():
             st.info("No active Reserved Instance contracts found.")
 
     raw_cov = ri_result.coverage_table
-    if is_azure and prices_df is not None and not prices_df.empty and not raw_cov.empty:
+    if prices_df is not None and not prices_df.empty and not raw_cov.empty:
         cov = ri_gap_pricing(raw_cov, inv_raw, prices_df).copy()
     else:
         cov = raw_cov.copy()
@@ -2484,8 +2484,8 @@ def _render_ri_coverage_tab():
         st.dataframe(show[[c for c in cols if c in show.columns]], hide_index=True, width="stretch")
         if not has_pricing_cols:
             st.caption(
-                "ℹ️ Purchase-cost columns aren't shown - "
-                + ("AWS Reserved Instance pricing isn't wired up yet." if not is_azure else "no cached pricing yet for these SKUs; re-run a sync from the tenant's Manage dialog on the Home page.")
+                "ℹ️ Purchase-cost columns aren't shown - no cached pricing yet for these SKUs; "
+                "re-run a sync from the tenant's Manage dialog on the Home page."
             )
     else:
         st.caption("No per-instance-reservable resources in inventory yet.")
@@ -2641,19 +2641,23 @@ def _real_projected_savings():
 
     AWS branch added 2026-08-28: real Compute, SageMaker, and Database
     Savings Plan pricing is now available (aws_savings_plan_term_comparison,
-    cached per-tenant - see _render_sp_pool_economics). RI pricing stays
-    Azure-only (ri_gap_pricing is a separate, explicitly deferred gap - not
-    this pass), so the AWS branch always passes an empty ri_priced
-    DataFrame, which combined_monthly_savings already handles gracefully
-    (contributes $0, not an error) - this returns a genuinely
-    partial-but-real figure (SP only) for AWS rather than the previous
-    flat None. Database's comparison DataFrame only has a real (non-$0)
-    row for the "1yr" term_key (Database Savings Plans are 1-year-only) -
+    cached per-tenant - see _render_sp_pool_economics). RI pricing (added
+    the same day) now uses the SAME ri_priced computation as Azure -
+    ri_gap_pricing() and CommitmentPriceCache are provider-agnostic (see
+    pricing/commitment_pricing.py's module docstring); only the SP side
+    stays branched, since that mechanism genuinely differs by provider.
+    Database's SP comparison DataFrame only has a real (non-$0) row for
+    the "1yr" term_key (Database Savings Plans are 1-year-only) -
     combined_monthly_savings filters by the single shared sp_term, so if
     the Compute pool's term selector is set to "3yr" the Database
     contribution for that combined figure is correctly $0, not an error."""
     sp_term = st.session_state.get("sp_compute_term_widget", "1yr")
     ri_term = st.session_state.get("ri_term_widget", "1yr")
+    ri_priced = (
+        ri_gap_pricing(ri_result.coverage_table, inv_raw, prices_df)
+        if (prices_df is not None and not prices_df.empty and not ri_result.coverage_table.empty)
+        else pd.DataFrame()
+    )
     if is_azure:
         if prices_df is None or prices_df.empty:
             return None
@@ -2662,7 +2666,6 @@ def _real_projected_savings():
             sp_pool_cmps.append(savings_plan_term_comparison(compute_24x7, prices_df))
         if not db_running.empty:
             sp_pool_cmps.append(savings_plan_term_comparison(db_running, prices_df))
-        ri_priced = ri_gap_pricing(ri_result.coverage_table, inv_raw, prices_df) if not ri_result.coverage_table.empty else pd.DataFrame()
         return combined_monthly_savings(sp_pool_cmps, ri_priced, sp_term, ri_term)
     else:
         sp_pool_cmps = []
@@ -2674,9 +2677,9 @@ def _real_projected_savings():
             aws_db_cmp = aws_savings_plan_term_comparison(db_running, active_tenant, "database")
             if aws_db_cmp is not None:
                 sp_pool_cmps.append(aws_db_cmp)
-        if not sp_pool_cmps:
+        if not sp_pool_cmps and ri_priced.empty:
             return None
-        return combined_monthly_savings(sp_pool_cmps, pd.DataFrame(), sp_term, ri_term)
+        return combined_monthly_savings(sp_pool_cmps, ri_priced, sp_term, ri_term)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -669,10 +669,62 @@ def seed_aws_if_empty(engine=None):
             session.bulk_insert_mappings(Commitment, AWS_COMMITMENTS)
             session.commit()
             print(f"[OK] Seeded AWS database with {len(AWS_INVENTORY)} resources, {len(AWS_COMMITMENTS)} commitments.")
+            _seed_aws_ri_price_cache(session)
         else:
             print("[INFO] AWS database already seeded -- skipping.")
 
     seed_aws_demo_tenant_if_empty()
+
+
+# Real AWS Reserved Instance real-time pricing (2026-08-28 feature) - a
+# demo tenant never runs a live sync (aws_ri_offerings.py's
+# Describe*Offerings calls need real credentials), unlike Azure's demo
+# seed, which can hit its public, unauthenticated Retail Prices API
+# directly (see db/seed.py's seed_if_empty). So this synthesizes
+# illustrative CommitmentPriceCache rows directly instead, one pair
+# (1yr/3yr) per RI-eligible resource already in AWS_INVENTORY - same
+# reasoning already used for the AWS Savings Plans demo figures.
+# Discount % bounded by AWS's own published No-Upfront RI ranges
+# (~30-40% 1yr, ~40-60% 3yr) rather than invented precision. Matched
+# against AWS_INVENTORY's OWN resource_type strings (e.g. "AWS RDS
+# MySQL", "Amazon Aurora") rather than the newer map_rds_engine()
+# taxonomy used by live AWS tenants - the demo's RDS/Aurora rows
+# predate that later rename, a separate, pre-existing naming drift not
+# in scope for this pricing feature to fix.
+_AWS_RI_ELIGIBLE_DEMO_TYPES = {
+    "Amazon EC2":                      (0.32, 0.52),
+    "AWS RDS PostgreSQL":              (0.35, 0.55),
+    "AWS RDS MySQL":                   (0.35, 0.55),
+    "Amazon Aurora":                   (0.35, 0.55),
+    "Amazon ElastiCache for Redis":    (0.30, 0.50),
+    "Amazon ElastiCache for Valkey":   (0.30, 0.50),
+    "Amazon MemoryDB":                 (0.30, 0.50),
+    "Amazon Redshift":                 (0.33, 0.53),
+    "Amazon OpenSearch":               (0.33, 0.53),
+}
+
+
+def _seed_aws_ri_price_cache(session: Session) -> None:
+    from datetime import datetime
+    from db.schema import CommitmentPriceCache
+    now_iso = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    rows = []
+    for r in AWS_INVENTORY:
+        discounts = _AWS_RI_ELIGIBLE_DEMO_TYPES.get(r.get("resource_type"))
+        payg = r.get("payg_hourly_usd")
+        if discounts is None or not payg or r.get("sku") in (None, "N/A"):
+            continue
+        for term, discount_frac in zip(("1yr", "3yr"), discounts):
+            rows.append(CommitmentPriceCache(
+                provider="AWS", instrument="ReservedInstance", resource_type=r["resource_type"],
+                region=r.get("region"), sku=r.get("sku"), os=r.get("os") or "N/A", redundancy="N/A",
+                term=term, effective_hourly_rate_usd=payg * (1 - discount_frac),
+                payg_hourly_rate_usd=payg, fetched_at=now_iso,
+            ))
+    if rows:
+        session.bulk_save_objects(rows)
+        session.commit()
+        print(f"[OK] Seeded {len(rows)} illustrative AWS Reserved Instance price cache rows.")
 
 
 def seed_aws_demo_tenant_if_empty():

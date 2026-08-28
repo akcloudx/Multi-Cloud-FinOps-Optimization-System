@@ -173,8 +173,14 @@ def run_ingestion_pipeline(provider: str = "Azure", creds=None, force_mock: bool
             # Real 1yr/3yr Savings Plan + Reserved Instance rates for every
             # SKU/region/OS just synced - what savings_plan_analysis() and
             # reservation_analysis() use instead of a flat safety-buffer guess.
-            if is_azure and records:
-                refresh_commitment_prices(engine, records, provider=provider)
+            # AWS branch added 2026-08-28: only Reserved Instance rates
+            # actually get populated for AWS (aws_creds threaded through for
+            # pricing/aws_ri_offerings.py's live Describe*Offerings calls) -
+            # AWS Savings Plans pricing stays on its own separate mechanism
+            # (see pricing/commitment_pricing.py's module docstring), so
+            # _fetch_aws_sp_rates stays a no-op stub either way.
+            if records:
+                refresh_commitment_prices(engine, records, provider=provider, aws_creds=(None if is_azure else live_creds))
 
             # Derive this app's simplified Commitment rows from the raw
             # purchase records. Azure's Reservations carry no $ amount at
