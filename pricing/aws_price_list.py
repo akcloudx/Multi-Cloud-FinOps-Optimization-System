@@ -59,7 +59,12 @@ _RDS_RESOURCE_TYPE_TO_DB_ENGINE = {
     "Amazon RDS for MySQL":         "MySQL",
     "Amazon RDS for PostgreSQL":    "PostgreSQL",
     "Amazon RDS for MariaDB":       "MariaDB",
-    "Amazon RDS for Oracle":        "Oracle",
+    # Split by license model 2026-08-29 (aws/connector.py::map_rds_engine) -
+    # both variants are still the same real "Oracle" databaseEngine
+    # attribute in AWS's price list data; the split only changes which
+    # licenseModel candidate _fetch_from_api's own filtering below prefers.
+    "Amazon RDS for Oracle (BYOL)":             "Oracle",
+    "Amazon RDS for Oracle (License Included)": "Oracle",
     "Amazon RDS for SQL Server":    "SQL Server",
     "Amazon Aurora (MySQL)":        "Aurora MySQL",
     "Amazon Aurora (PostgreSQL)":   "Aurora PostgreSQL",
@@ -742,11 +747,34 @@ def _fetch_from_api(resource_type: str, sku: str, region: str, os_: str, redunda
     # fallback) rather than erroring if no "preferred" variant survives -
     # e.g. some RDS engines (Oracle, SQL Server) have no license-included
     # variant available in a given region.
-    preferred = [
-        (p, a) for p, a in candidates
-        if a.get("preInstalledSw", "NA") == "NA"
-        and a.get("licenseModel", "").lower() in ("no license required", "license included", "")
-    ]
+    #
+    # Oracle license-model-aware split (2026-08-29) - before this, EVERY
+    # Oracle instance (BYOL or not) was priced against whichever candidate
+    # survived this same blanket "license included, else cheapest" filter,
+    # meaning a real BYOL instance was silently priced at the (materially
+    # higher) License Included rate whenever one existed in that region.
+    # Now resource_type (already split by aws/connector.py::map_rds_engine)
+    # picks the real matching licenseModel candidate directly. Anchored on
+    # the one exact string already confirmed against real price list data
+    # ("license included") rather than guessing BYOL's own exact wording -
+    # BYOL is filtered as "anything that is NOT License Included", which is
+    # correct regardless of how AWS phrases the BYOL variant itself.
+    if resource_type == "Amazon RDS for Oracle (License Included)":
+        preferred = [
+            (p, a) for p, a in candidates
+            if a.get("preInstalledSw", "NA") == "NA" and a.get("licenseModel", "").lower() == "license included"
+        ]
+    elif resource_type == "Amazon RDS for Oracle (BYOL)":
+        preferred = [
+            (p, a) for p, a in candidates
+            if a.get("preInstalledSw", "NA") == "NA" and a.get("licenseModel", "").lower() != "license included"
+        ]
+    else:
+        preferred = [
+            (p, a) for p, a in candidates
+            if a.get("preInstalledSw", "NA") == "NA"
+            and a.get("licenseModel", "").lower() in ("no license required", "license included", "")
+        ]
     pool = preferred or candidates
     return min(p for p, _ in pool)
 

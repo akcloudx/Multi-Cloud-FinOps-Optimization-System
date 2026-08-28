@@ -88,7 +88,21 @@ def derive_aws_reservation_commitment_fields(purchase: dict) -> Optional[dict]:
         scope_os = map_ec2_platform(purchase.get("product_description") or "")
         scope_redundancy = "N/A"
     elif service == "RDS":
-        scope_resource_type = map_rds_engine(purchase.get("product_description") or "")
+        # Oracle's ProductDescription encodes license model as a real "(li)"
+        # suffix (confirmed via AWS's own describe-reserved-db-instances-
+        # offerings CLI docs example: "oracle-se2(li)" for License Included;
+        # BYOL is the bare engine id with no suffix) - pre-parsed here into
+        # the same "license-included" string map_rds_engine()'s inventory
+        # call site already passes from DescribeDBInstances' own
+        # LicenseModel field, so both sides resolve to the identical two
+        # split resource_types ("Amazon RDS for Oracle (BYOL)" / "(License
+        # Included)") and RI purchases correctly match their demand.
+        product_description = purchase.get("product_description") or ""
+        if product_description.endswith("(li)"):
+            engine_id, license_model = product_description[:-4], "license-included"
+        else:
+            engine_id, license_model = product_description, None
+        scope_resource_type = map_rds_engine(engine_id, license_model)
         scope_os = "N/A"
         scope_redundancy = "Zone Redundant" if purchase.get("multi_az") else "Locally Redundant"
     elif service == "ElastiCache":

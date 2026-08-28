@@ -589,14 +589,41 @@ _RDS_ENGINE_LABELS = {
 }
 
 
-def map_rds_engine(engine: str) -> str:
+def map_rds_engine(engine: str, license_model: str = None) -> str:
     """RDS's `Engine` field (e.g. "mysql", "aurora-postgresql") - confirmed
     valid values via https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_CreateDBInstance.html's
     Engine parameter enum. Falls back to the raw engine string (rather than
     a generic "Database" bucket) for any engine not in the map, so an
     unrecognized/future engine is still visible and identifiable, not
-    silently mislabeled."""
-    return _RDS_ENGINE_LABELS.get((engine or "").lower(), engine or "Unknown")
+    silently mislabeled.
+
+    license_model splits Oracle only (added 2026-08-29) into "Amazon RDS
+    for Oracle (BYOL)" / "(License Included)" - a real product distinction
+    with different Reserved Instance size-flexibility eligibility (BYOL:
+    flexible, same as MySQL/PostgreSQL/MariaDB; License Included: NOT
+    flexible, same as SQL Server - confirmed via AWS's own Oracle
+    licensing docs, see analysis/engine.py's _RDS_FLEX_ELIGIBLE_TYPES).
+    Every other engine's `_RDS_ENGINE_LABELS` value already reflects the
+    real product split without needing this parameter (SQL Server has no
+    BYOL option to disambiguate; MySQL/MariaDB/PostgreSQL's own
+    LicenseModel value is a fixed, non-choice constant per engine, not a
+    real product variant to split on).
+
+    Callers pass real RDS values: inventory rows pass DescribeDBInstances'
+    own `LicenseModel` field directly ("bring-your-own-license" /
+    "license-included"); reservation rows have no such field, so the
+    caller (pricing/aws_commitment_mapping.py) pre-parses the real
+    ProductDescription "(li)" suffix (confirmed via AWS's own CLI docs
+    example, "oracle-se2(li)") into the same "license-included" string
+    before calling this. Defaults to BYOL when not supplied - the safer
+    direction for this app's purposes, since every real call site for
+    Oracle rows DOES supply it (see both call sites)."""
+    base = _RDS_ENGINE_LABELS.get((engine or "").lower(), engine or "Unknown")
+    if base == "Amazon RDS for Oracle":
+        if (license_model or "").strip().lower() in ("license-included", "license included"):
+            return "Amazon RDS for Oracle (License Included)"
+        return "Amazon RDS for Oracle (BYOL)"
+    return base
 
 
 _ELASTICACHE_ENGINE_LABELS = {
@@ -745,7 +772,7 @@ def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
                     records.append({
                         "Resource ID":             db.get("DBInstanceArn") or db.get("DBInstanceIdentifier", ""),
                         "Resource Name":           db.get("DBInstanceIdentifier", ""),
-                        "Resource Type":           map_rds_engine(db.get("Engine", "")),
+                        "Resource Type":           map_rds_engine(db.get("Engine", ""), db.get("LicenseModel")),
                         "Resource State":          _map_rds_state(db.get("DBInstanceStatus", "")),
                         "Region":                  region,
                         "OS":                      "N/A",

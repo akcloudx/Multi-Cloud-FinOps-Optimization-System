@@ -169,18 +169,26 @@ def fetch_ec2_ri_rates(creds: AWSCredentials, instance_type: str, region: str, o
 
 # Representative substring per label - relies on AWS's own documented
 # "partial match" behavior for this filter (RDS's own parameter doc),
-# not a guessed exact display string. Oracle/SQL Server's several
-# license-model engine keys all share one representative substring
-# since the Offerings-side ProductDescription doesn't need the exact
-# same granularity map_rds_engine()'s inventory-labeling side does.
+# not a guessed exact display string. SQL Server's several license-model
+# engine keys all share one representative substring since this app
+# doesn't split SQL Server by license model (out of scope - see
+# analysis/engine.py's _RDS_FLEX_ELIGIBLE_TYPES, SQL Server is never
+# size-flexibility-eligible regardless of license model, so there was no
+# real reason to split it the way Oracle was). Oracle's two labels both
+# query the same "oracle" substring - the license-model distinction is
+# resolved AFTER the fetch instead, by checking each returned offering's
+# own ProductDescription for the real "(li)" suffix (see
+# fetch_rds_ri_rates below) - confirmed via AWS's own CLI docs example,
+# "oracle-se2(li)" for License Included.
 _RDS_LABEL_TO_QUERY = {
-    "Amazon RDS for MySQL":       "mysql",
-    "Amazon RDS for PostgreSQL":  "postgresql",
-    "Amazon RDS for MariaDB":     "mariadb",
-    "Amazon RDS for Oracle":      "oracle",
-    "Amazon RDS for SQL Server":  "sql server",
-    "Amazon Aurora (MySQL)":      "aurora mysql",
-    "Amazon Aurora (PostgreSQL)": "aurora postgresql",
+    "Amazon RDS for MySQL":                     "mysql",
+    "Amazon RDS for PostgreSQL":                 "postgresql",
+    "Amazon RDS for MariaDB":                    "mariadb",
+    "Amazon RDS for Oracle (BYOL)":              "oracle",
+    "Amazon RDS for Oracle (License Included)":  "oracle",
+    "Amazon RDS for SQL Server":                 "sql server",
+    "Amazon Aurora (MySQL)":                     "aurora mysql",
+    "Amazon Aurora (PostgreSQL)":                "aurora postgresql",
 }
 
 
@@ -202,6 +210,14 @@ def fetch_rds_ri_rates(creds: AWSCredentials, db_instance_class: str, region: st
                 DBInstanceClass=db_instance_class, ProductDescription=query,
                 Duration=term_str, MultiAZ=bool(multi_az),
             ).get("ReservedDBInstancesOfferings", [])
+        # Oracle only: the "oracle" substring query above matches BOTH
+        # license models' offerings - narrow down to the one this
+        # resource_type actually is, using the real "(li)" ProductDescription
+        # suffix (see module comment above _RDS_LABEL_TO_QUERY).
+        if resource_type == "Amazon RDS for Oracle (License Included)":
+            offerings = [o for o in offerings if o.get("ProductDescription", "").endswith("(li)")]
+        elif resource_type == "Amazon RDS for Oracle (BYOL)":
+            offerings = [o for o in offerings if not o.get("ProductDescription", "").endswith("(li)")]
     except (ClientError, BotoCoreError):
         return result
     offerings = [o for o in offerings if o.get("OfferingType") == "No Upfront"]

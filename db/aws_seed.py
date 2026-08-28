@@ -557,7 +557,12 @@ AWS_COMPUTE_SP_TYPES = {"Amazon EC2", "AWS Lambda", "AWS Fargate"}
 AWS_DATABASE_SP_TYPES = {
     "AWS RDS PostgreSQL", "AWS RDS MySQL", "Amazon Aurora", "Amazon DynamoDB", "Amazon ElastiCache for Valkey", "Amazon OpenSearch",   # demo seed naming
     "Amazon RDS for MySQL", "Amazon RDS for PostgreSQL", "Amazon RDS for MariaDB",                      # live fetch naming
-    "Amazon RDS for Oracle", "Amazon RDS for SQL Server", "Amazon Aurora (MySQL)", "Amazon Aurora (PostgreSQL)",
+    # Split by license model 2026-08-29 (aws/connector.py::map_rds_engine) -
+    # Database Savings Plan eligibility isn't license-model-dependent, so
+    # both variants are equally SP-eligible; this is purely following the
+    # resource_type label split, not a new eligibility decision.
+    "Amazon RDS for Oracle (BYOL)", "Amazon RDS for Oracle (License Included)",
+    "Amazon RDS for SQL Server", "Amazon Aurora (MySQL)", "Amazon Aurora (PostgreSQL)",
     "Amazon DocumentDB", "Amazon Neptune", "AWS DMS Replication Instance", "Amazon Keyspaces",
     "Amazon DocumentDB Serverless",   # added 2026-08-23 - confirmed real via AWS's Database Savings Plans announcement, which explicitly calls out Serverless coverage alongside provisioned.
     "Amazon Neptune Serverless",      # added 2026-08-23 - same confirmation, AWS's Database Savings Plans announcement explicitly calls out Neptune Serverless coverage.
@@ -584,6 +589,17 @@ AWS_RI_COVERAGE_NOTES = {
     "AWS RDS PostgreSQL":   ("RDS DB instance hourly compute capacity (Single-AZ or Multi-AZ)", "Storage (GB-month), provisioned IOPS, automated backups"),
     "AWS RDS MySQL":        ("RDS DB instance hourly compute capacity (size-flexible within family)", "Storage, IOPS, automated backup storage"),
     "Amazon Aurora":        ("Aurora DB cluster instance compute capacity", "Storage per GB-month, I/O rate charges"),
+    # Added 2026-08-29 - previously this app had NO Coverage Policy entry
+    # for Oracle at all (a real, separate gap found while researching the
+    # RI size-flexibility feature's own Oracle exclusion), even though
+    # Oracle is genuinely RI-eligible. Split by license model the same way
+    # aws/connector.py::map_rds_engine now resolves resource_type - BYOL is
+    # size-flexibility-eligible (same as MySQL/PostgreSQL/MariaDB), License
+    # Included is NOT (same as SQL Server) - confirmed via AWS's own Oracle
+    # licensing docs (License Included only exists for Standard Edition
+    # Two; BYOL covers both SE2 and Enterprise Edition).
+    "Amazon RDS for Oracle (BYOL)": ("RDS DB instance hourly compute capacity (size-flexible within family)", "Storage (GB-month), provisioned IOPS, automated backups, the Oracle license itself (bring your own)"),
+    "Amazon RDS for Oracle (License Included)": ("RDS DB instance hourly compute capacity - bundled Oracle Standard Edition Two license (Enterprise Edition has no License Included option)", "Storage (GB-month), provisioned IOPS, automated backups. NOT size-flexible - AWS's own docs exclude License Included from Reserved Instance instance-size flexibility, same restriction as SQL Server"),
     # Reserved Capacity is a real, current DynamoDB product (confirmed via
     # AWS's own docs - up to 54%/77% off) - genuinely eligible, NOT
     # excluded. But it's purchased and viewed Console-only: dynamodb:

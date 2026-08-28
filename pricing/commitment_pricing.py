@@ -437,7 +437,9 @@ def _fetch_aws_ri_rates(resource_type: str, sku: str, region: str, os_: str, red
 # (this app's own per-engine inventory taxonomy), not raw AWS engine ids.
 _RDS_RI_RESOURCE_TYPES = {
     "Amazon RDS for MySQL", "Amazon RDS for PostgreSQL", "Amazon RDS for MariaDB",
-    "Amazon RDS for Oracle", "Amazon RDS for SQL Server",
+    # Split by license model 2026-08-29 - see aws/connector.py::map_rds_engine.
+    "Amazon RDS for Oracle (BYOL)", "Amazon RDS for Oracle (License Included)",
+    "Amazon RDS for SQL Server",
     "Amazon Aurora (MySQL)", "Amazon Aurora (PostgreSQL)",
 }
 _ELASTICACHE_RI_RESOURCE_TYPES = {

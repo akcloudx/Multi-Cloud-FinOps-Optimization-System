@@ -732,16 +732,19 @@ _RDS_NORM_FACTOR_MULTI_AZ = {k: v * 2 for k, v in _RDS_NORM_FACTOR_SINGLE_AZ.ite
 # RDS size flexibility is only available for these engines (this app's own
 # resource_type labels - both the live-fetch taxonomy, aws/connector.py's
 # _RDS_ENGINE_LABELS, and the older demo-seed labels, db/aws_seed.py) -
-# confirmed via AWS's own docs. SQL Server is excluded. "Amazon RDS for
-# Oracle" is ALSO excluded here even though Oracle BYOL specifically IS
-# eligible - this app's own _RDS_ENGINE_LABELS maps every Oracle engine
-# variant (BYOL and License Included alike) to that one flat resource_type,
-# so there's no way to tell them apart from resource_type alone; treated
-# conservatively (excluded) rather than guessed.
+# confirmed via AWS's own docs. SQL Server is excluded (no BYOL option to
+# even consider - see aws/connector.py's _RDS_ENGINE_LABELS). Oracle is
+# now split by license model (2026-08-29, aws/connector.py::map_rds_engine)
+# - "(BYOL)" is included below, "(License Included)" stays excluded, same
+# treatment as SQL Server; previously this app's own _RDS_ENGINE_LABELS
+# mapped every Oracle engine variant (BYOL and License Included alike) to
+# one flat resource_type with no way to tell them apart, so the whole type
+# was excluded conservatively - that's the gap this split closes.
 _RDS_FLEX_ELIGIBLE_TYPES = {
     "Amazon RDS for MariaDB", "AWS RDS MariaDB",
     "Amazon RDS for MySQL", "AWS RDS MySQL",
     "Amazon RDS for PostgreSQL", "AWS RDS PostgreSQL",
+    "Amazon RDS for Oracle (BYOL)",
     "Amazon Aurora", "Amazon Aurora (MySQL)", "Amazon Aurora (PostgreSQL)",
 }
 
