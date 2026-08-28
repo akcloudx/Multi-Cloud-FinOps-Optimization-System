@@ -2384,11 +2384,25 @@ def _render_ri_coverage_tab():
     """Mirrors the Savings Plan tab's clarity principles: a clean, primary
     table for the resources where a gap is a literal purchase recommendation
     (coverage_model == 'instance'), with pooled-capacity, volume-based, and
-    not-eligible resources moved into their own labeled expanders instead of
-    all being crammed into one wide table with paragraph-length notes stuffed
-    into a 'Coverage Note' column - that was the actual complaint (this tab
-    hadn't been touched by the Savings Plan cleanup, so it looked worse by
-    comparison once that one got simplified)."""
+    not-eligible resources moved out of it into their own labeled sections
+    instead of all being crammed into one wide table with paragraph-length
+    notes stuffed into a 'Coverage Note' column.
+
+    Page order (2026-08-29 restructure, real feedback: "too cluttered, too
+    much to understand" - 9 stacked top-level sections, with the single
+    most actionable item on the page, real $ actively wasted on a stopped
+    resource with an active RI, buried dead last): headline+badges (the
+    answer) -> orphaned-RI drain alert (the most urgent issue, if any) ->
+    term toggle -> Per-Resource Coverage (the primary table) -> one
+    consolidated "not shown above" expander (pooled-capacity/volume-based/
+    not-eligible, previously 3 separate expanders) -> Reservation Coverage
+    Rules and Active Reservation Contracts, each its own expander at the
+    very bottom (previously 2 separate expanders sitting BEFORE the main
+    table; briefly merged into one shared expander, then split back apart
+    same day per follow-up feedback - they're different kinds of content,
+    methodology guidance vs. a raw data table, and read better each with
+    their own header). Same content throughout, just reordered - nothing
+    was cut."""
     st.subheader(f"{selected_provider} Reserved Instance & Reserved Capacity Coverage")
     st.caption("Compares what's running against what you've already reserved, resource by resource, and flags real gaps to fix.")
     _finops_tag("Optimize Usage & Cost", "Rate Optimization")
@@ -2489,106 +2503,27 @@ def _render_ri_coverage_tab():
     badge_cols[2].badge(f"{idle} Idle / Unused", icon=":material/pause_circle:", color="blue")
     badge_cols[3].badge(f"{not_eligible} Not RI-Eligible", icon=":material/block:", color="gray")
 
-    with st.expander(f"{selected_provider} Reservation Coverage Rules", icon=":material/checklist:", expanded=False):
-        if is_azure:
-            from db.seed import RI_COVERAGE_NOTES
-        else:
-            from db.aws_seed import AWS_RI_COVERAGE_NOTES as RI_COVERAGE_NOTES
-            # Moved here from a standalone always-visible st.info() box
-            # (2026-08-28, real feedback: two dense paragraph boxes sitting
-            # above the headline read as clutter) - this is methodology/
-            # interpretation guidance for the table below (a known
-            # matching-algorithm limitation, not a product-scope note the
-            # way the per-service cards below are), so it belongs with the
-            # rest of this tab's coverage-rule caveats, not its own banner.
-            # Shortened 2026-08-29 (real feedback: the original 4-sentence
-            # version, with its SQL Server/Oracle and Zonal-vs-Regional
-            # exceptions spelled out inline, was too dense to skim) - down
-            # to the one point that actually matters for reading the table
-            # below. The dropped detail was real/verified, not fluff, but
-            # there's no natural widget here to hang a help= tooltip off,
-            # so it's cut rather than relocated.
-            st.caption(
-                "**Gaps below may be overstated** - most EC2/RDS RIs are size-flexible within an instance family, "
-                "so a mixed-size fleet may already be better covered than this exact-match table shows."
-            )
-
-        # Filtered to genuinely RI-eligible services (AWS only) + rendered
-        # 2-up (2026-08-29, real feedback: this list was long, and ~6 of
-        # the AWS entries were explicitly "NOT RI-eligible" in their own
-        # text - duplicating the separate "Not RI-Eligible" section further
-        # down this same tab verbatim, same conclusion shown twice). "AWS
-        # Lambda (Managed Instances)" is a deliberate documentation-only
-        # exception (see its own dict comment) - not a tracked
-        # resource_type at all, so check_eligibility() would default it to
-        # True for the wrong reason (no rule encoded, not "confirmed
-        # eligible"); shown separately below instead of via this filter.
-        #
-        # AWS-only: Azure's RI_COVERAGE_NOTES has no such duplication (every
-        # entry is a genuinely eligible service already) - applying the
-        # same filter there was tried and reverted, since several Azure
-        # eligibility rules pattern-match the real SKU (e.g. Synapse's
-        # "DW<n>c" check, Data Explorer's Standard-vs-Basic check) and
-        # return a defensive False for a placeholder "N/A" sku, which
-        # would have wrongly hidden real, eligible Azure services that
-        # simply don't special-case an unknown SKU the way VM/SQL DB/SQL
-        # MI/App Service/Disk Storage's rules already do.
-        _LAMBDA_NOTE_KEY = "AWS Lambda (Managed Instances)"
-        if is_azure:
-            eligible_notes = RI_COVERAGE_NOTES
-        else:
-            eligible_notes = {
-                svc: note for svc, note in RI_COVERAGE_NOTES.items()
-                if svc != _LAMBDA_NOTE_KEY and check_eligibility(svc, "N/A")[0]
-            }
-
-        # Cards, not a dataframe - same real bug already fixed on the
-        # Savings Plan Coverage Policy card (2026-08-28): these Covers/
-        # Excludes cells are paragraph-length prose, and st.dataframe cells
-        # don't wrap text regardless of column width. 2-column grid - each
-        # card is only 2-3 short lines, one-per-row wasted half the width
-        # for no reason once the list was trimmed to eligible services only.
-        grid_cols = st.columns(2)
-        for i, (svc, (covers, excludes)) in enumerate(eligible_notes.items()):
-            with grid_cols[i % 2].container(border=True):
-                st.markdown(f"**{svc}**")
-                st.markdown(f":material/check_circle: **Covers:** {covers}")
-                st.markdown(f":material/block: **Excludes:** {excludes}")
-
-        if _LAMBDA_NOTE_KEY in RI_COVERAGE_NOTES:
-            # Shortened 2026-08-29 (real feedback: the full dict text -
-            # pricing formula, "Not tracked: NOT TRACKED..." redundancy,
-            # the tangential classic-Lambda aside - was too dense for a
-            # footnote). Down to the one point this footnote exists to
-            # make: it's real and eligible, but this app can't see it.
-            st.caption(
-                f":material/visibility_off: **{_LAMBDA_NOTE_KEY}** is genuinely EC2 RI-eligible, but isn't shown "
-                f"above - AWS exposes only pool-level configuration, never a per-instance count this app could "
-                f"compare against a reservation."
-            )
-
-    with st.expander("Active Reservation Contracts", icon=":material/description:", expanded=False):
-        if not ri_df.empty:
-            ri_disp = ri_df[["commitment_id", "commitment_type", "scope_sku", "scope_region", "scope_os", "reserved_qty", "hourly_usd_commitment", "term", "expiry_date", "offering_class"]].copy()
-            ri_disp["hourly_usd_commitment"] = ri_disp["hourly_usd_commitment"].apply(lambda x: fmt(x, 4) + "/hr each")
-            # EC2-only (AWS): "standard"/"convertible" from AWS's own OfferingClass
-            # field. N/A for Azure and for AWS RDS/ElastiCache/Redshift, which
-            # have no such split - not a display gap, those services genuinely
-            # don't have this concept per AWS's own docs.
-            ri_disp["offering_class"] = ri_disp["offering_class"].fillna("N/A").apply(lambda v: v.title() if v != "N/A" else v)
-            ri_disp = ri_disp.rename(columns={"offering_class": "Offering Class"})
+    # ── Orphaned-RI drain alert - moved here, right after the headline/
+    # badges (2026-08-29, real feedback: "too cluttered, too much to
+    # understand" - this was previously the LAST thing on the page, after
+    # 8 other sections, even though it's the single most actionable item
+    # here (real $ being wasted right now on a stopped resource with an
+    # active RI) - promoted to where a user's eye lands right after the
+    # headline, instead of requiring a full scroll to ever see it.
+    # Wrapped in a keyed container (2026-08-29 follow-up feedback: the
+    # default st.error() red box, even toned down app-wide, still read as
+    # a generic/default alert next to this tab's own badge styling) - the
+    # key scopes a custom re-skin (ui/styling.py's .st-key-fl_ri_drain_alert
+    # rules) to just this alert, same "st-key-* scoping" pattern already
+    # used for the login page's signin card, so no other st.error() in
+    # the app is affected.
+    if not ri_result.orphaned_ri_drain.empty:
+        with st.container(key="fl_ri_drain_alert"):
+            st.error(f"**{len(ri_result.orphaned_ri_drain)} stopped resource(s) draining active reservations**!", icon=":material/warning:")
             st.dataframe(
-                _with_mapping_caveat(ri_df, ri_disp), hide_index=True, width="stretch",
-                column_config={
-                    **_SP_COMMITMENT_COLUMN_CONFIG,
-                    "commitment_type": st.column_config.TextColumn("Type", width=170),
-                    "scope_os":        st.column_config.TextColumn("OS", width=90),
-                    "reserved_qty":    st.column_config.TextColumn("Reserved Qty", width=110),
-                    "Offering Class":  st.column_config.TextColumn(width=120),
-                },
+                ri_result.orphaned_ri_drain, hide_index=True, width="stretch",
+                column_config={"Resource Name": st.column_config.TextColumn(width=200), "SKU": st.column_config.TextColumn(width=140)},
             )
-        else:
-            st.info("No active Reserved Instance contracts found.")
 
     st.segmented_control(
         "Model new-purchase pricing at term",
@@ -2664,59 +2599,180 @@ def _render_ri_coverage_tab():
     else:
         st.caption("No per-instance-reservable resources in inventory yet.")
 
-    if not capacity_cov.empty:
-        with st.expander(f"{len(capacity_cov)} pooled-capacity resource(s) - not a per-instance purchase", icon=":material/info:", expanded=False):
-            st.caption(
-                "Azure applies these reservations automatically across ALL matching resources in your "
-                "subscription (RU/s, DBCU, cDWU, or vCore-hours), not to one specific resource - so the gap "
-                "below is a rough signal, not a literal purchase instruction. Compare actual usage against "
-                "your reservation size in Azure Cost Management before buying more."
-            )
-            show_c = capacity_cov.rename(columns={
-                "Resource Type": "Service", "SKU": "SKU / Tier",
-                "running_count": "Running", "reserved_qty": "Reserved",
-            })
-            st.dataframe(
-                show_c[["Service", "SKU / Tier", "Region", "Running", "Reserved", "Status"]], hide_index=True, width="stretch",
-                column_config={"Service": st.column_config.TextColumn(width=230), "SKU / Tier": st.column_config.TextColumn(width=140)},
-            )
+    # ── "Not shown above" - consolidated (2026-08-29, real feedback: "too
+    # cluttered, too much to understand" - these were 3 separate top-level
+    # expanders, each reading as one more thing demanding attention on an
+    # already-busy page. Merged into one, since all three answer the same
+    # underlying question ("why isn't this resource in the table above"),
+    # just for 3 different reasons - nothing was cut, each keeps its own
+    # real explanatory caption, just grouped under one header with
+    # dividers between sub-sections instead of one expander header per
+    # reason. Streamlit doesn't support nesting an expander inside another
+    # expander, so sub-sections use a plain bold st.markdown label instead
+    # of a second expander level.
+    _not_shown_count = len(capacity_cov) + len(unmeasurable_cov) + len(ineligible)
+    if _not_shown_count > 0:
+        with st.expander(f"{_not_shown_count} resource(s) not shown above", icon=":material/visibility_off:", expanded=False):
+            if not capacity_cov.empty:
+                st.markdown(f"**{len(capacity_cov)} pooled-capacity resource(s)** - not a per-instance purchase")
+                st.caption(
+                    "Azure applies these reservations automatically across ALL matching resources in your "
+                    "subscription (RU/s, DBCU, cDWU, or vCore-hours), not to one specific resource - so the gap "
+                    "below is a rough signal, not a literal purchase instruction. Compare actual usage against "
+                    "your reservation size in Azure Cost Management before buying more."
+                )
+                show_c = capacity_cov.rename(columns={
+                    "Resource Type": "Service", "SKU": "SKU / Tier",
+                    "running_count": "Running", "reserved_qty": "Reserved",
+                })
+                st.dataframe(
+                    show_c[["Service", "SKU / Tier", "Region", "Running", "Reserved", "Status"]], hide_index=True, width="stretch",
+                    column_config={"Service": st.column_config.TextColumn(width=230), "SKU / Tier": st.column_config.TextColumn(width=140)},
+                )
 
-    if not unmeasurable_cov.empty:
-        with st.expander(f"{len(unmeasurable_cov)} volume-based resource(s) - not tracked here", icon=":material/straighten:", expanded=False):
-            st.caption(
-                "Reserved capacity for these services is sold in blocks far larger than a single resource "
-                "(Storage: 100 TB / 1 PB; Files: 10 TiB / 100 TiB) and applies across your whole "
-                "subscription's usage, not per resource. This dashboard tracks resource count, not data "
-                "volume, so coverage genuinely can't be assessed here - check total volume in Azure Cost "
-                "Management or Storage metrics before considering a purchase."
-            )
-            show_u = unmeasurable_cov.rename(columns={"Resource Type": "Service", "SKU": "SKU / Tier"})
-            st.dataframe(
-                show_u[["Service", "SKU / Tier", "Region"]], hide_index=True, width="stretch",
-                column_config={"Service": st.column_config.TextColumn(width=230), "SKU / Tier": st.column_config.TextColumn(width=140)},
-            )
+            if not unmeasurable_cov.empty:
+                if not capacity_cov.empty:
+                    st.divider()
+                st.markdown(f"**{len(unmeasurable_cov)} volume-based resource(s)** - not tracked here")
+                st.caption(
+                    "Reserved capacity for these services is sold in blocks far larger than a single resource "
+                    "(Storage: 100 TB / 1 PB; Files: 10 TiB / 100 TiB) and applies across your whole "
+                    "subscription's usage, not per resource. This dashboard tracks resource count, not data "
+                    "volume, so coverage genuinely can't be assessed here - check total volume in Azure Cost "
+                    "Management or Storage metrics before considering a purchase."
+                )
+                show_u = unmeasurable_cov.rename(columns={"Resource Type": "Service", "SKU": "SKU / Tier"})
+                st.dataframe(
+                    show_u[["Service", "SKU / Tier", "Region"]], hide_index=True, width="stretch",
+                    column_config={"Service": st.column_config.TextColumn(width=230), "SKU / Tier": st.column_config.TextColumn(width=140)},
+                )
 
-    if not ineligible.empty:
-        with st.expander(f"{len(ineligible)} resource(s) not eligible for any Reservation", icon=":material/block:", expanded=False):
-            show_i = ineligible.rename(columns={"Resource Type": "Service", "SKU": "SKU / Tier", "eligibility_reason": "Why not eligible"})
+            if not ineligible.empty:
+                if not capacity_cov.empty or not unmeasurable_cov.empty:
+                    st.divider()
+                st.markdown(f"**{len(ineligible)} resource(s) not eligible for any Reservation**")
+                show_i = ineligible.rename(columns={"Resource Type": "Service", "SKU": "SKU / Tier", "eligibility_reason": "Why not eligible"})
+                st.dataframe(
+                    show_i[["Service", "SKU / Tier", "Region", "Why not eligible"]], hide_index=True, width="stretch",
+                    column_config={
+                        "Service": st.column_config.TextColumn(width=230),
+                        "SKU / Tier": st.column_config.TextColumn(width=140),
+                        # "large" keyword width (not a pixel value) - same fix
+                        # already used for the Savings Plan tab's own "why
+                        # excluded" long-prose column.
+                        "Why not eligible": st.column_config.TextColumn(width="large"),
+                    },
+                )
+
+    # ── Reference & Methodology - moved to the bottom (2026-08-29, real
+    # feedback: this used to sit BEFORE the main table, meaning a user had
+    # to scroll past "how this matching works" before ever reaching "am I
+    # covered", the actual answer this tab exists to give). Kept as its
+    # own expander, separate from Active Reservation Contracts just below
+    # (2026-08-29 follow-up feedback: initially merged the two together,
+    # but they're genuinely different kinds of content - this one is
+    # methodology/interpretation guidance, that one is a raw data table -
+    # and deserve their own section each rather than being stacked under
+    # one shared header).
+    with st.expander(f"{selected_provider} Reservation Coverage Rules", icon=":material/checklist:", expanded=False):
+        if is_azure:
+            from db.seed import RI_COVERAGE_NOTES
+        else:
+            from db.aws_seed import AWS_RI_COVERAGE_NOTES as RI_COVERAGE_NOTES
+            # Standalone methodology caption removed entirely (2026-08-29,
+            # real feedback: went through two rewrites trying to explain
+            # AWS's size-flexibility reconciliation without sounding
+            # alarming, and it still read as an unnecessary warning/source
+            # of confusion) - the exceptions that matter are already
+            # covered where they're actually relevant, in the individual
+            # per-service cards below (e.g. the Oracle License Included
+            # card explicitly says "NOT size-flexible"), so nothing
+            # substantive is lost by dropping the summary banner.
+
+        # Filtered to genuinely RI-eligible services (AWS only) + rendered
+        # 2-up (2026-08-29, real feedback: this list was long, and ~6 of
+        # the AWS entries were explicitly "NOT RI-eligible" in their own
+        # text - duplicating the separate "Not RI-Eligible" section further
+        # up this same tab verbatim, same conclusion shown twice). "AWS
+        # Lambda (Managed Instances)" is a deliberate documentation-only
+        # exception (see its own dict comment) - not a tracked
+        # resource_type at all, so check_eligibility() would default it to
+        # True for the wrong reason (no rule encoded, not "confirmed
+        # eligible"); shown separately below instead of via this filter.
+        #
+        # AWS-only: Azure's RI_COVERAGE_NOTES has no such duplication (every
+        # entry is a genuinely eligible service already) - applying the
+        # same filter there was tried and reverted, since several Azure
+        # eligibility rules pattern-match the real SKU (e.g. Synapse's
+        # "DW<n>c" check, Data Explorer's Standard-vs-Basic check) and
+        # return a defensive False for a placeholder "N/A" sku, which
+        # would have wrongly hidden real, eligible Azure services that
+        # simply don't special-case an unknown SKU the way VM/SQL DB/SQL
+        # MI/App Service/Disk Storage's rules already do.
+        _LAMBDA_NOTE_KEY = "AWS Lambda (Managed Instances)"
+        if is_azure:
+            eligible_notes = RI_COVERAGE_NOTES
+        else:
+            eligible_notes = {
+                svc: note for svc, note in RI_COVERAGE_NOTES.items()
+                if svc != _LAMBDA_NOTE_KEY and check_eligibility(svc, "N/A")[0]
+            }
+
+        # Cards, not a dataframe - same real bug already fixed on the
+        # Savings Plan Coverage Policy card (2026-08-28): these Covers/
+        # Excludes cells are paragraph-length prose, and st.dataframe cells
+        # don't wrap text regardless of column width. 2-column grid - each
+        # card is only 2-3 short lines, one-per-row wasted half the width
+        # for no reason once the list was trimmed to eligible services only.
+        grid_cols = st.columns(2)
+        for i, (svc, (covers, excludes)) in enumerate(eligible_notes.items()):
+            with grid_cols[i % 2].container(border=True):
+                st.markdown(f"**{svc}**")
+                st.markdown(f":material/check_circle: **Covers:** {covers}")
+                st.markdown(f":material/block: **Excludes:** {excludes}")
+
+        if _LAMBDA_NOTE_KEY in RI_COVERAGE_NOTES:
+            # Rendered as its own card IN the grid (2026-08-29, real
+            # feedback: as a plain st.caption() sitting below the grid,
+            # this real, useful disclosure - Lambda genuinely IS RI-
+            # eligible, this app just can't compute a gap for it - read as
+            # an afterthought footnote easy to miss entirely). Same card
+            # shell as its peers so it's discoverable in the same reading
+            # flow, not promoted above the fold (still inside this
+            # collapsed expander - it's a minor caveat about one service,
+            # not urgent like the drain alert at the top of the page) and
+            # not demoted to a floating caption either. Distinguished from
+            # a real Covers/Excludes card by using one "eye-off" line
+            # instead of two, so it doesn't imply this app tracks it.
+            with grid_cols[len(eligible_notes) % 2].container(border=True):
+                st.markdown(f"**{_LAMBDA_NOTE_KEY}**")
+                st.markdown(
+                    ":material/visibility_off: Genuinely EC2 RI-eligible, but not shown as a gap/coverage row - "
+                    "AWS exposes only pool-level configuration, never a per-instance count to compare against a reservation."
+                )
+
+    with st.expander("Active Reservation Contracts", icon=":material/description:", expanded=False):
+        if not ri_df.empty:
+            ri_disp = ri_df[["commitment_id", "commitment_type", "scope_sku", "scope_region", "scope_os", "reserved_qty", "hourly_usd_commitment", "term", "expiry_date", "offering_class"]].copy()
+            ri_disp["hourly_usd_commitment"] = ri_disp["hourly_usd_commitment"].apply(lambda x: fmt(x, 4) + "/hr each")
+            # EC2-only (AWS): "standard"/"convertible" from AWS's own OfferingClass
+            # field. N/A for Azure and for AWS RDS/ElastiCache/Redshift, which
+            # have no such split - not a display gap, those services genuinely
+            # don't have this concept per AWS's own docs.
+            ri_disp["offering_class"] = ri_disp["offering_class"].fillna("N/A").apply(lambda v: v.title() if v != "N/A" else v)
+            ri_disp = ri_disp.rename(columns={"offering_class": "Offering Class"})
             st.dataframe(
-                show_i[["Service", "SKU / Tier", "Region", "Why not eligible"]], hide_index=True, width="stretch",
+                _with_mapping_caveat(ri_df, ri_disp), hide_index=True, width="stretch",
                 column_config={
-                    "Service": st.column_config.TextColumn(width=230),
-                    "SKU / Tier": st.column_config.TextColumn(width=140),
-                    # "large" keyword width (not a pixel value) - same fix
-                    # already used for the Savings Plan tab's own "why
-                    # excluded" long-prose column.
-                    "Why not eligible": st.column_config.TextColumn(width="large"),
+                    **_SP_COMMITMENT_COLUMN_CONFIG,
+                    "commitment_type": st.column_config.TextColumn("Type", width=170),
+                    "scope_os":        st.column_config.TextColumn("OS", width=90),
+                    "reserved_qty":    st.column_config.TextColumn("Reserved Qty", width=110),
+                    "Offering Class":  st.column_config.TextColumn(width=120),
                 },
             )
-
-    if not ri_result.orphaned_ri_drain.empty:
-        st.error(f"**{len(ri_result.orphaned_ri_drain)} stopped resource(s) draining active reservations**!", icon=":material/warning:")
-        st.dataframe(
-            ri_result.orphaned_ri_drain, hide_index=True, width="stretch",
-            column_config={"Resource Name": st.column_config.TextColumn(width=200), "SKU": st.column_config.TextColumn(width=140)},
-        )
+        else:
+            st.info("No active Reserved Instance contracts found.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

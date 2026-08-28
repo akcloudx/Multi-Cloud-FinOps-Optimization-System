@@ -285,6 +285,29 @@ section[data-testid="stSidebar"] nav span {
 }
 .st-key-fl_signin_card [data-testid="stAlertContainer"] svg { color: #60A5FA !important; }
 
+/* RI Coverage tab's orphaned-RI-drain alert (2026-08-29, real feedback:
+   the default st.error() red/maroon box - even after the app-wide
+   saturate/brightness toning above - still read as a generic default
+   alert, inconsistent with this tab's own badge/card visual language
+   right above it). Scoped to this one container only (same "st-key-*"
+   pattern as the signin card above) - re-skinned to this app's own
+   dark-card tokens (#131F35/#1E293B, the same ones .fl-previewcard/
+   .fl-fcard already use elsewhere) with this app's own established
+   "alert" red (#F87171, see .fl-pstat.alert above) instead of
+   Streamlit's built-in alert coloring. filter:none overrides the
+   app-wide desaturation rule above - these colors are chosen
+   deliberately here, not Streamlit's default that needed toning down. */
+.st-key-fl_ri_drain_alert [data-testid="stAlertContainer"],
+.st-key-fl_ri_drain_alert .stAlertContainer {
+    background: rgba(248,113,113,.08) !important; border: 1px solid rgba(248,113,113,.3) !important;
+    border-radius: 12px !important; filter: none !important;
+}
+.st-key-fl_ri_drain_alert [data-testid^="stAlertContent"] p,
+.st-key-fl_ri_drain_alert [data-testid^="stAlertContent"] {
+    color: #FCA5A5 !important;
+}
+.st-key-fl_ri_drain_alert [data-testid="stAlertContainer"] svg { color: #F87171 !important; }
+
 /* Inventory tab's "Top Spend Categories" card (2026-08-28, round 2) -
    approved via a quick HTML mockup before porting. Round 1 was a headcount
    composition card (Compute/Database/Other) that still duplicated - and in
