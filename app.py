@@ -2548,7 +2548,19 @@ def _render_ri_coverage_tab():
             "running_count": "Running", "reserved_qty": "Reserved",
         }).copy()
         if has_pricing_cols:
-            show[rate_col] = show[rate_col].apply(lambda x: fmt(x, 4) if pd.notna(x) else "—")
+            # Displayed as a monthly-equivalent (2026-08-29, real feedback:
+            # a Reserved Instance isn't billed hour-by-hour the way a
+            # Savings Plan genuinely is - RIs are bought for a fixed term
+            # at a fixed price, upfront or in monthly installments, so a
+            # bare "$/hr" figure here reads as if that's how the purchase
+            # actually works). rate_col itself (the DataFrame column NAME)
+            # stays "($/hr)" internally - that's the real hourly rate
+            # analysis/commitment_economics.py::ri_gap_pricing() computes
+            # and caches, needed as-is for the underlying $ math (gap *
+            # (payg - rate) * 730) - only the DISPLAYED value is converted
+            # (* 730) and re-labeled via column_config below; nothing about
+            # the actual computation changes.
+            show[rate_col] = show[rate_col].apply(lambda x: fmt(x * 730, 2) if pd.notna(x) else "—")
             show[savings_col] = show[savings_col].apply(lambda x: fmt(x, 2) if pd.notna(x) else "—")
         cols = ["Service", "SKU / Tier", "Region", "OS", "Running", "Reserved", "Status"]
         if has_pricing_cols:
@@ -2587,7 +2599,7 @@ def _render_ri_coverage_tab():
                 # rather than a generic guess - same "explicit width sized
                 # to the real longest value" rule established this session.
                 "Status":     st.column_config.TextColumn(width=260),
-                rate_col:     st.column_config.TextColumn(f"RI Rate ({ri_term_choice})", width=130),
+                rate_col:     st.column_config.TextColumn(f"RI Rate ({ri_term_choice}) $/mo", width=140),
                 savings_col:  st.column_config.TextColumn("Monthly Savings", width=140),
             },
         )
@@ -2754,7 +2766,18 @@ def _render_ri_coverage_tab():
     with st.expander("Active Reservation Contracts", icon=":material/description:", expanded=False):
         if not ri_df.empty:
             ri_disp = ri_df[["commitment_id", "commitment_type", "scope_sku", "scope_region", "scope_os", "reserved_qty", "hourly_usd_commitment", "term", "expiry_date", "offering_class"]].copy()
-            ri_disp["hourly_usd_commitment"] = ri_disp["hourly_usd_commitment"].apply(lambda x: fmt(x, 4) + "/hr each")
+            # Displayed as a monthly-equivalent (2026-08-29, real feedback -
+            # same reasoning as the Per-Resource Coverage table's RI Rate
+            # column above: an RI isn't billed hour-by-hour, so "/hr each"
+            # here misrepresented how the purchase actually works. Only
+            # this DISPLAY conversion changed - hourly_usd_commitment
+            # itself stays hourly in the underlying ri_df/Commitment table,
+            # same internal-hourly-basis reasoning as above. The column
+            # header label is overridden to "Monthly Commitment" below,
+            # since _SP_COMMITMENT_COLUMN_CONFIG's shared "Hourly
+            # Commitment" label is correct for Savings Plans (a genuinely
+            # native hourly commitment) and must stay that way there.
+            ri_disp["hourly_usd_commitment"] = ri_disp["hourly_usd_commitment"].apply(lambda x: fmt(x * 730, 2) + "/mo each")
             # EC2-only (AWS): "standard"/"convertible" from AWS's own OfferingClass
             # field. N/A for Azure and for AWS RDS/ElastiCache/Redshift, which
             # have no such split - not a display gap, those services genuinely
@@ -2765,6 +2788,7 @@ def _render_ri_coverage_tab():
                 _with_mapping_caveat(ri_df, ri_disp), hide_index=True, width="stretch",
                 column_config={
                     **_SP_COMMITMENT_COLUMN_CONFIG,
+                    "hourly_usd_commitment": st.column_config.TextColumn("Monthly Commitment", width=150),
                     "commitment_type": st.column_config.TextColumn("Type", width=170),
                     "scope_os":        st.column_config.TextColumn("OS", width=90),
                     "reserved_qty":    st.column_config.TextColumn("Reserved Qty", width=110),
