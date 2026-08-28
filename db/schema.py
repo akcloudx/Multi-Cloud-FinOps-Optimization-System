@@ -336,6 +336,13 @@ def init_db(provider: str = "Azure", mode: str = "demo"):
     _ensure_column(engine, schema_name, "cloud_tenants", "rightsizing_lookback_days", "INTEGER")
     _ensure_column(engine, schema_name, "cloud_tenants", "rightsizing_headroom_pct", "FLOAT")
     _ensure_column(engine, schema_name, "cloud_tenants", "rightsizing_min_days", "INTEGER")
+    # AWS real-time Savings Plans pricing cache - see CloudTenant's own
+    # comment on these 5 columns.
+    _ensure_column(engine, schema_name, "cloud_tenants", "aws_sp_compute_discount_1yr", "FLOAT")
+    _ensure_column(engine, schema_name, "cloud_tenants", "aws_sp_compute_discount_3yr", "FLOAT")
+    _ensure_column(engine, schema_name, "cloud_tenants", "aws_sp_sagemaker_discount_1yr", "FLOAT")
+    _ensure_column(engine, schema_name, "cloud_tenants", "aws_sp_sagemaker_discount_3yr", "FLOAT")
+    _ensure_column(engine, schema_name, "cloud_tenants", "aws_sp_pricing_updated_at", "VARCHAR(30)")
     return engine
 
 
@@ -877,6 +884,20 @@ class CloudTenant(Base):
     rightsizing_lookback_days     = Column(Integer, nullable=True)
     rightsizing_headroom_pct      = Column(Float, nullable=True)
     rightsizing_min_days          = Column(Integer, nullable=True)
+    # AWS real-time Savings Plans pricing cache (AWS only) - populated from
+    # ce:GetSavingsPlansPurchaseRecommendation (a paid Cost Explorer call),
+    # so these are refreshed by the sync pipeline on a staleness check
+    # rather than fetched live on every page render. NULL means "not
+    # fetched yet" - callers fall back to the existing "not wired up yet"
+    # caption, same as before this feature existed. Compute and SageMaker
+    # pools only for now - see analysis/commitment_economics.py's
+    # aws_savings_plan_term_comparison for why the Database pool isn't
+    # covered by this same mechanism.
+    aws_sp_compute_discount_1yr   = Column(Float, nullable=True)
+    aws_sp_compute_discount_3yr   = Column(Float, nullable=True)
+    aws_sp_sagemaker_discount_1yr = Column(Float, nullable=True)
+    aws_sp_sagemaker_discount_3yr = Column(Float, nullable=True)
+    aws_sp_pricing_updated_at     = Column(String(30), nullable=True)
 
 
 class TenantSubscription(Base):

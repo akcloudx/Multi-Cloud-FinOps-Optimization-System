@@ -151,7 +151,7 @@ from pricing.sku_mapping import resolve_sku_query
 from analysis.focus_mapping import to_focus_view, map_service_category, FOCUS_COLUMN_DEFINITIONS, FOCUS_SPEC_VERSION, FOCUS_SPEC_URL
 from analysis.maturity import run_maturity_assessment
 from analysis.commitment_economics import (
-    savings_plan_term_comparison, ri_gap_pricing, combined_monthly_savings, TERM_LABELS,
+    savings_plan_term_comparison, aws_savings_plan_term_comparison, ri_gap_pricing, combined_monthly_savings, TERM_LABELS,
 )
 from db.tenants import (
     list_tenants, get_active_tenant, get_tenant_credentials, upsert_tenant,
@@ -1915,7 +1915,7 @@ def _render_inventory_tab():
 # ═══════════════════════════════════════════════════════════════════════════════
 def _render_sp_pool_economics(pool_label: str, pool_df: pd.DataFrame, existing_commitment_hr: float,
                                key_prefix: str, safety_buffer_frac: float, commitment_df: pd.DataFrame,
-                               available_terms=("1yr", "3yr")):
+                               available_terms=("1yr", "3yr"), aws_sp_type: str = None):
     """Flow for one Savings Plan pool (Compute/Database/SageMaker) -
     redesigned 2026-08-28, approved via mockup first, then simplified
     further the same day after real feedback that even the reordered
@@ -1942,7 +1942,14 @@ def _render_sp_pool_economics(pool_label: str, pool_df: pd.DataFrame, existing_c
 
     available_terms restricts which term(s) can be modeled - e.g. Database
     Savings Plans are 1-year only per Azure policy, so that pool never gets a
-    3-year option here."""
+    3-year option here.
+
+    aws_sp_type ("compute" | "sagemaker" | None) - which real AWS
+    SavingsPlansType this pool maps to for aws_savings_plan_term_comparison
+    (2026-08-28 addition). None for Azure pools (unused there) and for the
+    Database pool on AWS (no clean one-to-one AWS SavingsPlansType mapping
+    - see aws_savings_plan_term_comparison's own docstring), which keeps
+    using today's existing "not wired up yet" fallback."""
     if pool_df.empty:
         st.caption(f"No resources are currently eligible for {pool_label} Savings Plan.")
         return
@@ -1963,7 +1970,18 @@ def _render_sp_pool_economics(pool_label: str, pool_df: pd.DataFrame, existing_c
     else:
         term_key = available_terms[0]
 
-    cmp_df = savings_plan_term_comparison(pool_df, prices_df) if (is_azure and prices_df is not None and not prices_df.empty) else None
+    # AWS branch added 2026-08-28: real per-term discount % cached on the
+    # tenant row (aws_sp_pricing, see db/schema.py + data/sync_pipeline.py),
+    # not a per-SKU cache lookup the way Azure's works - see
+    # aws_savings_plan_term_comparison's own docstring for why. aws_sp_type
+    # is None for the Database pool (no clean AWS SavingsPlansType mapping
+    # yet), which falls through to the existing "not wired up" caption.
+    if is_azure:
+        cmp_df = savings_plan_term_comparison(pool_df, prices_df) if (prices_df is not None and not prices_df.empty) else None
+    elif aws_sp_type is not None:
+        cmp_df = aws_savings_plan_term_comparison(pool_df, active_tenant, aws_sp_type)
+    else:
+        cmp_df = None
     if cmp_df is not None:
         cmp_df = cmp_df[cmp_df["term_key"].isin(available_terms)].reset_index(drop=True)
     has_real_pricing = cmp_df is not None and int(cmp_df["Priced Resources"].sum()) > 0
@@ -2249,7 +2267,7 @@ def _render_savings_plan_tab():
             "stopped resources stay on pay-as-you-go."
         )
 
-        _render_sp_pool_economics("Compute", compute_24x7, compute_sp_commit, "sp_compute", safety_buffer, compute_sp_df)
+        _render_sp_pool_economics("Compute", compute_24x7, compute_sp_commit, "sp_compute", safety_buffer, compute_sp_df, aws_sp_type="compute")
 
         if is_live_mode and is_live_configured:
             if compute_sp_pool_inventory.empty:
@@ -2261,12 +2279,12 @@ def _render_savings_plan_tab():
             elif compute_24x7_candidates.empty:
                 st.info(
                     f"{len(compute_sp_pool_inventory)} SP-eligible-type resource(s) found, but none are "
-                    "both **Running** and **24x7** (Avg Daily Running Hours = 24) - Savings Plans are only "
-                    "recommended against a steady-state 24x7 baseline to avoid over-committing.", icon=":material/info:",
+                    "currently **Running** - Savings Plans are only recommended against resources actually "
+                    "running, to avoid over-committing.", icon=":material/info:",
                 )
             elif compute_24x7.empty:
                 st.warning(
-                    f"{len(compute_24x7_candidates)} resource(s) are running 24x7, but none are actually "
+                    f"{len(compute_24x7_candidates)} resource(s) are running, but none are actually "
                     "eligible for Savings Plan for Compute at their current SKU/tier - see the breakdown below.",
                     icon=":material/warning:",
                 )
@@ -2330,7 +2348,7 @@ def _render_savings_plan_tab():
                 "running/stopped identity, so this app has no inventory row to baseline them against."
             )
 
-            _render_sp_pool_economics("SageMaker AI", sagemaker_24x7, sagemaker_sp_commit, "sp_sagemaker", safety_buffer, sagemaker_sp_df)
+            _render_sp_pool_economics("SageMaker AI", sagemaker_24x7, sagemaker_sp_commit, "sp_sagemaker", safety_buffer, sagemaker_sp_df, aws_sp_type="sagemaker")
 
             if is_live_mode and is_live_configured:
                 if sagemaker_sp_pool_inventory.empty:
@@ -2341,8 +2359,8 @@ def _render_savings_plan_tab():
                 elif sagemaker_24x7_candidates.empty:
                     st.info(
                         f"{len(sagemaker_sp_pool_inventory)} SageMaker resource(s) found, but none are "
-                        "both **Running** and **24x7** (Avg Daily Running Hours = 24) - Savings Plans are only "
-                        "recommended against a steady-state 24x7 baseline to avoid over-committing.", icon=":material/info:",
+                        "currently **Running** - Savings Plans are only recommended against resources actually "
+                        "running, to avoid over-committing.", icon=":material/info:",
                     )
 
 
@@ -2622,20 +2640,38 @@ def _real_projected_savings():
     MORE ACCURATE of this app's two savings figures (the other being
     generate_recommendations()'s safety-buffer heuristic, used for individual
     per-item $ impacts where real cached pricing isn't available). Returns
-    None when real pricing genuinely isn't available (AWS, or nothing cached
-    yet for this tenant's SKUs) so the caller can fall back to the heuristic
-    total instead of showing a wrong/absent number."""
-    if not is_azure or prices_df is None or prices_df.empty:
-        return None
+    None when real pricing genuinely isn't available so the caller can fall
+    back to the heuristic total instead of showing a wrong/absent number.
+
+    AWS branch added 2026-08-28: real Compute Savings Plan pricing is now
+    available (aws_savings_plan_term_comparison, cached per-tenant - see
+    _render_sp_pool_economics). RI pricing stays Azure-only (ri_gap_pricing
+    is a separate, explicitly deferred gap - not this pass), so the AWS
+    branch always passes an empty ri_priced DataFrame, which
+    combined_monthly_savings already handles gracefully (contributes $0,
+    not an error) - this returns a genuinely partial-but-real figure (SP
+    only) for AWS rather than the previous flat None."""
     sp_term = st.session_state.get("sp_compute_term_widget", "1yr")
     ri_term = st.session_state.get("ri_term_widget", "1yr")
-    sp_pool_cmps = []
-    if not compute_24x7.empty:
-        sp_pool_cmps.append(savings_plan_term_comparison(compute_24x7, prices_df))
-    if not db_running.empty:
-        sp_pool_cmps.append(savings_plan_term_comparison(db_running, prices_df))
-    ri_priced = ri_gap_pricing(ri_result.coverage_table, inv_raw, prices_df) if not ri_result.coverage_table.empty else pd.DataFrame()
-    return combined_monthly_savings(sp_pool_cmps, ri_priced, sp_term, ri_term)
+    if is_azure:
+        if prices_df is None or prices_df.empty:
+            return None
+        sp_pool_cmps = []
+        if not compute_24x7.empty:
+            sp_pool_cmps.append(savings_plan_term_comparison(compute_24x7, prices_df))
+        if not db_running.empty:
+            sp_pool_cmps.append(savings_plan_term_comparison(db_running, prices_df))
+        ri_priced = ri_gap_pricing(ri_result.coverage_table, inv_raw, prices_df) if not ri_result.coverage_table.empty else pd.DataFrame()
+        return combined_monthly_savings(sp_pool_cmps, ri_priced, sp_term, ri_term)
+    else:
+        sp_pool_cmps = []
+        if not compute_24x7.empty:
+            aws_cmp = aws_savings_plan_term_comparison(compute_24x7, active_tenant, "compute")
+            if aws_cmp is not None:
+                sp_pool_cmps.append(aws_cmp)
+        if not sp_pool_cmps:
+            return None
+        return combined_monthly_savings(sp_pool_cmps, pd.DataFrame(), sp_term, ri_term)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

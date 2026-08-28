@@ -699,7 +699,7 @@ def seed_aws_demo_tenant_if_empty():
     examples) so the Tenant Management table's "Account ID" column shows
     something realistic rather than "—". Independently guarded (checks its
     own emptiness) so it's safe to call every startup."""
-    from db.tenants import list_tenants, upsert_tenant, update_aws_account_id
+    from db.tenants import list_tenants, upsert_tenant, update_aws_account_id, update_aws_sp_pricing
     if list_tenants("AWS", "demo"):
         return
     tenant_db_id = upsert_tenant(
@@ -709,6 +709,24 @@ def seed_aws_demo_tenant_if_empty():
         client_secret="demo-tenant-has-no-real-credentials",
     )
     update_aws_account_id("AWS", "demo", tenant_db_id, "123456789012")
+    # Illustrative-but-realistic real-time Savings Plans discount %
+    # (2026-08-28 feature) - a demo tenant never runs a live sync, so
+    # these would otherwise stay NULL forever and the demo would keep
+    # showing the "not wired up yet" fallback even after this feature
+    # shipped, unlike Azure's demo (which ships with real cached
+    # CommitmentPriceCache rows). Bounded by AWS's own published NO_UPFRONT
+    # discount ranges (Compute SP up to 66%, SageMaker SP up to 64% at
+    # ALL_UPFRONT/3yr per this app's own Coverage Policy card) - NO_UPFRONT
+    # rates are meaningfully lower than that ceiling, not scraped from a
+    # real account, so treated as reasonable illustrative demo figures,
+    # not a live-verified precision claim.
+    from datetime import datetime
+    update_aws_sp_pricing(
+        "AWS", "demo", tenant_db_id,
+        compute_1yr=20.0, compute_3yr=40.0,
+        sagemaker_1yr=18.0, sagemaker_3yr=38.0,
+        updated_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+    )
     print("[OK] Seeded demo tenant 'Demo AWS Tenant'.")
 
 

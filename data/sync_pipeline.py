@@ -19,7 +19,7 @@ Can be run as:
 """
 
 import sys, os
-from datetime import datetime
+from datetime import datetime, timedelta
 import pandas as pd
 from sqlalchemy.orm import Session
 
@@ -45,6 +45,7 @@ from azure_conn.connector import (
 from aws.connector import (
     load_aws_credentials_from_env, test_aws_connection, fetch_live_inventory as fetch_live_aws_inventory,
     fetch_live_reservations as fetch_live_aws_reservations, fetch_live_savings_plans as fetch_live_aws_savings_plans,
+    fetch_savings_plans_recommendation,
 )
 from pricing.azure_retail_api import refresh_retail_prices
 from pricing.aws_price_list import refresh_aws_prices
@@ -354,6 +355,48 @@ def run_ingestion_pipeline(provider: str = "Azure", creds=None, force_mock: bool
                     synced_subscription_count = len(live_subs)
                 except Exception as e:
                     subscription_sync_error = str(e)[:300]
+
+            # AWS real-time Savings Plans pricing (Compute + SageMaker pools
+            # only - see analysis/commitment_economics.py's
+            # aws_savings_plan_term_comparison for why the Database pool
+            # isn't covered here). Isolated in its own try/except, same
+            # reasoning as the RI/SP fetch above - a failure here must not
+            # blow up an otherwise-successful inventory sync. Staleness-
+            # checked (skips re-fetching if refreshed within the last 7
+            # days) since ce:GetSavingsPlansPurchaseRecommendation is a
+            # PAID Cost Explorer call (see aws/connector.py's
+            # fetch_savings_plans_recommendation docstring) - not worth
+            # spending 4 calls on every single sync.
+            if not is_azure and tenant_db_id is not None:
+                try:
+                    with Session(engine) as sp_session:
+                        tenant = sp_session.get(CloudTenant, tenant_db_id)
+                        needs_refresh = True
+                        if tenant is not None and tenant.aws_sp_pricing_updated_at:
+                            try:
+                                last_updated = datetime.strptime(
+                                    tenant.aws_sp_pricing_updated_at.replace(" UTC", ""), "%Y-%m-%d %H:%M:%S"
+                                )
+                                needs_refresh = (datetime.utcnow() - last_updated) > timedelta(days=7)
+                            except ValueError:
+                                needs_refresh = True
+                        if tenant is not None and needs_refresh:
+                            tenant.aws_sp_compute_discount_1yr = fetch_savings_plans_recommendation(
+                                live_creds, "COMPUTE_SP", "ONE_YEAR"
+                            )
+                            tenant.aws_sp_compute_discount_3yr = fetch_savings_plans_recommendation(
+                                live_creds, "COMPUTE_SP", "THREE_YEARS"
+                            )
+                            tenant.aws_sp_sagemaker_discount_1yr = fetch_savings_plans_recommendation(
+                                live_creds, "SAGEMAKER", "ONE_YEAR"
+                            )
+                            tenant.aws_sp_sagemaker_discount_3yr = fetch_savings_plans_recommendation(
+                                live_creds, "SAGEMAKER", "THREE_YEARS"
+                            )
+                            tenant.aws_sp_pricing_updated_at = now_iso
+                            sp_session.commit()
+                except Exception:
+                    pass   # best-effort - the "Estimate only" fallback caption already covers this cleanly, no need to surface a sync-level error for it.
 
             if ri_sp_error:
                 message = (

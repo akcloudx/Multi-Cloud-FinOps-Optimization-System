@@ -24,8 +24,19 @@ against the API (see that module's per-service notes) since Resource Graph's
 reported SKU name frequently doesn't match the Retail API's naming for
 non-VM services at all.
 
-AWS is NOT implemented yet (Live AWS inventory ingestion itself doesn't exist
-yet either - see aws/connector.py).
+AWS deliberately doesn't populate this table (stale claim as of 2026-08-28
+corrected: AWS live inventory ingestion has existed for a while - see
+aws/connector.py::fetch_live_inventory). The reason is architectural, not a
+gap: AWS Savings Plans apply one flat account-level discount across any
+eligible instance type for a given plan type + term + payment option, not a
+per-SKU rate the way Azure's Retail Prices API exposes - so there's no
+per-resource rate to cache here. AWS's real-time Savings Plan pricing comes
+from a different mechanism instead: aws/connector.py's
+fetch_savings_plans_recommendation (ce:GetSavingsPlansPurchaseRecommendation)
+caches a per-term discount % directly on the CloudTenant row, read by
+analysis/commitment_economics.py's aws_savings_plan_term_comparison - not
+this cache table. AWS Reserved Instance real pricing is a separate,
+not-yet-built gap (ri_gap_pricing() is still Azure-only today).
 """
 
 from datetime import datetime, timedelta

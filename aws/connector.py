@@ -124,6 +124,12 @@ REQUIRED_AWS_POLICIES = [
         "Required":        "Yes — For Cost Explorer",
         "Purpose":         "Query AWS Cost Explorer for real historical spend and usage (not rates - see pricing:GetProducts for that)",
     },
+    {
+        "Policy / Action": "ce:GetSavingsPlansPurchaseRecommendation",
+        "AWS Managed Policy": "(no dedicated managed policy - attach a custom inline policy, or the broad ReadOnlyAccess policy)",
+        "Required":        "Yes — For real-time Savings Plan pricing",
+        "Purpose":         "Get AWS's own real discount %/savings estimate for Compute and SageMaker Savings Plans, based on the account's actual usage history - confirmed not covered by AWSBillingReadOnlyAccess or AWSSavingsPlansReadOnlyAccess (checked both policies' live JSON, 2026-08-28)",
+    },
     # 2026-08-22 additions - closing the Database/Compute Savings Plan
     # coverage gap: DocumentDB/Neptune deliberately have NO entry here at
     # all - confirmed via AmazonDocDBReadOnlyAccess's own policy JSON
@@ -422,7 +428,7 @@ def check_aws_permissions(creds: AWSCredentials) -> dict:
         lambda: session.client("neptune-graph").list_graphs(maxResults=20),
     )
 
-    for action in ["ce:GetCostAndUsage"]:
+    for action in ["ce:GetCostAndUsage", "ce:GetSavingsPlansPurchaseRecommendation"]:
         results.append({
             "action": action,
             "status": "unverified",
@@ -1760,3 +1766,67 @@ def fetch_live_savings_plans(creds: AWSCredentials) -> pd.DataFrame:
     if not df.empty:
         df["account_id"] = account_id
     return df
+
+
+def fetch_savings_plans_recommendation(
+    creds: AWSCredentials,
+    savings_plans_type: str,
+    term_years: str,
+    payment_option: str = "NO_UPFRONT",
+    lookback_days: str = "THIRTY_DAYS",
+) -> float | None:
+    """
+    Real-time Savings Plans discount %, via
+    ce:GetSavingsPlansPurchaseRecommendation - a PAID Cost Explorer call
+    (same $0.01/request cost class as ce:GetCostAndUsage, see
+    check_aws_permissions' "unverified" treatment of both), so this is
+    called sparingly by the sync pipeline (staleness-checked), never on a
+    live page render.
+
+    Request/response shape verified directly against botocore's own
+    service definition (github.com/boto/botocore, data/ce/2017-10-25/
+    service-2.json), not guessed:
+      - savings_plans_type: one of the real SavingsPlansType enum values.
+        This app only ever passes "COMPUTE_SP" or "SAGEMAKER" - those are
+        the two pools with a clean one-to-one mapping onto this app's own
+        pool tabs (see analysis/commitment_economics.py's
+        aws_savings_plan_term_comparison for why the Database pool isn't
+        covered - AWS's own enum splits "database" into six separate
+        types that don't map onto this app's single Database pool tab).
+      - term_years: "ONE_YEAR" or "THREE_YEARS".
+      - Returns SavingsPlansPurchaseRecommendationSummary's
+        EstimatedSavingsPercentage - the account-level discount % for
+        that type/term/payment-option, computed by AWS from the
+        account's own real historical usage (more accurate than a
+        static per-SKU rate lookup, which is why this doesn't try to
+        populate the Azure-shaped CommitmentPriceCache table instead).
+
+    Returns None on any failure, missing/empty data, or malformed
+    response - never raises, so a failed pricing fetch can't break
+    inventory/RI/SP sync (same isolated-failure principle as
+    fetch_live_reservations/fetch_live_savings_plans).
+    """
+    if not HAS_BOTO3 or not creds.is_complete:
+        return None
+
+    try:
+        session = boto3.Session(
+            aws_access_key_id=creds.access_key_id,
+            aws_secret_access_key=creds.secret_access_key,
+            region_name=creds.region,
+        )
+        ce_client = session.client("ce")
+        response = ce_client.get_savings_plans_purchase_recommendation(
+            SavingsPlansType=savings_plans_type,
+            TermInYears=term_years,
+            PaymentOption=payment_option,
+            LookbackPeriodInDays=lookback_days,
+        )
+        recommendations = response.get("SavingsPlansPurchaseRecommendations") or []
+        if not recommendations:
+            return None
+        summary = recommendations[0].get("SavingsPlansPurchaseRecommendationSummary") or {}
+        pct = summary.get("EstimatedSavingsPercentage")
+        return float(pct) if pct is not None else None
+    except (ClientError, BotoCoreError, ValueError, TypeError, KeyError, IndexError):
+        return None

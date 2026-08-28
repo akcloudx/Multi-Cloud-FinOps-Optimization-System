@@ -133,6 +133,65 @@ def savings_plan_term_comparison(pool_df: pd.DataFrame, prices_df: pd.DataFrame)
     return pd.DataFrame(rows)
 
 
+def aws_savings_plan_term_comparison(pool_df: pd.DataFrame, tenant_row, sp_type: str):
+    """AWS equivalent of savings_plan_term_comparison() - same output
+    shape (one row per term: Term, term_key, PAYG $/hr, Committed $/hr,
+    Savings $/hr, Discount %, Monthly Savings, Priced Resources, Total
+    Resources), so every downstream consumer (headline sentence, bridge
+    visual, has_real_pricing check) works unmodified. Reads a real,
+    cached AWS discount % per term (aws/connector.py's
+    fetch_savings_plans_recommendation, cached on the CloudTenant row by
+    the sync pipeline) instead of a per-resource rate lookup the way the
+    Azure version does - AWS Savings Plans apply one flat account-level
+    discount across any eligible instance type for a given plan type +
+    term + payment option (verified directly against botocore's own
+    GetSavingsPlansPurchaseRecommendation service definition), so there's
+    no per-SKU rate table to look up the way Azure's CommitmentPriceCache
+    stores.
+
+    sp_type is "compute" or "sagemaker" - the two pools with a clean
+    one-to-one mapping onto a single real AWS SavingsPlansType value (see
+    fetch_savings_plans_recommendation's own docstring for why the
+    Database pool isn't covered here). Returns None if pool_df is empty
+    or tenant_row is None, matching savings_plan_term_comparison's own
+    "nothing to compare" behavior.
+
+    A term with no cached discount yet (sync hasn't run, or that one
+    fetch failed) falls back to 0% discount for just that term
+    (Committed $/hr = PAYG $/hr, Priced Resources = 0) - the same
+    fallback-to-PAYG-with-zero-discount the Azure version already uses
+    per-resource when a specific SKU has no cached rate, just applied at
+    the whole-term level since AWS's rate isn't per-resource."""
+    if pool_df is None or pool_df.empty or tenant_row is None:
+        return None
+
+    payg_total = float(pool_df["PAYG Hourly Cost USD"].sum())
+    total_resources = len(pool_df)
+
+    rows = []
+    for term in TERMS:
+        discount_pct = getattr(tenant_row, f"aws_sp_{sp_type}_discount_{term}", None)
+        if discount_pct is not None:
+            committed_total = payg_total * (1 - discount_pct / 100.0)
+            priced = total_resources
+        else:
+            committed_total = payg_total
+            priced = 0
+        savings_hr = payg_total - committed_total
+        rows.append({
+            "Term": TERM_LABELS[term],
+            "term_key": term,
+            "PAYG $/hr": payg_total,
+            "Committed $/hr": committed_total,
+            "Savings $/hr": savings_hr,
+            "Discount %": (savings_hr / payg_total * 100) if payg_total > 0 else 0.0,
+            "Monthly Savings": savings_hr * 730,
+            "Priced Resources": priced,
+            "Total Resources": total_resources,
+        })
+    return pd.DataFrame(rows)
+
+
 def ri_gap_pricing(coverage_table: pd.DataFrame, inv_raw: pd.DataFrame, prices_df: pd.DataFrame) -> pd.DataFrame:
     """Augments the RI coverage table's under-covered (gap > 0, eligible,
     per-instance) rows with real 1yr/3yr purchase cost and monthly savings,
