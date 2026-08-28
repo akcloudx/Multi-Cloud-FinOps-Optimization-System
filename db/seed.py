@@ -42,7 +42,7 @@ if _PROJECT_ROOT not in sys.path:
 from sqlalchemy.orm import Session
 from db.schema import (
     init_db, get_engine, CloudInventory, Commitment,
-    ReservationPurchase, SavingsPlanPurchase,
+    ReservationPurchase, SavingsPlanPurchase, AzureVmFlexibilityGroup,
 )
 
 
@@ -125,6 +125,40 @@ COMPUTE_INVENTORY = [
      "region": "australiaeast", "os": "Windows", "sku": "Standard_D4ds_v4",
      "payg_hourly_usd": 0.284, "avg_daily_running_hours": 0,
      "subscription": "sub-prod-001", "resource_group": "rg-prod", "provider": "Azure", "is_orphaned": True},
+
+    # Azure VM Reserved Instance instance-size-flexibility demo (2026-08-29,
+    # analysis/engine.py::_apply_azure_vm_size_flexibility) - a bigger
+    # Ddsv5 Series VM running against a Shared-scope RI purchased for a
+    # SMALLER size in the SAME real flexibility group (see
+    # RI-VM-D8DS-V5-AE-LINUX below). Mirrors Microsoft's own worked
+    # partial-coverage example shape (learn.microsoft.com/.../
+    # reserved-vm-instance-size-flexibility, "Scenario 3": a bigger VM
+    # against a half-ratio reservation = 50% covered) but with THIS app's
+    # own real, eligible SKUs and real ratios - the doc's own DSv2-series
+    # example SKUs (Standard_DS1_v2.._v5) turned out to have ZERO real
+    # Reservation offering left in Azure's live catalog (confirmed while
+    # testing this exact feature, see analysis/ri_eligibility.py's DS-series
+    # exclusion), so they'd show gap=0 regardless of this feature working -
+    # deliberately NOT used here. Ratio (Ddsv5 Series: D8ds_v5=4,
+    # D16ds_v5=8) verified 2026-08-29 against Microsoft's own real
+    # InstanceSizeFlexibilityGroup reference CSV (aka.ms/isf, still live as
+    # of this date despite its deprecation notice). Deliberately does NOT
+    # reuse Standard_D4ds_v5 (also Ddsv5 Series, ratio 2) even though it's
+    # already in this demo's inventory - VM-Dev-02's existing "uncovered
+    # gap" scenario specifically demonstrates real Azure scope restriction
+    # (see RI-VM-D4DS-V5-AE-WIN's comment above) and pooling it into this
+    # NEW flexibility group would silently resolve that gap via ISF,
+    # breaking that separate, deliberate lesson - see
+    # AZURE_VM_FLEXIBILITY_GROUPS below, which caches ONLY D8ds_v5/D16ds_v5
+    # for exactly this reason. payg_hourly_usd verified live against the
+    # real Azure Retail Prices API (2026-08-29): armSkuName=
+    # Standard_D16ds_v5, armRegionName=australiaeast, meterName="D16ds v5"
+    # (base Linux Consumption meter) = $1.136/hr.
+    {"resource_id": "VM-Analytics-01", "resource_name": "analytics-node-01",
+     "resource_type": "Compute", "resource_state": "Running",
+     "region": "australiaeast", "os": "Linux", "sku": "Standard_D16ds_v5",
+     "payg_hourly_usd": 1.136, "avg_daily_running_hours": 24,
+     "subscription": "sub-prod-001", "resource_group": "rg-prod", "provider": "Azure", "is_orphaned": False},
 ]
 
 
@@ -527,6 +561,25 @@ COMMITMENTS = [
      "hourly_usd_commitment": 0.19, "reserved_qty": 1,
      "term": "1-year", "expiry_date": "2026-09-01", "provider": "Azure"},
 
+    # Instance-size-flexibility demo (2026-08-29) - purchased for the
+    # SMALLER Standard_D8ds_v5 (real Ddsv5 Series ratio 4, verified against
+    # Microsoft's own aka.ms/isf reference CSV), Shared scope (no
+    # scope_subscription_id - runs through the main tenant-wide layer, not
+    # the Single-subscription scoped layer the two D4ds_v5/D4ds_v4 RIs
+    # above use), covers half of VM-Analytics-01's real D16ds_v5 (ratio 8) -
+    # see AZURE_VM_FLEXIBILITY_GROUPS below for the cache rows this needs,
+    # and VM-Analytics-01's own comment above for why D4ds_v5 wasn't reused
+    # for this instead. hourly_usd_commitment ~30% off D8ds_v5's real Linux
+    # PAYG rate (verified live: $0.568/hr, same Retail Prices API check as
+    # VM-Analytics-01's payg_hourly_usd above).
+    {"commitment_id": "RI-VM-D8DS-V5-AE-LINUX",
+     "commitment_type": "Reserved Instance",
+     "scope_sku": "Standard_D8ds_v5", "scope_resource_type": "Compute",
+     "scope_region": "australiaeast", "scope_os": "Linux", "scope_redundancy": "N/A",
+     "hourly_usd_commitment": 0.40, "reserved_qty": 1,
+     "term": "1-year", "expiry_date": "2026-11-01", "provider": "Azure",
+     "instance_flexibility": "On"},
+
     # ── Reserved Capacity — Azure SQL Database (covers compute costs ONLY) ─────
     # scope_redundancy="Locally Redundant" - this reservation covers
     # SQLDB-Prod-01 (Standard) specifically, NOT SQLDB-Prod-02 (Zone
@@ -721,6 +774,41 @@ RESERVATION_PURCHASES = [
         "utilization_1day_pct": 0.0,
         "utilization_7day_pct": 12.5,
         "utilization_30day_pct": 48.0,
+        "provider": "Azure",
+    },
+
+    # Corresponds to Commitment "RI-VM-D8DS-V5-AE-LINUX" - instance-size-
+    # flexibility demo, see that Commitment's own comment and
+    # AZURE_VM_FLEXIBILITY_GROUPS below. applied_scope_type "Shared" (no
+    # subscription/resource-group restriction) - a real, valid Azure
+    # purchase choice (the default, in fact - "Single subscription" the
+    # other two demo RIs use is the one that requires opting IN).
+    {
+        "reservation_order_id": "a1b2c3d4-0009-4a1a-9c1a-000000000009",
+        "reservation_id": "a1b2c3d4-0009-4a1a-9c1a-100000000009",
+        "name": "a1b2c3d4-0009-4a1a-9c1a-100000000009",
+        "type": "Microsoft.Capacity/reservationOrders/reservations",
+        "location": "australiaeast",
+        "sku_name": "Standard_D8ds_v5",
+        "sku_description": "D8ds v5",
+        "reserved_resource_type": "VirtualMachines",
+        "instance_flexibility": "On",
+        "applied_scope_type": "Shared",
+        "billing_plan": "Upfront",
+        "term": "P1Y",
+        "quantity": 1,
+        "provisioning_state": "Succeeded",
+        "renew": False,
+        "purchase_date": "2025-11-01",
+        "purchase_date_time": "2025-11-01T09:14:02.0000000Z",
+        "effective_date_time": "2025-11-01T09:14:02.0000000Z",
+        "benefit_start_time": "2025-11-01T09:14:02.0000000Z",
+        "expiry_date": "2026-11-01",
+        "expiry_date_time": "2026-11-01T09:14:02.0000000Z",
+        "utilization_trend": "Up",
+        "utilization_1day_pct": 100.0,
+        "utilization_7day_pct": 100.0,
+        "utilization_30day_pct": 100.0,
         "provider": "Azure",
     },
 
@@ -1061,6 +1149,34 @@ RI_COVERAGE_NOTES = {
     "App Service":                      ("Stamp fee / compute", "Workers and associated resources"),
 }
 
+# Azure VM Reserved Instance instance-size-flexibility group/ratio cache
+# (2026-08-29, mirrors AzureVmFlexibilityGroup - see
+# pricing/azure_vm_flexibility.py/azure_conn/connector.py::
+# fetch_vm_flexibility_groups). Real Ddsv5 Series ratios, verified
+# 2026-08-29 directly against Microsoft's own authoritative
+# InstanceSizeFlexibilityGroup reference (aka.ms/isf CSV - still live as of
+# this date, ahead of its own deprecation notice) - NOT Microsoft's doc
+# examples (those illustrate the concept using the DSv2 series, which has
+# zero real Reservation offering left in Azure's live catalog, see
+# analysis/ri_eligibility.py's DS-series exclusion and VM-Analytics-01's
+# own comment above). Deliberately caches ONLY D8ds_v5/D16ds_v5, not the
+# D4ds_v5 already used elsewhere in this demo's inventory/commitments (same
+# group in reality, ratio 2) - pooling it in here would silently resolve
+# VM-Dev-02's deliberately-uncovered scope-restriction demo gap, breaking
+# that separate lesson; a live tenant's real sync would cache every SKU
+# actually present in inventory, this demo narrows it on purpose instead.
+# A live tenant would fetch this from the real Reservations Catalog API
+# instead; demo/benchmark mode has no live Azure credentials to call it
+# with, so these rows are seeded directly, same "no live API access in
+# demo mode" pattern already used for every other cache table here (see
+# seed_if_empty's own refresh_commitment_prices try/except below, which
+# likewise only runs for real network-reachable public APIs, not
+# tenant-authenticated ones).
+AZURE_VM_FLEXIBILITY_GROUPS = [
+    {"region": "australiaeast", "sku": "Standard_D8ds_v5",  "flexibility_group": "Ddsv5 Series", "ratio": 4.0, "fetched_at": "2026-08-29 00:00:00 UTC"},
+    {"region": "australiaeast", "sku": "Standard_D16ds_v5", "flexibility_group": "Ddsv5 Series", "ratio": 8.0, "fetched_at": "2026-08-29 00:00:00 UTC"},
+]
+
 
 def seed_if_empty(engine=None):
     # Demo/benchmark data always lives in the "demo" scope - never the caller's
@@ -1074,9 +1190,11 @@ def seed_if_empty(engine=None):
             session.bulk_insert_mappings(Commitment, COMMITMENTS)
             session.bulk_insert_mappings(ReservationPurchase, RESERVATION_PURCHASES)
             session.bulk_insert_mappings(SavingsPlanPurchase, SAVINGS_PLAN_PURCHASES)
+            session.bulk_insert_mappings(AzureVmFlexibilityGroup, AZURE_VM_FLEXIBILITY_GROUPS)
             session.commit()
             print(f"[OK] Seeded {len(INVENTORY)} resources, {len(COMMITMENTS)} commitments, "
-                  f"{len(RESERVATION_PURCHASES)} reservation purchases, {len(SAVINGS_PLAN_PURCHASES)} savings plan purchases.")
+                  f"{len(RESERVATION_PURCHASES)} reservation purchases, {len(SAVINGS_PLAN_PURCHASES)} savings plan purchases, "
+                  f"{len(AZURE_VM_FLEXIBILITY_GROUPS)} VM flexibility-group cache rows.")
 
             # Demo data deserves real SP/RI economics too, not just Live
             # tenants - fetch real 1yr/3yr rates for every demo SKU/region/OS

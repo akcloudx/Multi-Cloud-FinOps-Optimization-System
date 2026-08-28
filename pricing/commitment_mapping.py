@@ -366,6 +366,15 @@ def derive_reservation_commitment_fields(purchase: dict) -> Optional[dict]:
         "expiry_date":         purchase.get("expiry_date"),
         "is_inferred_mapping": is_inferred,
         "mapping_note":        note,
+        # "On" | "Off" | None - real API field (props.instance_flexibility),
+        # already captured on the raw purchase record by
+        # azure_conn/connector.py::fetch_live_reservations. Carried through
+        # unconditionally (not just for VirtualMachines) - every other
+        # resource_type's purchase record simply never has this key set, so
+        # .get() naturally yields None for them, same "real absence, not a
+        # guess" discipline as the rest of this function. Consumed by
+        # analysis/engine.py::_apply_azure_vm_size_flexibility, 2026-08-29.
+        "instance_flexibility": purchase.get("instance_flexibility"),
         "_pricing_lookup": {
             "resource_type": scope_resource_type, "sku": scope_sku, "region": region,
             "os": scope_os, "redundancy": scope_redundancy,

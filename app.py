@@ -129,6 +129,7 @@ from data.inventory_loader import get_compute_inventory
 from data.sync_pipeline import run_ingestion_pipeline
 from pricing.retail_pricing import usd, fmt_currency, get_inr_rate
 from pricing.commitment_pricing import get_commitment_prices, MONTH_HOURS
+from pricing.azure_vm_flexibility import get_vm_flexibility_groups
 from ui.charts import get_cost_distribution_chart, get_waterfall_savings_chart, get_recommendation_opportunity_chart
 from commitments.existing_commitments import (
     get_existing_savings_plans,
@@ -907,7 +908,8 @@ def _compute_portfolio_kpis():
                 inv["Is Orphaned"] = compute_orphaned_status(inv, ri_df)
             wf = run_waterfall(inv, ri_df, sp_df, simulate_days=simulate_days)
             sp_res = savings_plan_analysis(inv, sp_df, safety_buffer=safety_buffer, eligible_types=list(sp_types))
-            ri_res = reservation_analysis(inv, ri_df)
+            flex_groups_df = get_vm_flexibility_groups(get_engine(provider, tenant_mode)) if provider == "Azure" else None
+            ri_res = reservation_analysis(inv, ri_df, flex_groups_df)
             recs = generate_recommendations(sp_res, ri_res, wf, safety_buffer=safety_buffer)
             total_critical += sum(1 for r in recs if r["severity"] == "HIGH")
 
@@ -2409,17 +2411,22 @@ def _render_ri_coverage_tab():
         if row["gap"] > 0:
             base = f"⚠️ Short by {int(row['gap'])}"
             # partial_ri_credit_fraction (2026-08-29, analysis/engine.py's
-            # size-flexibility reconciliation) - a real, verified AWS
-            # mechanic: a smaller-size RI can already be giving one of
-            # these "short" instances a genuine partial discount (AWS's
-            # own worked example: a t2.medium RI gives a running t2.large
-            # a real 50%-off credit), even though it's not enough to
-            # resolve the gap to 0. NaN-safe via pd.notna() - only the
-            # main tenant-wide merge layer sets this column at all
-            # (Global/Single-subscription/Single-resource-group/AWS
-            # Zonal-scope rows never pass through that reconciliation, so
-            # they carry NaN here after the layers are concatenated, not
-            # a real 0.0 - both must read as "no partial credit").
+            # size-flexibility reconciliation - both
+            # _apply_aws_size_flexibility and, as of the Azure equivalent
+            # added the same day, _apply_azure_vm_size_flexibility write
+            # this column) - a real, verified mechanic on both clouds: a
+            # smaller-size RI can already be giving one of these "short"
+            # instances a genuine partial discount (AWS's own worked
+            # example: a t2.medium RI gives a running t2.large a real
+            # 50%-off credit; Azure's real ISF docs show the identical
+            # shape for a smaller-size Reserved VM Instance), even though
+            # it's not enough to resolve the gap to 0. NaN-safe via
+            # pd.notna() - only the main tenant-wide merge layer sets this
+            # column at all (Global/Single-subscription/Single-resource-
+            # group/AWS Zonal-scope rows never pass through that
+            # reconciliation, so they carry NaN here after the layers are
+            # concatenated, not a real 0.0 - both must read as "no partial
+            # credit").
             frac = row.get("partial_ri_credit_fraction")
             if pd.notna(frac) and frac > 0:
                 base += f" · {frac * 100:.0f}% pre-covered"
@@ -3576,7 +3583,8 @@ def load_benchmark_data(days: int, buffer: float, provider: str, sp_eligible_typ
         inv_raw["Is Orphaned"] = compute_orphaned_status(inv_raw, ri_df)
     wf            = run_waterfall(inv_raw, ri_df, sp_df, simulate_days=days)
     sp_res        = savings_plan_analysis(inv_raw, sp_df, safety_buffer=buffer, eligible_types=list(sp_eligible_types))
-    ri_res        = reservation_analysis(inv_raw, ri_df)
+    flex_groups_df = get_vm_flexibility_groups(get_engine(provider, "demo")) if provider == "Azure" else None
+    ri_res        = reservation_analysis(inv_raw, ri_df, flex_groups_df)
     recs          = generate_recommendations(sp_res, ri_res, wf, safety_buffer=buffer)
     return inv_raw, sp_df, compute_sp_df, db_sp_df, sagemaker_sp_df, ri_df, sp_res, ri_res, recs
 
@@ -3602,7 +3610,8 @@ def load_live_data(provider: str, tenant_id: int, days: int, buffer: float, sp_e
         inv_raw["Is Orphaned"] = compute_orphaned_status(inv_raw, ri_df)
     wf            = run_waterfall(inv_raw, ri_df, sp_df, simulate_days=days)
     sp_res        = savings_plan_analysis(inv_raw, sp_df, safety_buffer=buffer, eligible_types=list(sp_eligible_types))
-    ri_res        = reservation_analysis(inv_raw, ri_df)
+    flex_groups_df = get_vm_flexibility_groups(get_engine(provider, "live")) if provider == "Azure" else None
+    ri_res        = reservation_analysis(inv_raw, ri_df, flex_groups_df)
     recs          = generate_recommendations(sp_res, ri_res, wf, safety_buffer=buffer)
     return inv_raw, sp_df, compute_sp_df, db_sp_df, sagemaker_sp_df, ri_df, sp_res, ri_res, recs
 

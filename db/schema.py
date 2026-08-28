@@ -344,6 +344,15 @@ def init_db(provider: str = "Azure", mode: str = "demo"):
     _ensure_column(engine, schema_name, "cloud_tenants", "aws_sp_sagemaker_discount_3yr", "FLOAT")
     _ensure_column(engine, schema_name, "cloud_tenants", "aws_sp_database_discount_1yr", "FLOAT")
     _ensure_column(engine, schema_name, "cloud_tenants", "aws_sp_pricing_updated_at", "VARCHAR(30)")
+    # "On" | "Off" | None - carried through from ReservationPurchase.
+    # instance_flexibility (real API field, already captured there) into the
+    # derived Commitment row that analysis/engine.py's reservation_analysis()
+    # actually reads as ri_df - needed for Azure VM RI size-flexibility
+    # reconciliation (analysis/engine.py::_apply_azure_vm_size_flexibility),
+    # 2026-08-29. Only "On" reservations participate; "Off" (Capacity
+    # Priority, locked to one size+AZ) and demo/pre-existing rows (None)
+    # stay exact-match only, same as before this feature.
+    _ensure_column(engine, schema_name, "commitments", "instance_flexibility", "VARCHAR(20)")
     return engine
 
 
@@ -508,6 +517,12 @@ class Commitment(Base):
     # user can see which of their EC2 RIs are exchangeable (Convertible) vs
     # not (Standard) without needing to affect any pricing/matching logic.
     offering_class          = Column(String(50), nullable=True)
+    # "On" | "Off" | None - carried through from ReservationPurchase.
+    # instance_flexibility for Azure VM reservations (Compute only; every
+    # other resource_type's purchase record has no such field, so this
+    # stays None for them - not a guess, a real absence). Gates
+    # analysis/engine.py::_apply_azure_vm_size_flexibility, 2026-08-29.
+    instance_flexibility    = Column(String(20), nullable=True)
 
 
 class ReconciliationLog(Base):
@@ -609,6 +624,32 @@ class CommitmentPriceCache(Base):
     effective_hourly_rate_usd = Column(Float, nullable=True)
     payg_hourly_rate_usd      = Column(Float, nullable=True)
     fetched_at                = Column(String(255), nullable=False)
+
+
+class AzureVmFlexibilityGroup(Base):
+    """
+    Cache of REAL Azure VM Reserved Instance instance-size-flexibility
+    group membership + ratio per SKU/region, fetched from the Reservations
+    Catalog API (GET .../providers/Microsoft.Capacity/catalogs, real
+    endpoint confirmed via Microsoft's own REST API reference - see
+    azure_conn/connector.py::fetch_vm_flexibility_groups). Deliberately a
+    separate table from CommitmentPriceCache (2026-08-29) - this isn't a
+    $ rate, isn't term-dependent, and Microsoft's own docs confirm the
+    ratio genuinely isn't derivable from a generic size-name formula the
+    way AWS's is (real example: the "BS Series" group starts at 0.25, the
+    "Ddsv5 Series" group starts at 2 - no uniform ladder to hardcode).
+    Keyed narrowly to the region/SKU combos actually present in a
+    tenant's live (or demo) VM inventory - never a full regional catalog
+    dump, same discipline as CommitmentPriceCache.
+    """
+    __tablename__ = "azure_vm_flexibility_group"
+
+    id                 = Column(Integer, primary_key=True, autoincrement=True)
+    region             = Column(String(255), nullable=False)
+    sku                = Column(String(255), nullable=False)
+    flexibility_group  = Column(String(255), nullable=False)
+    ratio              = Column(Float, nullable=False)
+    fetched_at         = Column(String(255), nullable=False)
 
 
 class ReservationPurchase(Base):

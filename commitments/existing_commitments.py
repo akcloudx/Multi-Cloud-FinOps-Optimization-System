@@ -91,12 +91,16 @@ def get_all_commitments(provider: str = "Azure", mode: str = "demo", tenant_id=N
             "is_inferred_mapping":   bool(r.is_inferred_mapping),
             "mapping_note":          r.mapping_note,
             "offering_class":        r.offering_class,
+            # "On" | "Off" | None - Azure VM RI instance-size-flexibility
+            # opt-in, see db/schema.py's Commitment.instance_flexibility.
+            "instance_flexibility":  r.instance_flexibility,
         }
         for r in rows
     ]
     columns = ["commitment_id", "commitment_type", "scope_sku", "scope_resource_type", "scope_region", "scope_os", "scope_redundancy",
                "scope_subscription_id", "scope_resource_group_id", "scope_availability_zone",
-               "hourly_usd_commitment", "reserved_qty", "term", "expiry_date", "provider", "is_inferred_mapping", "mapping_note", "offering_class"]
+               "hourly_usd_commitment", "reserved_qty", "term", "expiry_date", "provider", "is_inferred_mapping", "mapping_note",
+               "offering_class", "instance_flexibility"]
     return pd.DataFrame(data, columns=columns)
 
 

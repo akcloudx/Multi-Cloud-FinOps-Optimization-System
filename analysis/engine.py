@@ -893,6 +893,116 @@ def _apply_aws_size_flexibility(merged: pd.DataFrame) -> pd.DataFrame:
     return merged
 
 
+def _apply_azure_vm_size_flexibility(merged: pd.DataFrame, flex_groups_df: pd.DataFrame) -> pd.DataFrame:
+    """Reconciles gap/excess for Azure VM ("Compute") rows to reflect real
+    Azure Reserved VM Instance instance-size-flexibility, using the live
+    group/ratio cache fetched by azure_conn/connector.py::
+    fetch_vm_flexibility_groups and stored in AzureVmFlexibilityGroup (see
+    pricing/azure_vm_flexibility.py). Reuses the same provider-agnostic
+    _allocate_size_flexible_group() greedy allocator as
+    _apply_aws_size_flexibility above - genuinely different architecture
+    from AWS in two ways, both confirmed directly against Microsoft's own
+    docs (2026-08-29), not assumed similar to AWS:
+
+    1. Opt-in, not automatic. A reservation's own 'instance_flexibility'
+       field ("On"/"Off", real API value already captured on
+       ReservationPurchase and threaded through to this row via
+       Commitment.instance_flexibility, see db/schema.py) gates
+       participation - "Off" (Capacity Priority, locked to one exact
+       size+AZ) is architecturally closer to AWS's Zonal RIs than to a
+       flexible Regional RI. A row whose ONLY matched reservation is "Off"
+       (or whose flexibility state is simply unknown - can't safely
+       discard an already-resolved exact match without knowing whether
+       it's actually flexible, same "can't determine, don't guess"
+       discipline as an unparseable AWS SKU) is excluded from grouping
+       entirely and keeps whatever gap/excess the exact-match merge above
+       already computed. A row with reserved_qty==0 (pure unmet demand, no
+       reservation attached at all) always joins as candidate demand -
+       it has no existing exact-match coverage to lose.
+    2. No hardcodable ratio table - flexibility groups and ratios are
+       looked up per (region, SKU) from the live-fetched cache, not a
+       generic size-name formula the way AWS's normalization factors are
+       (Microsoft's own docs: ratios don't uniformly start at 1 or double
+       per step, e.g. "BS Series" starts at 0.25, "Ddsv5 Series" starts at
+       2). A SKU absent from the cache (never fetched, or genuinely has no
+       flexibility group) passes through completely unchanged.
+
+    Reuses the exact same 'partial_ri_credit_fraction' display-only column
+    _apply_aws_size_flexibility already populates (already provider-
+    agnostic, no new UI plumbing needed - see app.py's _status() in the RI
+    Coverage tab).
+
+    flex_groups_df is empty for AWS tenants (no VM flexibility cache ever
+    populated there) and for any Azure tenant/demo scope that hasn't been
+    synced/seeded yet - both cases are safe no-ops, identical in shape to
+    every other "SKU not in cache" fallback in this module.
+    """
+    if merged.empty or flex_groups_df is None or flex_groups_df.empty:
+        return merged
+
+    # is_eligible (set by _finalize_coverage_layer, already run before this
+    # point) already zeroed gap for any SKU/family real Azure sells no RI
+    # for at all (analysis/ri_eligibility.py, live-verified against the
+    # Retail Prices API - e.g. the classic "DS"-series has zero Reservation
+    # entries in the real catalog, confirmed 2026-08-29 while testing this
+    # exact function). Reconciliation must respect that: an ineligible row
+    # has no real RI product to be flexible about, so it's excluded from
+    # grouping entirely rather than having this function overwrite
+    # _finalize_coverage_layer's deliberate zero with a recomputed nonzero
+    # gap - same bug shape "can't determine, don't guess" already guards
+    # against elsewhere in this module, just for eligibility instead of a
+    # missing cache entry.
+    is_compute = (merged["Resource Type"] == "Compute") & merged.get("is_eligible", True)
+    if not is_compute.any():
+        return merged
+
+    if "instance_flexibility" not in merged.columns:
+        flex_value = pd.Series("", index=merged.index)
+    else:
+        flex_value = merged["instance_flexibility"].fillna("")
+    has_own_reservation = merged["reserved_qty"] > 0
+    excluded_locked = has_own_reservation & (flex_value != "On")
+    candidate_mask = is_compute & ~excluded_locked
+    if not candidate_mask.any():
+        return merged
+
+    group_lookup = {
+        (row.region, row.sku): (row.flexibility_group, row.ratio)
+        for row in flex_groups_df.itertuples()
+    }
+
+    groups: dict = {}
+    norm_units: dict = {}
+    for idx in merged.index[candidate_mask]:
+        row = merged.loc[idx]
+        found = group_lookup.get((row["Region"], row["SKU"]))
+        if found is None:
+            continue
+        group_name, ratio = found
+        key = ("VM", row["Region"], group_name)
+        groups.setdefault(key, []).append(idx)
+        norm_units[idx] = ratio
+
+    for idx_group in groups.values():
+        if len(idx_group) < 2:
+            continue  # only one SKU present in this flexibility group - nothing to reconcile
+        rows = [
+            {"idx": i, "running_count": int(merged.at[i, "running_count"]),
+             "reserved_qty": int(merged.at[i, "reserved_qty"]) if flex_value.at[i] == "On" else 0,
+             "norm_units": norm_units[i]}
+            for i in idx_group
+        ]
+        leftover = _allocate_size_flexible_group(rows)
+        largest = max(rows, key=lambda r: r["norm_units"])
+        for r in rows:
+            merged.at[r["idx"], "gap"] = max(0, r["running_count"] - r["covered_count"])
+            merged.at[r["idx"], "excess"] = 0
+            merged.at[r["idx"], "partial_ri_credit_fraction"] = r.get("partial_fraction", 0.0)
+        merged.at[largest["idx"], "excess"] = int(leftover // largest["norm_units"]) if largest["norm_units"] else 0
+
+    return merged
+
+
 def _finalize_coverage_layer(merged: pd.DataFrame) -> pd.DataFrame:
     """Shared eligibility/coverage-model/gap-zeroing finalization applied to
     a demand-supply merged DataFrame, regardless of which layer produced it
@@ -927,6 +1037,7 @@ def _finalize_coverage_layer(merged: pd.DataFrame) -> pd.DataFrame:
 def reservation_analysis(
     inventory_df: pd.DataFrame,
     ri_df:        pd.DataFrame,
+    flex_groups_df: pd.DataFrame = None,
 ) -> RIAnalysisResult:
     """
     Gap / excess analysis for ALL Azure Reserved Instance / Reserved Capacity types.
@@ -950,6 +1061,14 @@ def reservation_analysis(
     different redundancy would be silently pooled into one demand bucket,
     understating a real coverage gap on whichever one the reservation
     doesn't actually apply to.
+
+    flex_groups_df (2026-08-29): the AzureVmFlexibilityGroup cache, read
+    via pricing/azure_vm_flexibility.py::get_vm_flexibility_groups(engine)
+    - engine.py itself never touches SQL DB directly (pure computation over
+    DataFrames the caller loads), same discipline as inventory_df/ri_df.
+    None/empty is a safe no-op (AWS tenants, or an Azure tenant/demo scope
+    that hasn't synced/seeded this cache yet) - see
+    _apply_azure_vm_size_flexibility's own docstring.
     """
     # All running resources (any type)
     running_resources = inventory_df[
@@ -1062,7 +1181,7 @@ def reservation_analysis(
     if ri_df_unscoped.empty:
         supply = pd.DataFrame(columns=[
             "Resource Type", "SKU", "Region", "OS", "Redundancy", "reserved_qty",
-            "commitment_id", "hourly_usd_commitment", "term", "expiry_date"
+            "commitment_id", "hourly_usd_commitment", "term", "expiry_date", "instance_flexibility"
         ])
     else:
         supply = ri_df_unscoped.rename(columns={
@@ -1073,7 +1192,7 @@ def reservation_analysis(
             "scope_redundancy":     "Redundancy",
         })[[
             "commitment_id", "SKU", "Resource Type", "Region", "OS", "Redundancy",
-            "reserved_qty", "hourly_usd_commitment", "term", "expiry_date"
+            "reserved_qty", "hourly_usd_commitment", "term", "expiry_date", "instance_flexibility"
         ]].copy()
         supply["Redundancy"] = supply["Redundancy"].fillna("N/A")
         # scope_resource_type is the authoritative source now (added
@@ -1113,6 +1232,12 @@ def reservation_analysis(
     # isolated out of ri_df_unscoped before this point, and every
     # Azure-scoped layer below never passes through this function at all.
     merged = _apply_aws_size_flexibility(merged)
+
+    # Azure VM RI instance-size-flexibility reconciliation (2026-08-29) -
+    # see _apply_azure_vm_size_flexibility's own docstring. Same placement
+    # rationale as the AWS pass above: only the main tenant-wide layer,
+    # after the exact-match merge/finalize has already run.
+    merged = _apply_azure_vm_size_flexibility(merged, flex_groups_df)
 
     # Globally-scoped commitments (split off above) - Cosmos DB Reservations
     # have no per-region purchase concept at all (real quantity is a

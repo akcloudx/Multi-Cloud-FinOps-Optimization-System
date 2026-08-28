@@ -50,6 +50,7 @@ from aws.connector import (
 from pricing.azure_retail_api import refresh_retail_prices
 from pricing.aws_price_list import refresh_aws_prices
 from pricing.commitment_pricing import refresh_commitment_prices
+from pricing.azure_vm_flexibility import refresh_vm_flexibility_groups
 from pricing.commitment_mapping import derive_reservation_commitment_fields, derive_savings_plan_commitment_fields
 from pricing.aws_commitment_mapping import derive_aws_reservation_commitment_fields, derive_aws_savings_plan_commitment_fields
 from db.tenants import upsert_subscription
@@ -181,6 +182,16 @@ def run_ingestion_pipeline(provider: str = "Azure", creds=None, force_mock: bool
             # _fetch_aws_sp_rates stays a no-op stub either way.
             if records:
                 refresh_commitment_prices(engine, records, provider=provider, aws_creds=(None if is_azure else live_creds))
+
+            # VM Reserved Instance instance-size-flexibility group/ratio
+            # cache (Azure only - AWS's equivalent is hardcoded, no live
+            # fetch needed, see analysis/engine.py::_apply_aws_size_flexibility).
+            # Best-effort per region internally (see
+            # pricing/azure_vm_flexibility.py) - a catalog-fetch failure
+            # can't block an otherwise-successful inventory sync, same
+            # discipline as the ri_sp_error isolation above.
+            if is_azure and records:
+                refresh_vm_flexibility_groups(engine, records, live_creds)
 
             # Derive this app's simplified Commitment rows from the raw
             # purchase records. Azure's Reservations carry no $ amount at

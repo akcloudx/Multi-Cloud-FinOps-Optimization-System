@@ -1211,6 +1211,78 @@ def fetch_live_reservations(creds: AzureCredentials) -> pd.DataFrame:
     return pd.DataFrame(records)
 
 
+def fetch_vm_flexibility_groups(creds: AzureCredentials, location: str) -> dict:
+    """Real VM Reserved Instance instance-size-flexibility group + ratio
+    per SKU, for one Azure region, via the Reservations Catalog API
+    (GET /subscriptions/{subscriptionId}/providers/Microsoft.Capacity/
+    catalogs?api-version=2022-11-01&reservedResourceType=VirtualMachines
+    &location={location} - real endpoint confirmed against Microsoft's
+    own REST API reference, not guessed). Returns
+    {sku_name: (flexibility_group, ratio)} for every SKU where both
+    properties were present - a SKU missing either is silently omitted
+    (not guessed), same "can't determine, don't fabricate" discipline as
+    every other fetch in this file.
+
+    ReservationsMgmtClient.get_catalog() is the SAME client class already
+    used by fetch_live_reservations() above - confirmed against the
+    installed SDK (azure-mgmt-reservations 3.0.0) that get_catalog is a
+    real top-level client method (not a sub-resource), taking
+    subscription_id positionally plus reserved_resource_type/location
+    keywords, matching the REST reference's own Python sample exactly.
+    subscription_id is only needed to authenticate the call (same "needs
+    *some* subscription_id even though the query itself isn't
+    subscription-specific" pattern already documented for
+    AuthorizationManagementClient/BillingBenefitsMgmtClient above) -
+    creds.subscription_id is reused, not a new concept.
+
+    No new IAM permission needed: Reservations Reader (already required
+    for fetch_live_reservations, see REQUIRED_TENANT_ROLES) grants
+    "Microsoft.Capacity/*/read" - a wildcard confirmed (via a third-party
+    RBAC role catalog cross-referencing the real built-in role GUID
+    582fc458-8989-419f-a480-75249bc5db7e, not Microsoft's own live
+    portal - this app has no way to query real RBAC role *definitions*
+    live, only role *assignments*) to cover
+    "Microsoft.Capacity/catalogs/read" specifically.
+
+    Not independently live-tested (no real Azure credentials available in
+    this environment) - Microsoft's own docs disagree on the exact
+    skuProperties names to expect (their ISF migration guide names
+    "ReservationsAutofitGroup"/"ReservationsAutofitRatio"; their own REST
+    API reference's worked example response, same api-version, doesn't
+    show either property on its sample SKUs) - defensively checks for
+    both names and simply omits any SKU where they're absent, rather than
+    guessing. Verify against one real tenant's actual response once this
+    ships, same disclosure already used for this app's other
+    can't-verify-without-a-real-tenant fetches.
+    """
+    if not HAS_AZURE_IDENTITY or not HAS_RESERVATIONS:
+        raise ImportError(
+            "Install required packages: pip install azure-identity azure-mgmt-reservations"
+        )
+
+    credential = ClientSecretCredential(
+        tenant_id=creds.tenant_id, client_id=creds.client_id, client_secret=creds.client_secret,
+    )
+    client = ReservationsMgmtClient(credential)
+
+    groups: dict = {}
+    for item in client.get_catalog(
+        creds.subscription_id, reserved_resource_type="VirtualMachines", location=location,
+    ):
+        group_name, ratio = None, None
+        for prop in (item.sku_properties or []):
+            if prop.name == "ReservationsAutofitGroup":
+                group_name = prop.value
+            elif prop.name == "ReservationsAutofitRatio":
+                try:
+                    ratio = float(prop.value)
+                except (TypeError, ValueError):
+                    ratio = None
+        if item.name and group_name and ratio is not None:
+            groups[item.name] = (group_name, ratio)
+    return groups
+
+
 def fetch_live_savings_plans(creds: AzureCredentials) -> pd.DataFrame:
     """Tenant-wide Savings Plan enumeration via Microsoft.BillingBenefits/
     savingsPlans "List All" (GET /providers/Microsoft.BillingBenefits/
