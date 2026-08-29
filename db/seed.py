@@ -1141,7 +1141,7 @@ RI_COVERAGE_NOTES = {
     "Azure Databricks":                 ("DBU usage only - Reserved Capacity (DBCU) is real and priced, but applies as a subscription-wide pooled discount across all workloads/VM SKUs, not matched to this specific resource - not yet represented in RI Coverage below, see pricing/sku_mapping.py", "Compute, storage, networking (charged separately)"),
     "Azure Disk Storage":               ("Premium SSD P30 and larger only", "Other disk types, sizes smaller than P30"),
     "Azure Dedicated Host":              ("Physical host compute costs only (~40-55% saving)", "Software, networking, storage"),
-    "Azure Data Factory":               ("Integration runtime compute cost", "Data movement, storage"),
+    "Azure Data Factory":               ("Data Flow compute only - Reservation is real and priced per-vCore across 3 compute tiers, but applies automatically to ANY pipeline run's ephemeral compute, not a standing resource this app can inventory - not yet represented in RI Coverage below, see pricing/sku_mapping.py", "Data movement, storage, Integration Runtime nodes (see Azure-SSIS Integration Runtime)"),
     "Azure Data Explorer":              ("Services markup fee only (subscription-wide, ~30% saving)", "Cluster compute, networking, storage - billed and reserved separately"),
     "Azure Backup Storage":              ("Vault-standard tier backup data (100 TiB/1 PiB blocks)", "Vault-archive tier, Protected Instance cost, early deletion/bandwidth charges"),
     "Azure NetApp Files":                ("Standard/Premium/Ultra capacity pools, hot tier only (100 TiB/1 PiB blocks)", "Flexible service level, cool-tier consumption, cross-region replication, backup add-ons"),

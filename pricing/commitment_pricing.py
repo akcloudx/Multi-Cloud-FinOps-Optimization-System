@@ -195,8 +195,19 @@ def _query_retail_items(price_type: str, region: str, plan: SkuQueryPlan, match_
         filter_parts.append(f"serviceName eq '{plan.service_name}'")
     if plan.match_field == "armSkuName" and match_value:
         filter_parts.append(f"armSkuName eq '{match_value}'")
-    if plan.product_contains:
-        filter_parts.append(f"contains(productName, '{plan.product_contains}')")
+    # Reservation items can be tagged with a genuinely DIFFERENT (usually
+    # less specific) productName than the identical tier's Consumption
+    # items - see SkuQueryPlan.reservation_product_contains' own docstring
+    # for the confirmed MySQL case this exists for. None (the default for
+    # every plan that's never needed this split) falls through to the
+    # same product_contains used for every other price_type, unchanged.
+    effective_product_contains = (
+        plan.reservation_product_contains
+        if price_type == "Reservation" and plan.reservation_product_contains is not None
+        else plan.product_contains
+    )
+    if effective_product_contains:
+        filter_parts.append(f"contains(productName, '{effective_product_contains}')")
     filter_q = " and ".join(filter_parts)
 
     resp = requests.get(

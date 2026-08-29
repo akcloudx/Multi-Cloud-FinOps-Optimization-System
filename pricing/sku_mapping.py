@@ -49,6 +49,23 @@ class SkuQueryPlan:
     consumption_match_value: str = ""    # value to match for Consumption/SavingsPlan lookup
     reservation_match_value: str = ""    # value to match for Reservation lookup (can differ from consumption side)
     product_contains: str = ""           # optional productName substring to disambiguate tiers sharing a skuName
+    # Reservation-specific override for product_contains (2026-08-30) -
+    # None means "use product_contains for Reservation too" (the default,
+    # unchanged behavior for every plan that doesn't set this). Added
+    # after a real, confirmed catalog split for MySQL Flexible Server:
+    # Consumption items ARE tagged with a series code in productName
+    # ("...General Purpose Ddsv5 Series Compute" - confirmed live, 102
+    # real items), but Reservation items for the identical tier are NOT -
+    # the entire Reservation catalog for this service has exactly 4
+    # distinct productName values total (General Purpose / Memory
+    # Optimized x Single Server / Flexible Server), none series-tagged.
+    # Using the series-tagged name for BOTH (the prior behavior) worked
+    # for Consumption/PAYG by coincidence and silently returned zero
+    # Reservation items for every series except the ones already special-
+    # cased (Ddsv4/Edsv4) - not a missing-data gap, a wrong query for a
+    # product line that was actually priced and purchasable the whole
+    # time. See _plan_mysql.
+    reservation_product_contains: Optional[str] = None
     reservation_multiplier: float = 1    # multiply the matched Reservation unit price by this (e.g. vCore count)
     consumption_multiplier: float = 1    # multiply the matched Consumption retailPrice (PAYG) by this - NOT
                                           # needed for General Purpose/Business Critical Provisioned SQL DB/MI
@@ -1103,6 +1120,21 @@ def _plan_mysql(sku: str) -> SkuQueryPlan:
             supported=True, service_name="Azure Database for MySQL", match_field="skuName",
             consumption_match_value="vCore", reservation_match_value="vCore",
             product_contains=product_contains,
+            # Real bug found live, 2026-08-30 (a user asked why a running,
+            # eligible General Purpose Ddsv5 MySQL instance showed no RI
+            # Rate at all): the series-tagged productName above genuinely
+            # exists for Consumption (confirmed live, 102 real items for
+            # "...General Purpose Ddsv5 Series Compute") but NOT for
+            # Reservation - a full scan of every MySQL Reservation item
+            # found exactly 4 distinct productName values total, none
+            # series-tagged; only the generic "...General Purpose Series
+            # Compute" name is real for Reservations, for EVERY series,
+            # not just the already-special-cased Ddsv4. Using the series-
+            # tagged name for the Reservation query (the prior behavior)
+            # silently matched zero items for every series except Ddsv4 -
+            # not a missing-data gap, a wrong query for a product that was
+            # actually priced and purchasable the whole time.
+            reservation_product_contains="Flexible Server General Purpose Series Compute",
             consumption_multiplier=vcores, reservation_multiplier=vcores,
         )
 
@@ -1175,6 +1207,14 @@ def _plan_mysql(sku: str) -> SkuQueryPlan:
             supported=True, service_name="Azure Database for MySQL", match_field="skuName",
             consumption_match_value="vCore", reservation_match_value="vCore",
             product_contains=f"Flexible Server Memory Optimized {series_code} Series Compute",
+            # Same real Reservation-vs-Consumption catalog split as
+            # GeneralPurpose above (2026-08-30) - confirmed live, the SAME
+            # full-catalog scan that found only 4 total Reservation
+            # productName values for MySQL included the plain "Memory
+            # Optimized Series Compute" generic name (no series tag) as
+            # one of them; no series-tagged Memory Optimized Reservation
+            # product exists for any series this branch covers.
+            reservation_product_contains="Flexible Server Memory Optimized Series Compute",
             consumption_multiplier=vcores, reservation_multiplier=vcores,
         )
 
@@ -1471,6 +1511,39 @@ def _plan_databricks(sku: str) -> SkuQueryPlan:
     # Reservation type here. See db/seed.py's RI_COVERAGE_NOTES entry for
     # how this is disclosed to the user instead of silently mismatched.
     return SkuQueryPlan(supported=False, reason="Databricks Commit Unit (DBCU) reservations are real and priced (verified live), but apply as a subscription-wide pooled discount across all workloads/VM SKUs, not a per-resource rate this app's SKU-matching model can represent.")
+
+
+def _plan_data_factory(sku: str) -> SkuQueryPlan:
+    """Azure Data Factory's "Data Flow" Reservation - added 2026-08-30 after
+    a user directly asked why this eligible-but-never-priced resource type
+    had no pricing plan at all. Genuinely, newly researched (not assumed to
+    mirror Databricks just because both end up unsupported): verified live
+    against the real Retail Prices API (serviceName='Azure Data Factory
+    v2', priceType='Reservation') that this Reservation is real, current,
+    and priced per-vCore across 3 real compute tiers (General Purpose,
+    Compute Optimized, Memory Optimized - skuName/meterName both "vCore",
+    180 real region/term/tier combinations found) - NOT a flat pooled %
+    discount the way Databricks' DBCU commitment is.
+
+    Still supported=False, but for a different, structural reason than
+    "no per-SKU rate exists": Data Flow compute is genuinely EPHEMERAL,
+    spun up per pipeline run, not a standing resource with a fixed vCore
+    count the way a VM or database is - there's nothing for this app's
+    inventory to capture in the first place (confirmed: no live ingestion
+    exists for this resource type in azure_conn/connector.py, and no demo
+    inventory row exists either - "Azure Data Factory" only ever appeared
+    in analysis/ri_eligibility.py's eligibility rule and db/seed.py's
+    Coverage Rules text, never in an actual inventory list). The
+    reservation applies automatically to ANY pipeline run's data flow
+    compute, matching exactly what analysis/ri_eligibility.py's own
+    eligibility rule already said before this function existed ("applies
+    automatically to ANY matching data flow, existing or future") - now
+    confirmed accurate by live research rather than inherited unverified.
+    Building real inventory ingestion for this would mean inventing an
+    artificial "resource" for something that isn't one, the same call
+    already made for Databricks - not attempted here without dedicated
+    design work first."""
+    return SkuQueryPlan(supported=False, reason="Azure Data Factory Data Flow reservations are real and priced per-vCore (confirmed live, 3 real compute tiers), but apply automatically to ANY pipeline run's ephemeral compute - there's no persistent per-resource vCore count this app's SKU-matching model can represent, same limitation as Databricks' DBCU commitment.")
 
 
 _ADX_SKU_RE = re.compile(r"^(Basic|Standard)_(.+)_(\d+)$")
@@ -1827,6 +1900,7 @@ _PLAN_RESOLVERS = {
     "Azure Cache for Redis Enterprise": _plan_redis_enterprise,
     "Azure Cosmos DB":               _plan_cosmos_db,
     "Azure Databricks":              _plan_databricks,
+    "Azure Data Factory":            _plan_data_factory,
     "Azure Data Explorer":           _plan_data_explorer,
     "Azure-SSIS Integration Runtime": _plan_ssis_ir,
     "Azure Blob Storage":            _plan_unmeasurable_storage,
