@@ -2353,8 +2353,20 @@ def _render_sp_pool_economics(pool_label: str, pool_df: pd.DataFrame, existing_c
         # st-key-* class so every OTHER expander on this page (e.g. "What
         # you already own", intentionally full-width to match its own
         # always-stretch table) is untouched.
+        # Targets `details[open]` specifically, not the whole stExpander -
+        # a real regression caught live, 2026-08-30: constraining the
+        # whole box shrank it in BOTH the collapsed and expanded states,
+        # so the collapsed row sat noticeably narrower than its full-width
+        # sibling "What you already own" right above it - two peer rows in
+        # the same list reading as visually inconsistent, the opposite of
+        # what this whole pass was trying to fix. Confirmed via live DOM
+        # inspection this app's real Streamlit build renders the expander
+        # as a native <details> element that gains an `open` attribute
+        # only while expanded - `details[open]` matches that state
+        # exactly, so the row stays full-width (matching its siblings)
+        # until opened, then narrows to its own content.
         st.markdown(
-            f"<style>.st-key-{elig_container_key} [data-testid='stExpander'] "
+            f"<style>.st-key-{elig_container_key} [data-testid='stExpander'] details[open] "
             f"{{ max-width: {table_width_px + 28}px; }}</style>",
             unsafe_allow_html=True,
         )
