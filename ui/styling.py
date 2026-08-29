@@ -380,6 +380,14 @@ section[data-testid="stSidebar"] nav span {
 .rec-headline-sentence { font-size: 22px; font-weight: 700; line-height: 1.35; }
 .rec-headline-sentence b { color: #34D399; }
 .rec-headline-sub { font-size: 12.5px; color: #94A3B8; margin-top: 10px; }
+/* Warning tone (2026-08-30, Savings Plan Analysis's own headline card) -
+   that card has a real "you're over-committed" state, unlike
+   Recommendations' headline which was always good news (green). Same
+   red this app already uses for a real problem elsewhere (Rightsizing's
+   Overutilized, Maturity's Below Crawl). */
+.rec-headline-card.warn { background: linear-gradient(160deg, #101A2E 0%, #2A1414 130%); border-color: rgba(248,113,113,.3); }
+.rec-headline-card.warn .rec-headline-eyebrow { color: #F87171; }
+.rec-headline-card.warn .rec-headline-sentence b { color: #F87171; }
 
 .rec-metric-card { background: #101A2E; border: 1px solid #1E293B; border-radius: 12px; padding: 16px 18px; height: 100%; }
 .rec-metric-card .lbl { font-size: 10.5px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: #526279; margin-bottom: 8px; }

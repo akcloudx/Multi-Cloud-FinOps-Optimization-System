@@ -2154,34 +2154,44 @@ def _render_sp_pool_economics(pool_label: str, pool_df: pd.DataFrame, existing_c
         est_monthly_savings = recommended_hr * (discount_pct / 100.0) * 730
 
     # ── Headline: one answer, always visible ────────────────────────────
-    # fmt() prefixes USD values with a literal "$" - st.markdown treats a
-    # PAIRED "$...$" as LaTeX math (confirmed real, 2026-08-28: two fmt()
-    # values in the same headline rendered as italic serif text with
-    # spaces stripped and the bold ** markers swallowed, exactly KaTeX's
-    # math-mode behavior). _md() escapes "$" to "\$" so it renders as a
-    # literal currency symbol instead - safe for INR values too, which
-    # never contain "$" and pass through unchanged.
-    def _md(x: str) -> str:
-        return x.replace("$", "\\$")
-
-    # Semantic color on the key figure, not just bold - real polish pass,
-    # 2026-08-28: a warning (over-committed) and good news (savings) read
-    # identically at a glance before this, both just bold black text.
-    # :color[...] is a real Streamlit markdown directive (confirmed via
-    # st.markdown's own docstring), matching the red/green language already
-    # used for Power State and Classification elsewhere in this app.
-    if leakage_hr > 0:
-        headline = f"You've committed :red[**{_md(fmt(leakage_hr))}/hr**] more than is currently eligible — worth reviewing this plan."
+    # Visual-only refresh, 2026-08-30 (real feedback: match Recommendations'
+    # card language) - now the same .rec-headline-card family instead of a
+    # plain st.markdown "####" line, with an eyebrow naming the pool (this
+    # function is shared across Compute/Database/SageMaker, so the card
+    # needs to say which one it's showing - the tab label alone doesn't
+    # carry into the card itself). Approved via mockup first, using real
+    # Azure demo pricing.
+    #
+    # No more _md() "$" escaping (was needed to dodge st.markdown's own
+    # KaTeX "$...$" math-mode trigger) - this whole block is raw HTML via
+    # unsafe_allow_html=True now, which has no such trigger; same real bug
+    # already found and fixed once on the Recommendations tab (a literal,
+    # unstripped backslash rendering on screen) applies here too, so
+    # plain fmt() output is correct.
+    #
+    # Tone genuinely differs by state here, unlike Recommendations' headline
+    # (always good news) - "you're over-committed" is a real warning, not
+    # savings, so it gets the card's own red "warn" variant rather than
+    # forcing the same green framing onto a bad-news number.
+    is_warning = leakage_hr > 0
+    if is_warning:
+        sentence = f"You've committed <b>{fmt(leakage_hr)}/hr</b> more than is currently eligible — worth reviewing this plan."
     elif recommended_hr <= 0.001:
-        headline = ":green[You're already well covered] — no additional commitment recommended right now."
+        sentence = "<b>You're already well covered</b> — no additional commitment recommended right now."
     elif has_real_pricing:
-        headline = (
-            f"Committing **{_md(fmt(recommended_hr))}/hr** more would save about "
-            f":green[**{_md(fmt(est_monthly_savings, 2))}/month**] at the {TERM_LABELS[term_key]} rate."
+        sentence = (
+            f"Committing <b>{fmt(recommended_hr)}/hr</b> more would save about "
+            f"<b>{fmt(est_monthly_savings, 2)}/month</b> at the {TERM_LABELS[term_key]} rate."
         )
     else:
-        headline = f"We recommend committing **{_md(fmt(recommended_hr))}/hr** more, based on your safety buffer setting."
-    st.markdown(f"#### {headline}")
+        sentence = f"We recommend committing <b>{fmt(recommended_hr)}/hr</b> more, based on your safety buffer setting."
+    st.markdown(
+        f'<div class="rec-headline-card{" warn" if is_warning else ""}">'
+        f'<div class="rec-headline-eyebrow">{html.escape(pool_label)} Savings Plan</div>'
+        f'<div class="rec-headline-sentence">{sentence}</div>'
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
     if len(available_terms) > 1:
         st.segmented_control(
@@ -2213,6 +2223,15 @@ def _render_sp_pool_economics(pool_label: str, pool_df: pd.DataFrame, existing_c
     # rate (cmp_df, same source the headline's own savings figure uses),
     # times the real hours in that term (MONTH_HOURS x 12 or x 36).
     if has_real_pricing and recommended_hr > 0.001:
+        # fmt() prefixes USD values with a literal "$" - st.markdown/
+        # st.caption treat a PAIRED "$...$" as LaTeX math (confirmed real,
+        # 2026-08-28). _md() escapes "$" to "\$" so it renders as a literal
+        # currency symbol instead - still needed HERE (unlike the headline
+        # above, which moved to raw HTML and dropped this same escape,
+        # since HTML has no such trigger) because this caption below is
+        # still plain st.caption markdown text.
+        def _md(x: str) -> str:
+            return x.replace("$", "\\$")
         term_cost_parts = []
         for t in available_terms:
             row = cmp_df[cmp_df["term_key"] == t].iloc[0]
@@ -2342,51 +2361,65 @@ def _render_savings_plan_tab():
     _finops_tag("Optimize Usage & Cost", "Rate Optimization")
 
     with st.expander(f"{selected_provider} Savings Plan Coverage Policy", icon=":material/checklist:", expanded=False):
+        # Trimmed across every field, 2026-08-30 (real feedback: "too much
+        # information... no one will read long paragraphs"). Kept every
+        # real fact (which services, why a gap exists) - cut restated
+        # qualifiers, parenthetical justifications, and any explanation
+        # that duplicates what the Tracked/Not Tracked fields below
+        # already say (AWS's old "Not Covered" text used to re-explain
+        # the SAME ephemeral-job reasoning those fields now own).
         if is_azure:
             sp_coverage_rows = [
                 {
                     "Savings Plan Type": "Savings Plan for Compute (1-yr / 3-yr)",
-                    "What Is Covered": "Azure Virtual Machines, App Service, Functions Premium, Container Instances (ACI), Dedicated Host, Container Apps, Spring Apps",
+                    "What Is Covered": "VMs, App Service, Functions Premium, Container Instances (ACI), Dedicated Host, Container Apps, Spring Apps",
                     "What Is NOT Covered": "Software licenses (Windows/SQL), networking bandwidth, OS/Data disks, non-compute services"
                 },
                 {
                     "Savings Plan Type": "Savings Plan for Databases (1-yr ONLY)",
-                    "What Is Covered": "Azure SQL Database, SQL Elastic Pool, SQL Managed Instance, Database for PostgreSQL, Database for MySQL, Cosmos DB provisioned throughput, Database Migration Service, Azure DocumentDB",
-                    "What Is NOT Covered": "Software licenses (AHB), database backup storage, networking, 3-year term (1-yr only per Azure policy)"
+                    "What Is Covered": "SQL Database, SQL Elastic Pool, SQL Managed Instance, PostgreSQL, MySQL, Cosmos DB (provisioned throughput), DMS, DocumentDB",
+                    "What Is NOT Covered": "Software licenses (AHB), backup storage, networking, 3-year term (1-yr only)"
                 }
             ]
         else:
-            # "This App Tracks" is deliberately a SEPARATE column from "What
-            # Is Covered" (AWS's real product eligibility) - added 2026-08-23
-            # after a full service-by-service feasibility pass this session.
-            # AWS eligibility and this app's ability to build a per-resource
-            # baseline for it are two different questions; conflating them
-            # into one cell had made it unclear which gaps were "AWS doesn't
-            # offer this" vs "AWS offers it but this app can't observe it."
+            # "Tracked"/"Not Tracked" are deliberately separate from "What
+            # Is Covered" (AWS's real product eligibility) - added
+            # 2026-08-23 after a full service-by-service feasibility pass.
+            # AWS eligibility and this app's ability to build a
+            # per-resource baseline for it are two different questions;
+            # conflating them had made it unclear which gaps were "AWS
+            # doesn't offer this" vs "AWS offers it but this app can't
+            # observe it." Split into their own two lines (was one merged
+            # sentence) 2026-08-30 - real feedback that the icons buried
+            # mid-sentence read as "a mess." "Not Tracked" is omitted
+            # entirely for a plan type with no real gap.
             sp_coverage_rows = [
                 {
                     "Savings Plan Type": "Compute Savings Plans (1-yr / 3-yr)",
-                    "What Is Covered": "Amazon EC2, AWS Fargate, and AWS Lambda usage across any region, instance family, OS, or tenancy (up to 66% discount)",
-                    "What Is NOT Covered": "EBS storage volumes, data transfer/bandwidth, software licensing surcharges, non-compute services",
-                    "This App Tracks": "EC2, Fargate ✅. Lambda ❌ NOT tracked - classic Lambda has no persistent running/stopped resource to enumerate (pure per-invocation billing); Lambda Managed Instances is real and RI/SP-eligible but AWS exposes only pool-level CloudWatch aggregates, never per-instance-type counts.",
+                    "What Is Covered": "EC2, Fargate, Lambda - any region/family/OS/tenancy, up to 66% off",
+                    "What Is NOT Covered": "EBS volumes, data transfer, licensing surcharges, non-compute services",
+                    "Tracked": "EC2, Fargate.",
+                    "Not Tracked": "Lambda - no per-instance data (per-invocation billing; AWS exposes only pool-level metrics).",
                 },
                 {
                     "Savings Plan Type": "EC2 Instance Savings Plans (1-yr / 3-yr)",
-                    "What Is Covered": "EC2 instance usage within a specific family in a designated Region (e.g., m5 in us-east-1, up to 72% discount)",
-                    "What Is NOT Covered": "Amazon RDS databases, ElastiCache, Redshift, S3 storage, or instances outside the specified family/region",
-                    "This App Tracks": "EC2 ✅ - same inventory as Compute Savings Plans above (no separate resource type needed).",
+                    "What Is Covered": "EC2 within one family/region (e.g. m5 in us-east-1), up to 72% off",
+                    "What Is NOT Covered": "RDS, ElastiCache, Redshift, S3, or instances outside the specified family/region",
+                    "Tracked": "EC2 - same inventory as Compute Savings Plans above.",
                 },
                 {
                     "Savings Plan Type": "Database Savings Plans (1-yr ONLY)",
-                    "What Is Covered": "Aurora, RDS, DynamoDB, ElastiCache for Valkey ONLY (not Redis or Memcached - confirmed via the actual Database Savings Plans pricing table), DocumentDB (+ Serverless), Timestream, Neptune (+ Serverless + Analytics), Keyspaces, DMS (+ Serverless), and Amazon OpenSearch Service - up to 35% off",
-                    "What Is NOT Covered": "Amazon Redshift, Amazon MemoryDB, ElastiCache for Redis/Memcached (Reserved Instance-eligible only, not Database SP), EC2/Fargate/Lambda compute, 3-year term (1-yr only per AWS policy - same restriction Azure's Savings Plan for Databases has)",
-                    "This App Tracks": "Aurora, RDS, DynamoDB (provisioned-capacity tables only), ElastiCache for Valkey, DocumentDB + Serverless, Neptune + Serverless + Analytics, Keyspaces, DMS + Serverless, OpenSearch - all ✅. Timestream ❌ NOT tracked - fully usage-based per byte ingested/stored/scanned, no instance class or capacity-unit concept to represent as an inventory resource at all.",
+                    "What Is Covered": "Aurora, RDS, DynamoDB, ElastiCache for Valkey (not Redis/Memcached), DocumentDB, Timestream, Neptune, Keyspaces, DMS, OpenSearch - up to 35% off",
+                    "What Is NOT Covered": "Redshift, MemoryDB, ElastiCache for Redis/Memcached (RI-eligible only), EC2/Fargate/Lambda, 3-year term (1-yr only)",
+                    "Tracked": "Aurora, RDS, DynamoDB (provisioned-capacity only), ElastiCache for Valkey, DocumentDB, Neptune, Keyspaces, DMS, OpenSearch.",
+                    "Not Tracked": "Timestream - fully usage-based, no instance/capacity concept to track.",
                 },
                 {
                     "Savings Plan Type": "SageMaker AI Savings Plans (1-yr / 3-yr)",
-                    "What Is Covered": "Amazon SageMaker AI instance usage regardless of instance family, size, Region, or component (Notebook, Training, Inference, etc.) - up to 64% discount",
-                    "What Is NOT Covered": "EC2/Fargate/Lambda/database compute. Baseline below (Pool C) only covers Real-Time Inference Endpoints and Notebook Instances - Training/Processing/Data Wrangler/Batch Transform are one-shot ephemeral jobs with no persistent running/stopped identity, so they aren't modeled as inventory at all (same reasoning already applied to Lambda invocations).",
-                    "This App Tracks": "Real-Time Inference Endpoints, Notebook Instances ✅. Training/Processing/Data Wrangler/Batch Transform ❌ NOT tracked - ephemeral one-shot jobs, no persistent running/stopped identity to enumerate.",
+                    "What Is Covered": "SageMaker AI usage - any family/size/region/component, up to 64% off",
+                    "What Is NOT Covered": "EC2/Fargate/Lambda/database compute.",
+                    "Tracked": "Real-Time Inference Endpoints, Notebook Instances.",
+                    "Not Tracked": "Training/Processing/Data Wrangler/Batch Transform - ephemeral jobs, nothing persistent to track.",
                 },
             ]
         # Cards, not a dataframe - real bug caught live, 2026-08-28: these
@@ -2396,19 +2429,96 @@ def _render_savings_plan_tab():
         # never going to show this content in full, only trade off which
         # part got cut. Real st.markdown text wraps naturally, so cards
         # fully solve it rather than just widening columns.
-        for row in sp_coverage_rows:
-            with st.container(border=True):
-                st.markdown(f"**{row['Savings Plan Type']}**")
-                st.markdown(f":material/check_circle: **Covered:** {row['What Is Covered']}")
-                st.markdown(f":material/block: **Not covered:** {row['What Is NOT Covered']}")
-                if "This App Tracks" in row:
-                    st.markdown(f":material/info: **This app tracks:** {row['This App Tracks']}")
+        #
+        # Tabs instead of stacked cards, 2026-08-30 - real feedback (AWS's
+        # own 4 cards, each with a 3rd "This App Tracks" bullet, was "too
+        # much to scan at once" once the expander opened). Same fix this
+        # exact file already used for the pool flows below (2026-08-28:
+        # "stacking full 4-part flows for every pool... was too much
+        # information", fixed with sub-tabs, one pool visible at a time) -
+        # same problem shape, same fix. Applied to BOTH providers, not
+        # just AWS's original 4-card case - real follow-up feedback:
+        # wants the same UI on both clouds wherever possible, rather than
+        # Azure's 2 shorter cards getting a different treatment just
+        # because they'd have fit on screen at once too.
+        def _render_sp_coverage_card(row):
+            st.markdown(f"**{row['Savings Plan Type']}**")
+            st.markdown(f":material/check_circle: **Covered:** {row['What Is Covered']}")
+            st.markdown(f":material/block: **Not covered:** {row['What Is NOT Covered']}")
+            if "Tracked" in row:
+                st.markdown(f":material/visibility: **Tracked:** {row['Tracked']}")
+            if "Not Tracked" in row:
+                st.markdown(f":material/visibility_off: **Not tracked:** {row['Not Tracked']}")
 
-    safety_buffer_pct_local = st.slider(
+        # Short tab labels - the "(1-yr / 3-yr)" term suffix is already
+        # shown inside the card itself (row["Savings Plan Type"]'s full
+        # string), so the tab only needs the plan name.
+        coverage_tab_labels = [row["Savings Plan Type"].split(" (")[0] for row in sp_coverage_rows]
+        coverage_tabs = st.tabs(coverage_tab_labels)
+        for tab, row in zip(coverage_tabs, sp_coverage_rows):
+            with tab:
+                _render_sp_coverage_card(row)
+
+    # Preset pills above the slider, 2026-08-30 (real feedback - asked for
+    # an alternative to a bare slider). Reuses Rightsizing's own
+    # Conservative/Balanced/Aggressive vocabulary for consistency, and the
+    # same preset-drives-widget on_change pattern that tab already uses -
+    # not a new interaction model, the same one already proven in this app.
+    # "Balanced" = 80%, deliberately matching DEFAULT_SAFETY_BUFFER exactly
+    # (analysis/engine.py) - confirmed via direct math (recommended_hr =
+    # remaining_hr * safety_buffer_frac: a HIGHER % commits more of the
+    # uncommitted baseline, leaving LESS headroom, so higher = more
+    # aggressive, lower = more conservative) that using a different number
+    # for "Balanced" than the app's real existing default would either
+    # contradict the existing "conservative buffer" framing or silently
+    # change behavior for anyone who never touches this control.
+    _SP_BUFFER_PRESETS = {"Conservative": 60, "Balanced": 80, "Aggressive": 95}
+
+    def _apply_sp_buffer_preset():
+        choice = st.session_state["sp_safety_buffer_preset"]
+        if choice != "Custom":
+            st.session_state["sp_safety_buffer_widget"] = _SP_BUFFER_PRESETS[choice]
+
+    def _sp_buffer_slider_changed():
+        # Only fires on a genuine user drag (Streamlit on_change callbacks
+        # don't fire when a DIFFERENT callback sets this same session_state
+        # key programmatically) - so a preset click never spuriously flips
+        # itself back to "Custom" here.
+        current = st.session_state["sp_safety_buffer_widget"]
+        st.session_state["sp_safety_buffer_preset"] = next(
+            (name for name, pct in _SP_BUFFER_PRESETS.items() if pct == current), "Custom"
+        )
+
+    if "sp_safety_buffer_widget" not in st.session_state:
+        st.session_state["sp_safety_buffer_widget"] = int(DEFAULT_SAFETY_BUFFER * 100)
+    if "sp_safety_buffer_preset" not in st.session_state:
+        _current_buffer = st.session_state["sp_safety_buffer_widget"]
+        st.session_state["sp_safety_buffer_preset"] = next(
+            (name for name, pct in _SP_BUFFER_PRESETS.items() if pct == _current_buffer), "Custom"
+        )
+
+    st.segmented_control(
+        "Safety Buffer preset", options=list(_SP_BUFFER_PRESETS.keys()) + ["Custom"],
+        key="sp_safety_buffer_preset", on_change=_apply_sp_buffer_preset,
+        label_visibility="collapsed",
+        help="Conservative keeps more headroom (commits less of the remaining eligible spend); "
+             "Aggressive commits more, leaving less room for usage drops. Dragging the slider "
+             "below to a non-preset value switches this to Custom.",
+    )
+    st.slider(
         "Safety Buffer % — how much of the steady-state footprint to commit",
         min_value=50, max_value=100,
-        value=st.session_state.get("sp_safety_buffer_widget", int(DEFAULT_SAFETY_BUFFER * 100)),
-        step=5, key="sp_safety_buffer_widget",
+        # No value= here - real error caught live, 2026-08-30: Streamlit
+        # disallows passing BOTH value= and a key whose session_state entry
+        # gets written via the Session State API (_apply_sp_buffer_preset
+        # above does exactly that on a preset click) - "created with a
+        # default value but also had its value set via the Session State
+        # API." The st.session_state initialization above (before this
+        # widget call) already guarantees the key exists on first load,
+        # same pattern Rightsizing's own working presets already use
+        # (pre-populate session_state once, never pass value= on the
+        # widget itself).
+        step=5, key="sp_safety_buffer_widget", on_change=_sp_buffer_slider_changed,
         help="The rest stays on PAYG as headroom, protecting against usage drops. Applies to both pools below.",
     )
     st.divider()
