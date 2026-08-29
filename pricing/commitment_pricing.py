@@ -341,31 +341,43 @@ def _fetch_azure_sp_rates(resource_type: str, sku: str, region: str, os_: str, r
 
 
 def _fetch_azure_ri_rates(resource_type: str, sku: str, region: str, os_: str, redundancy: str = "N/A") -> dict:
-    """Returns {"1yr": float|None, "3yr": float|None, "confirmed_empty": bool},
-    normalized to $/hr: total-term price / (term_months * 730), multiplied
-    first by plan.reservation_multiplier for services priced per-unit
-    rather than per-instance (e.g. SQL Database/MI are priced per vCore,
-    not per database - see pricing/sku_mapping.py). COMPUTE COST ONLY - see
+    """Returns {"1yr": float|None, "3yr": float|None,
+    "1yr_confirmed_empty": bool, "3yr_confirmed_empty": bool}, normalized
+    to $/hr: total-term price / (term_months * 730), multiplied first by
+    plan.reservation_multiplier for services priced per-unit rather than
+    per-instance (e.g. SQL Database/MI are priced per vCore, not per
+    database - see pricing/sku_mapping.py). COMPUTE COST ONLY - see
     _fetch_azure_sp_rates / _compute_only_items for why OS license is
     excluded rather than added back as a surcharge. redundancy selects the
     matching meter the same way as the Consumption side - see
     _filter_by_redundancy.
 
-    "confirmed_empty" (2026-08-30) - a REAL, durable "this exact SKU has no
-    Reservation offering in this exact region" fact, distinct from every
-    other reason this function can return no rates (unsupported plan,
-    missing sku/region, a transient API exception - all genuinely "we
-    don't know", not "we know it's unavailable"). Added after a real,
-    live-confirmed case: analysis/ri_eligibility.py's static per-family
-    guesswork had both NP-series and HC-series VMs hardcoded as globally
-    ineligible, when they're actually real, purchasable Reservation
-    products - just region-restricted to where that specialized hardware
-    is deployed (NP: US West 2; HC: CA Central, UK South). A static list
-    checked against one region can't see that; a live per-region result
-    can. True ONLY in the one branch below where the query genuinely
-    executed and came back with zero matching Reservation items - every
-    other early return leaves this False (unknown, not confirmed)."""
-    result = {"1yr": None, "3yr": None, "confirmed_empty": False}
+    "{term}_confirmed_empty" (2026-08-30, made PER-TERM after a second
+    real bug this same mechanism initially missed) - a REAL, durable "this
+    exact SKU has no Reservation offering for this exact term, in this
+    exact region" fact, distinct from every other reason this function can
+    return no rate (unsupported plan, missing sku/region, a transient API
+    exception, an OS-filtered-to-nothing result - all genuinely "we don't
+    know", not "we know it's unavailable"). Originally a single flag
+    covering "ri_items came back completely empty" (added after NP-series/
+    HC-series VMs were found hardcoded ineligible when they're real,
+    region-restricted products - see analysis/ri_eligibility.py). That
+    version had its own real gap, caught live: Premium SSD P30 Disk
+    Reservations genuinely exist and are real for 1-Year, but Azure
+    NEVER sells a 3-Year option for them at all (confirmed live: all 48
+    real catalog entries across every region say reservationTerm="1
+    Year", zero say "3 Years") - since ri_items was non-empty (1-Year
+    items ARE real), the old whole-query "confirmed_empty" never fired,
+    so the missing 3-Year term was silently indistinguishable from "not
+    fetched yet," which fed a real, silent undercount into every $
+    total downstream (analysis/commitment_economics.py::ri_gap_pricing()
+    couldn't tell "genuinely 1-Year-only" from "missing data" and had to
+    conservatively treat it as the latter). Fixed by checking emptiness
+    PER TERM, not just for the whole query: True only when ri_os_matched
+    is confirmed non-empty overall (so a wrong OS/redundancy filter isn't
+    mistaken for a missing term) but that SPECIFIC term's label has zero
+    matches among real, present items."""
+    result = {"1yr": None, "3yr": None, "1yr_confirmed_empty": False, "3yr_confirmed_empty": False}
     if not sku or sku == "N/A" or not region:
         return result
 
@@ -390,10 +402,17 @@ def _fetch_azure_ri_rates(resource_type: str, sku: str, region: str, os_: str, r
     ri_items = _exclude_noise_meters(ri_items)
     ri_items = _filter_by_redundancy(ri_items, redundancy)
     if not ri_items:
-        result["confirmed_empty"] = True
+        result["1yr_confirmed_empty"] = True
+        result["3yr_confirmed_empty"] = True
         return result
 
     ri_os_matched = _compute_only_items(ri_items, plan, os_)
+    if not ri_os_matched:
+        # Real Reservation items exist for this SKU+region, but none
+        # survive OS/compute-only filtering - more likely "wrong OS
+        # variant queried" than "this term doesn't exist", so this stays
+        # unknown for BOTH terms rather than guessing which one to blame.
+        return result
 
     for term_key, months in _TERM_MONTHS.items():
         label = _AZURE_TERM_LABELS[term_key]
@@ -402,6 +421,8 @@ def _fetch_azure_ri_rates(resource_type: str, sku: str, region: str, os_: str, r
             unit_price = min(float(c["retailPrice"]) for c in matches)
             total_price = unit_price * plan.reservation_multiplier
             result[term_key] = total_price / (months * MONTH_HOURS)
+        else:
+            result[f"{term_key}_confirmed_empty"] = True
     return result
 
 
@@ -564,9 +585,13 @@ def refresh_commitment_prices(engine, resource_rows: list[dict], provider: str =
                 _upsert(session, cached, provider, "SavingsPlan", resource_type, region, sku, os_, redundancy, "3yr", sp_rates.get("3yr"), sp_rates.get("payg"), now_iso)
             if ri_rates:
                 payg_for_ri = (sp_rates or {}).get("payg")
-                ri_confirmed_empty = ri_rates.get("confirmed_empty", False)
-                _upsert(session, cached, provider, "ReservedInstance", resource_type, region, sku, os_, redundancy, "1yr", ri_rates.get("1yr"), payg_for_ri, now_iso, confirmed_empty=ri_confirmed_empty)
-                _upsert(session, cached, provider, "ReservedInstance", resource_type, region, sku, os_, redundancy, "3yr", ri_rates.get("3yr"), payg_for_ri, now_iso, confirmed_empty=ri_confirmed_empty)
+                # Per-term now (2026-08-30) - a single shared flag for both
+                # terms silently missed Disk Storage's real "1-Year only,
+                # no 3-Year exists at all" case (see _fetch_azure_ri_rates'
+                # own docstring). AWS's ri_fetch never sets these keys, so
+                # .get(..., False) safely preserves its existing behavior.
+                _upsert(session, cached, provider, "ReservedInstance", resource_type, region, sku, os_, redundancy, "1yr", ri_rates.get("1yr"), payg_for_ri, now_iso, confirmed_empty=ri_rates.get("1yr_confirmed_empty", False))
+                _upsert(session, cached, provider, "ReservedInstance", resource_type, region, sku, os_, redundancy, "3yr", ri_rates.get("3yr"), payg_for_ri, now_iso, confirmed_empty=ri_rates.get("3yr_confirmed_empty", False))
 
         session.commit()
 

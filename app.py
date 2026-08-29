@@ -163,6 +163,7 @@ from analysis.focus_mapping import to_focus_view, map_service_category, FOCUS_CO
 from analysis.maturity import run_maturity_assessment
 from analysis.commitment_economics import (
     savings_plan_term_comparison, aws_savings_plan_term_comparison, ri_gap_pricing, combined_monthly_savings, TERM_LABELS,
+    term_row_exists,
 )
 from db.tenants import (
     list_tenants, get_active_tenant, get_tenant_credentials, upsert_tenant,
@@ -2844,8 +2845,8 @@ def _render_ri_coverage_tab():
     savings_col = f"Monthly Savings if Purchased ({ri_term_choice})"
     has_pricing_cols = rate_col in instance_cov.columns
 
-    # One consistent, fully-priced resource set for EVERY dollar figure on
-    # this card (headline savings AND the Total commitment line below) -
+    # One consistent, fully-RESOLVED resource set for EVERY dollar figure
+    # on this card (headline savings AND the Total commitment line below) -
     # real bug caught live, 2026-08-30: computing the headline's savings
     # from "priced for the currently-selected term" and the Total
     # commitment line from "priced for every term" silently drew on
@@ -2858,9 +2859,30 @@ def _render_ri_coverage_tab():
     # to remind" for what should be a glance) - the $ figures just quietly
     # reflect whatever's actually priced, same "can't determine, don't
     # guess" approach this app already uses everywhere else.
+    #
+    # "Resolved", not just "has a real rate for every term" (2026-08-30,
+    # a second real bug this same fix introduced) - Premium SSD P30 Disk
+    # Reservations genuinely have NO 3-Year option at all (confirmed live,
+    # not a data gap), so requiring a real rate for BOTH terms silently
+    # dropped its real, known 1-Year savings from every $ total on this
+    # card too. ri_gap_pricing() itself now applies this same "resolved"
+    # standard when it nulls Monthly Savings (see its own comment) - this
+    # mirrors that exact logic for the Total Commitment line's RATE-based
+    # totals below, which read rate_col directly rather than the
+    # already-correctly-nulled savings_col.
     gap_rows = instance_cov[instance_cov["gap"] > 0]
-    term_rate_cols = [f"RI Rate {label} ($/hr)" for label in TERM_LABELS.values() if f"RI Rate {label} ($/hr)" in gap_rows.columns]
-    fully_priced = gap_rows.dropna(subset=term_rate_cols) if term_rate_cols else gap_rows.iloc[0:0]
+
+    def _gap_row_resolved(row) -> bool:
+        for label in TERM_LABELS.values():
+            rc = f"RI Rate {label} ($/hr)"
+            if rc not in gap_rows.columns or pd.notna(row[rc]):
+                continue
+            redundancy = row.get("Redundancy", "N/A") or "N/A"
+            if not term_row_exists(prices_df, "1yr" if label == "1-Year" else "3yr", row.get("Resource Type"), row.get("Region"), row.get("SKU"), row.get("OS"), redundancy):
+                return False
+        return True
+
+    fully_priced = gap_rows[gap_rows.apply(_gap_row_resolved, axis=1)] if not gap_rows.empty else gap_rows
 
     # ── Headline: one answer, cards for the rest ─────────────────────────
     # Visual-only refresh, 2026-08-30 (real feedback: match Recommendations/

@@ -61,6 +61,31 @@ def _lookup_rate(prices_df: pd.DataFrame, instrument: str, term: str, resource_t
     return float(m.iloc[0]["effective_hourly_rate_usd"])
 
 
+def term_row_exists(prices_df: pd.DataFrame, term: str, resource_type: str, region: str, sku: str, os_: str, redundancy: str = "N/A") -> bool:
+    """True if a CommitmentPriceCache row exists for this exact
+    (resource_type, region, sku, os, redundancy, term) - regardless of
+    whether its rate is a real number or null. A null-rate row existing
+    means pricing/commitment_pricing.py's live fetch genuinely confirmed
+    this term has no Reservation offering (a real, durable fact); NO row
+    at all means genuinely unknown. Used by ri_gap_pricing() to tell
+    "this product simply doesn't have a 3-Year option" (Disk Storage's
+    real case) apart from "3-Year just hasn't been priced yet" (the
+    original MySQL case) - only the second should suppress a row's other,
+    real term prices."""
+    if prices_df is None or prices_df.empty:
+        return False
+    m = prices_df[
+        (prices_df["instrument"] == "ReservedInstance") &
+        (prices_df["term"] == term) &
+        (prices_df["resource_type"] == resource_type) &
+        (prices_df["region"] == region) &
+        (prices_df["sku"] == sku) &
+        (prices_df["os"] == os_) &
+        (prices_df["redundancy"] == (redundancy or "N/A"))
+    ]
+    return not m.empty
+
+
 def check_live_ri_availability(prices_df: pd.DataFrame, resource_type: str, region: str, sku: str, os_: str, redundancy: str = "N/A"):
     """Real, per-region RI eligibility signal from the live-synced pricing
     cache, added 2026-08-30 alongside pricing/commitment_pricing.py's new
@@ -296,19 +321,44 @@ def ri_gap_pricing(coverage_table: pd.DataFrame, inv_raw: pd.DataFrame, prices_d
     # Coverage rendering code instead of here, the one shared function
     # every consumer actually reads from.
     #
-    # Fixed at the SOURCE, not per-caller: a row must have a real rate for
+    # Fixed at the SOURCE, not per-caller: a row must be RESOLVED for
     # EVERY term in TERMS to keep ANY term's savings figure - one row
-    # missing pricing for even one term has its savings nulled out for
-    # ALL terms, not just the missing one. This makes "priced" mean the
-    # exact same population everywhere this function's output is
-    # consumed, so RI Coverage's headline, its Total Commitment line, and
-    # Recommendations' combined total can never drift apart again just
-    # because one caller remembered a restriction another didn't.
+    # genuinely missing pricing DATA for even one term has its savings
+    # nulled out for ALL terms, not just the missing one. This makes
+    # "priced" mean the exact same population everywhere this function's
+    # output is consumed, so RI Coverage's headline, its Total Commitment
+    # line, and Recommendations' combined total can never drift apart
+    # again just because one caller remembered a restriction another
+    # didn't.
+    #
+    # "Resolved" (2026-08-30), not just "has a real rate" - a second real
+    # bug this same consistency fix introduced, caught live: Premium SSD
+    # P30 Disk Reservations genuinely have NO 3-Year option at all
+    # (confirmed live against the real API - not a data gap), so the
+    # original "must have a real rate for every term" version of this
+    # check wrongly nulled its real, known 1-Year savings too, on the
+    # theory that a missing term meant incomplete data. A term counts as
+    # resolved if it has a real rate OR pricing/commitment_pricing.py's
+    # live fetch already confirmed no offering exists for it (a row
+    # exists in prices_df with a null rate) - only a term with NO row at
+    # all (genuinely never checked) still suppresses the row's other,
+    # real prices.
     term_rate_cols = [f"RI Rate {TERM_LABELS[t]} ($/hr)" for t in TERMS]
     term_savings_cols = [f"Monthly Savings if Purchased ({TERM_LABELS[t]})" for t in TERMS]
-    _missing_some_term = out[term_rate_cols].isna().any(axis=1)
+
+    def _row_fully_resolved(row) -> bool:
+        for t in TERMS:
+            rate_col = f"RI Rate {TERM_LABELS[t]} ($/hr)"
+            if pd.notna(row[rate_col]):
+                continue
+            redundancy = row.get("Redundancy", "N/A") or "N/A"
+            if not term_row_exists(prices_df, t, row.get("Resource Type"), row.get("Region"), row.get("SKU"), row.get("OS"), redundancy):
+                return False
+        return True
+
+    _all_terms_resolved = out.apply(_row_fully_resolved, axis=1)
     for savings_col in term_savings_cols:
-        out.loc[_missing_some_term, savings_col] = None
+        out.loc[~_all_terms_resolved, savings_col] = None
 
     return out
 
