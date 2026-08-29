@@ -4,7 +4,7 @@ Enterprise Cloud Cost & Commitment Engine
 
 Left sidebar (Manage): Tenants, User Management.
 Left sidebar (Workspace): Analyze — a single page whose top tabs are
-  Inventory | Savings Plan Analysis | RI Coverage | Cost Analysis |
+  Inventory | Rightsizing | Savings Plan Analysis | RI Coverage |
   Recommendations | Maturity Assessment.
 """
 
@@ -144,7 +144,7 @@ from data.sync_pipeline import run_ingestion_pipeline
 from pricing.retail_pricing import usd, fmt_currency, get_inr_rate
 from pricing.commitment_pricing import get_commitment_prices, MONTH_HOURS
 from pricing.azure_vm_flexibility import get_vm_flexibility_groups
-from ui.charts import get_cost_distribution_chart, get_waterfall_savings_chart, get_recommendation_opportunity_chart
+from ui.charts import get_recommendation_opportunity_chart
 from commitments.existing_commitments import (
     get_existing_savings_plans,
     get_existing_reservations,
@@ -159,6 +159,7 @@ from analysis.engine import (
     generate_recommendations,
     compute_orphaned_status,
     DEFAULT_SAFETY_BUFFER,
+    DEFAULT_SIMULATE_DAYS,
 )
 from analysis.sp_eligibility import check_sp_eligibility
 from analysis.ri_eligibility import check_eligibility
@@ -1354,14 +1355,19 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
     disp["Status"] = disp["Resource State"]
     # A Stopped (deallocated) resource genuinely isn't accruing compute
     # charges - real gap caught live 2026-08-21: this table was showing
-    # the full running rate for stopped resources regardless of state,
-    # inconsistent with every OTHER cost figure in the app (the KPI
-    # header, Cost Analysis, Recommendations, and the waterfall chart all
-    # already sum only running_vms/running_dbs, filtered to
-    # Resource State == "Running", before computing spend - see line 2068
-    # below). Both columns now zero out for a stopped resource, matching
-    # that same "Running" filter exactly rather than introducing a
-    # different rule just for this table.
+    # the full running rate for stopped resources regardless of state.
+    # Both columns zero out for a stopped resource here.
+    #
+    # NOTE (2026-08-30): this same gap - summing PAYG Hourly Cost USD with
+    # no Resource State == "Running" filter - was confirmed to ALSO be
+    # present in the Home page's "Total PAYG Rate" KPI (_compute_portfolio_
+    # kpis(), line ~914: inv["PAYG Hourly Cost USD"].sum(), no filter) -
+    # found while investigating a Cost Analysis tab card that had the
+    # identical gap (that card has since been removed entirely, real user
+    # call, rather than fixed - see git history around 2026-08-30 for the
+    # full reasoning). The Home KPI fix was deliberately deferred as its
+    # own follow-up, not bundled into that pass - still open as of this
+    # note.
     def _payg_cell(r):
         if r["Resource State"] != "Running":
             return fmt(0, 4) + " (stopped)"
@@ -1957,12 +1963,16 @@ def _render_inventory_tab():
     _finops_tag("Understand Usage & Cost", "Data Ingestion, Reporting & Analytics")
 
     # The donut chart + Top Spend Categories card that used to live here
-    # moved to the Cost Analysis tab, 2026-08-28 - real feedback + a look at
-    # how mature tools split this (Azure Portal's "All resources", AWS's
-    # own inventory views, CloudHealth/Cloudability): an asset inventory is
-    # a registry ("what do I have" - list, filter, search), spend-
-    # distribution charts belong in a dedicated cost view ("what does it
-    # cost and how is it distributed"). See _render_cost_analysis_tab().
+    # moved to a dedicated Cost Analysis tab on 2026-08-28 (an asset
+    # inventory is a registry - "what do I have" - list/filter/search;
+    # spend-distribution belongs in a dedicated cost view). That tab was
+    # removed entirely on 2026-08-30 - real user question about what the
+    # numbers actually meant surfaced that the card's $ figures were both
+    # undiscounted on-demand list price (ignored any RI/SP coverage) and
+    # didn't filter to Resource State == "Running" (a stopped resource's
+    # full rate still counted), and a not-fully-accurate composition view
+    # wasn't judged worth keeping even fixed. This tab stays a pure
+    # registry, no forward pointer to replace it with.
 
     # Single unified table with a Resource Type filter, not a per-type tab
     # strip (2026-08-23, direct feedback: 24+ tabs were "very hard to
@@ -2947,111 +2957,6 @@ def _render_ri_coverage_tab():
             st.info("No active Reserved Instance contracts found.")
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# ANALYZE — COST ANALYSIS (new)
-# ═══════════════════════════════════════════════════════════════════════════════
-def _render_cost_analysis_tab():
-    st.subheader(f"{selected_provider} Cost Analysis")
-    st.caption("Spend distribution by category, current baseline, and commitment coverage - see the Recommendations tab for the combined savings projection.")
-    _finops_tag("Optimize Usage & Cost", "Rate Optimization")
-
-    # Donut + Top Spend Categories card, moved here from the Inventory tab
-    # 2026-08-28 - real feedback + how mature tools split this (Azure
-    # Portal's "All resources", AWS's own inventory views, CloudHealth/
-    # Cloudability): an asset inventory is a registry ("what do I have"),
-    # spend-distribution charts belong in a dedicated cost view ("what does
-    # it cost and how is it distributed") - this tab's actual job. Doesn't
-    # duplicate the waterfall below it: this shows spend BY CATEGORY
-    # (composition lens), the waterfall shows spend BY COMMITMENT COVERAGE
-    # (optimization lens) - two different, complementary questions about
-    # cost, not the same one twice. Leads with composition, then coverage -
-    # overview before drilling into optimization.
-    if not inv_raw.empty:
-        c_chart, c_meta = st.columns([1.5, 1])
-        with c_chart:
-            fig_donut = get_cost_distribution_chart(inv_raw, selected_provider, is_dark=is_dark_theme)
-            # use_container_width is deprecated (confirmed via this
-            # Streamlit build's own st.plotly_chart docstring) and sets the
-            # figure's width via a static one-time value rather than the
-            # native CSS stretch width="stretch" (already the real default)
-            # uses - real bug this caused, 2026-08-28: the chart needed a
-            # full page reload to pick up a new container width after
-            # dragging the browser to a different monitor, instead of
-            # resizing live like everything else on the page.
-            st.plotly_chart(fig_donut, width="stretch")
-        with c_meta:
-            # Approved via a quick HTML mockup first (Artifact) before
-            # porting. This card is the donut chart's own numeric reading
-            # companion - top spend categories by real $ and %, using the
-            # EXACT same PAYG-Hourly-Cost x 730 formula ui/charts.py's
-            # get_cost_distribution_chart already uses to build the chart,
-            # so this card's total always agrees with what the chart shows.
-            # Card shell reuses .fl-previewcard (ui/styling.py, same look
-            # as the login page's teaser card); the category-list layout is
-            # its own .topspend-* namespace. One raw-HTML block, not split
-            # across markdown calls - no cross-call unclosed-tag risk.
-            _cat_spend = (inv_raw.groupby("Resource Type")["PAYG Hourly Cost USD"].sum() * 730).sort_values(ascending=False)
-            _cat_total = float(_cat_spend.sum())
-            _top_n = 4
-            _top_cats = _cat_spend.head(_top_n)
-            _rest_sum = float(_cat_spend.iloc[_top_n:].sum())
-            _rest_count = max(0, len(_cat_spend) - _top_n)
-            _rank_colors = ["#60A5FA", "#34D399", "#A78BFA", "#FBBF24"]
-
-            cat_rows_html = ""
-            for i, (cat_name, cat_val) in enumerate(_top_cats.items()):
-                cat_pct = (float(cat_val) / _cat_total * 100) if _cat_total > 0 else 0.0
-                color = _rank_colors[i % len(_rank_colors)]
-                cat_rows_html += (
-                    '<div><div class="topspend-row">'
-                    f'<span class="topspend-rank">{i + 1}</span>'
-                    f'<span class="topspend-dot" style="background:{color};"></span>'
-                    f'<span class="topspend-label" title="{html.escape(str(cat_name))}">{html.escape(str(cat_name))}</span>'
-                    f'<span class="topspend-pct">{cat_pct:.1f}%</span>'
-                    f'<span class="topspend-value fl-mono">{fmt(cat_val, 0)}</span>'
-                    "</div>"
-                    f'<div class="topspend-bartrack"><div class="topspend-barfill" style="width:{cat_pct:.0f}%;background:{color};"></div></div>'
-                    "</div>"
-                )
-            rest_row_html = ""
-            if _rest_count > 0:
-                rest_pct = (_rest_sum / _cat_total * 100) if _cat_total > 0 else 0.0
-                rest_row_html = (
-                    '<div class="topspend-restrow">'
-                    f'<span>+ {_rest_count} more categor{"y" if _rest_count == 1 else "ies"}</span>'
-                    f'<span class="fl-mono">{fmt(_rest_sum, 0)} ({rest_pct:.1f}%)</span>'
-                    "</div>"
-                )
-
-            st.markdown(
-                '<div class="fl-previewcard">'
-                '<div class="topspend-title">Top Spend Categories</div>'
-                f'<div class="topspend-total fl-mono">{fmt(_cat_total, 0)}<span class="unit">/mo across {len(_cat_spend)} categories</span></div>'
-                '<div class="topspend-sub">Reading the chart\'s biggest slices as real numbers</div>'
-                f'<div class="topspend-list">{cat_rows_html}</div>'
-                f'{rest_row_html}'
-                "</div>",
-                unsafe_allow_html=True,
-            )
-
-    st.divider()
-
-    st.segmented_control(
-        "Analysis Window (days)", options=[7, 14, 30],
-        default=st.session_state.get("analysis_window_widget", 30),
-        key="analysis_window_widget",
-        help="Historical daily evaluation period feeding the leakage / orphaned-capacity calculations used across this app. Changing this re-runs the simulation on the next interaction.",
-    )
-
-    if not inv_raw.empty:
-        fig_waterfall = get_waterfall_savings_chart(total_vm_payg_hr, total_db_payg_hr, total_sp_commit, total_ri_commit, selected_provider, is_dark=is_dark_theme)
-        st.plotly_chart(fig_waterfall, width="stretch")
-    else:
-        st.info("No inventory data to chart yet.")
-
-    st.caption("For the projected savings if open recommendations are implemented, see the **Recommendations** tab.")
-
-
 def _real_projected_savings():
     """The commitment-pricing-based combined SP+RI savings projection - the
     MORE ACCURATE of this app's two savings figures (the other being
@@ -3636,7 +3541,6 @@ def page_analyze():
         f":material/target: {'VM' if is_azure else 'EC2'} Rightsizing",
         ":material/payments: Savings Plan Analysis",
         ":material/local_offer: RI Coverage",
-        ":material/bar_chart: Cost Analysis",
         ":material/lightbulb: Recommendations",
         ":material/explore: Maturity Assessment",
     ])
@@ -3649,10 +3553,8 @@ def page_analyze():
     with tabs[3]:
         _render_ri_coverage_tab()
     with tabs[4]:
-        _render_cost_analysis_tab()
-    with tabs[5]:
         _render_recommendations_tab()
-    with tabs[6]:
+    with tabs[5]:
         _render_maturity_tab()
 
 
@@ -3675,8 +3577,10 @@ pg = st.navigation([home_page, tenant_mgmt_page, users_page, analyze_page], posi
 # ─────────────────────────────────────────────────────────────────────────────
 # SIDEBAR CONTROLS — rendered below the nav menu above. Only cross-cutting
 # controls live here now (platform, data source, currency, account) -
-# Commitment Term / Safety Buffer / Analysis Window moved into the sections
-# that actually use them (Savings Plan Analysis, RI Coverage, Cost Analysis).
+# Commitment Term / Safety Buffer moved into the sections that actually use
+# them (Savings Plan Analysis, RI Coverage). Analysis Window was here too
+# until it was removed entirely, 2026-08-30 - see the note near
+# DEFAULT_SIMULATE_DAYS below.
 # ─────────────────────────────────────────────────────────────────────────────
 with st.sidebar:
     def reset_app_cache():
@@ -3801,10 +3705,17 @@ compute_sp_eligible_types = COMPUTE_SP_ELIGIBLE_TYPES if is_azure else AWS_COMPU
 # already keys everything off is_azure rather than a provider-name check).
 sagemaker_sp_eligible_types = set() if is_azure else AWS_SAGEMAKER_SP_TYPES
 
-# Analysis Window now lives inside the Cost Analysis tab (as a widget keyed
-# "analysis_window_widget") - read its persisted value here, before that
-# widget renders later in the script, same pattern env_mode_widget already uses.
-simulate_days = st.session_state.get("analysis_window_widget", 30)
+# Was a user-facing "Analysis Window (days)" control on the Cost Analysis
+# tab (that whole tab has since been removed too, same day - see
+# page_analyze()'s tab list) - the control itself was pulled first (real
+# user question + investigation): it never read real historical data (no
+# date dimension exists anywhere in this app's schema - CloudInventory is
+# a point-in-time snapshot, overwritten on every sync), and for a real
+# Production tenant the per-resource signal it replayed (Avg Daily Running
+# Hours) is hardcoded to 24 in both live connectors anyway - the control's
+# 7/14/30 choice couldn't actually change what it modeled. Fixed at the
+# engine's own existing default instead of exposing a decorative knob.
+simulate_days = DEFAULT_SIMULATE_DAYS
 # Safety Buffer now lives inside the Savings Plan Analysis tab.
 safety_buffer_pct = st.session_state.get("sp_safety_buffer_widget", int(DEFAULT_SAFETY_BUFFER * 100))
 safety_buffer = safety_buffer_pct / 100.0
@@ -3951,23 +3862,16 @@ else:
     compute_sp_pool_inventory = vm_inventory.copy()
     sagemaker_sp_pool_inventory = vm_inventory.copy()
 
-running_vms      = vm_inventory[vm_inventory["Resource State"] == "Running"] if not vm_inventory.empty else pd.DataFrame()
-running_dbs      = db_inventory[db_inventory["Resource State"] == "Running"] if not db_inventory.empty else pd.DataFrame()
-
-total_vm_payg_hr = float(running_vms["PAYG Hourly Cost USD"].sum()) if not running_vms.empty else 0.0
-total_db_payg_hr = float(running_dbs["PAYG Hourly Cost USD"].sum()) if not running_dbs.empty else 0.0
-
 compute_sp_commit   = float(compute_sp_df["hourly_usd_commitment"].sum())   if not compute_sp_df.empty else 0.0
 db_sp_commit        = float(db_sp_df["hourly_usd_commitment"].sum())        if not db_sp_df.empty else 0.0
 sagemaker_sp_commit = float(sagemaker_sp_df["hourly_usd_commitment"].sum()) if not sagemaker_sp_df.empty else 0.0
-total_sp_commit   = compute_sp_commit + db_sp_commit + sagemaker_sp_commit
-total_ri_commit   = float((ri_df["hourly_usd_commitment"] * ri_df["reserved_qty"]).sum()) if not ri_df.empty else 0.0
 orphaned_count    = int(inv_raw["Is Orphaned"].sum()) if not inv_raw.empty else 0
 high_recs         = sum(1 for r in recs if r["severity"] == "HIGH")
 
 # Steady-state (24x7) SP-eligible pools - computed once, shared by the
-# Savings Plan Analysis and Cost Analysis tabs so both work from the exact
-# same slice instead of recomputing the eligibility split twice.
+# Savings Plan Analysis tab and the Recommendations tab's real-pricing
+# projection (_real_projected_savings()) so both work from the exact same
+# slice instead of recomputing the eligibility split twice.
 compute_24x7_candidates = compute_sp_pool_inventory[
     (compute_sp_pool_inventory["Resource State"] == "Running") &
     (compute_sp_pool_inventory["Avg Daily Running Hours"] == 24)
