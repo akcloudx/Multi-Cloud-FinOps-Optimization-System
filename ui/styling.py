@@ -406,6 +406,23 @@ section[data-testid="stSidebar"] nav span {
 .rec-group-item .dot.hi { background: #F87171; }
 .rec-group-item .dot.med { background: #FBBF24; }
 
+/* Inventory tab's headline strip (2026-08-30) - visual polish only, real
+   feedback to match Recommendations' look. Same gradient-card language as
+   .rec-headline-card, but a horizontal stats row instead of a sentence -
+   this tab's "at a glance" moment is 4 numbers (total spend, resource
+   count, running, stopped), not a single answer to lead with. Approved
+   via mockup first. */
+.inv-headline {
+    background: linear-gradient(160deg, #101A2E 0%, #17213A 130%);
+    border: 1px solid rgba(96,165,250,.25); border-radius: 14px; padding: 18px 22px;
+    display: flex; align-items: center; gap: 28px; flex-wrap: wrap; margin-bottom: 16px;
+}
+.inv-stat { display: flex; flex-direction: column; }
+.inv-stat .n { font-size: 22px; font-weight: 700; }
+.inv-stat .lbl { font-size: 10.5px; color: #526279; text-transform: uppercase; letter-spacing: .04em; margin-top: 2px; }
+.inv-stat.total .n { color: #60A5FA; }
+.inv-divider { width: 1px; height: 34px; background: #1E293B; }
+
 /* Sidebar "Log out" / "Switch mode" pseudo-buttons (ui/auth_page.py) - a
    plain <a href>, not st.link_button, which the installed LinkButton.*.js
    bundle confirms hardcodes target="_blank" with no override (every click

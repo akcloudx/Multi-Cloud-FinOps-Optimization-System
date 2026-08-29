@@ -1363,15 +1363,22 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
     # full reasoning). The Home KPI fix was deliberately deferred as its
     # own follow-up, not bundled into that pass - still open as of this
     # note.
-    def _payg_cell(r):
-        if r["Resource State"] != "Running":
-            return fmt(0, 4) + " (stopped)"
-        if r["PAYG Hourly Cost USD"]:
-            return fmt(r["PAYG Hourly Cost USD"], 4)
+    # Hourly PAYG column dropped entirely, 2026-08-30 (real feedback - not
+    # needed for an inventory view, monthly is the figure that matters
+    # here). It wasn't PURELY a duplicate of the monthly column though: for
+    # a Running resource with no cached price, it was the only place
+    # explaining WHY (free tier, an unpriceable service like Storage sold
+    # in 100TB+ blocks, or a genuine pricing-cache gap - see
+    # _payg_blank_reason's own docstring). That reason now feeds the
+    # monthly column's own blank cells below instead of being dropped -
+    # same information, one column instead of two.
+    def _monthly_blank_reason(r):
+        if r["Resource State"] != "Running" or r["PAYG Hourly Cost USD"]:
+            return ""
         reason = _payg_blank_reason(r["Resource Type"], r["SKU"])
         return (reason[:87] + "...") if len(reason) > 90 else reason
 
-    disp["PAYG Cost/hr"] = disp.apply(_payg_cell, axis=1)
+    disp["_monthly_blank_reason"] = disp.apply(_monthly_blank_reason, axis=1)
     # MONTH_HOURS (730, pricing/commitment_pricing.py) is the same constant
     # RI/Savings Plan annualization already uses - previously this used a
     # flat "* 30" (24hr/day x 30-day month = 720hrs), silently
@@ -1405,6 +1412,32 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
     disp["Est. Monthly PAYG Cost"] = [
         _monthly_numeric(r, x) * _currency_mult for r, x in zip(is_running, est_monthly)
     ]
+
+    # Headline strip - visual polish only, 2026-08-30 (real feedback: match
+    # Recommendations' look). Same gradient-card language (ui/styling.py's
+    # .rec-headline-card family, reused verbatim rather than a near-copy,
+    # so a future palette tweak only has one place to change) as the one
+    # real "at a glance" moment this tab was missing - total spend +
+    # running/stopped counts, computed from the exact same disp/is_running
+    # data the table itself renders, so it can't disagree with what's below
+    # it. Approved via mockup (Artifact) before porting.
+    _running_count = int(is_running.sum())
+    _stopped_count = int(len(disp) - _running_count)
+    _total_mo = float(pd.Series(
+        [_monthly_numeric(r, x) for r, x in zip(is_running, est_monthly)]
+    ).fillna(0.0).sum()) * _currency_mult
+    st.markdown(
+        '<div class="inv-headline">'
+        f'<div class="inv-stat total"><span class="n fl-mono">{fmt(_total_mo, 2)}<span style="font-size:12px;">/mo</span></span><span class="lbl">Est. Total Spend</span></div>'
+        '<div class="inv-divider"></div>'
+        f'<div class="inv-stat"><span class="n fl-mono">{len(disp)}</span><span class="lbl">Resources</span></div>'
+        '<div class="inv-divider"></div>'
+        f'<div class="inv-stat"><span class="n fl-mono" style="color:#34D399;">{_running_count}</span><span class="lbl">Running</span></div>'
+        '<div class="inv-divider"></div>'
+        f'<div class="inv-stat"><span class="n fl-mono" style="color:#526279;">{_stopped_count}</span><span class="lbl">Stopped</span></div>'
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
     # Live mode: show which tenant a subscription ID belongs to, not just the raw GUID.
     if is_live_mode and is_live_configured and active_tenant is not None:
@@ -1508,7 +1541,7 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
 
     all_cols = ["Resource ID", "Resource Name", "Subscription", "Resource Type",
                 "Status", "Region", "Resource Group", "Availability Zone", "OS", "SKU",
-                "Est. Monthly PAYG Cost", "PAYG Cost/hr"]
+                "Est. Monthly PAYG Cost"]
     all_cols = [c for c in all_cols if c in disp.columns]
     # Resource ID hidden by default (toggle back on if needed); of Resource
     # Group/Availability Zone, only the one actually populated for this
@@ -1593,6 +1626,43 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
             build's own JS bundle (index.BvGIeCyC.js). */
             div.st-key-{key_prefix}_filter_bar button[data-testid="stPopoverButton"] {{
                 border-radius: 999px !important; border-color: #263349 !important;
+                transition: border-color 0.15s ease, background-color 0.15s ease, color 0.15s ease;
+            }}
+            div.st-key-{key_prefix}_filter_bar button[data-testid="stPopoverButton"]:hover {{
+                border-color: rgba(96,165,250,.5) !important; color: #60A5FA !important;
+            }}
+            /* Visual-only refresh, 2026-08-30 (real feedback: match
+            Recommendations' look) - distinguishes an ACTION button ("Add
+            filter", still visible even when active_filters is empty) from
+            an APPLIED filter pill (a real, currently-set value), same
+            "action vs. state" distinction Recommendations' pills already
+            make. Scoped to filter_row's OWN key (st-key-{key_prefix}_filter_row,
+            given to filter_row_container below), not nth-of-type - real
+            bug found live, 2026-08-30 (screenshot showed "Add filter"
+            hard-left and every applied pill pushed hard-right, confirmed
+            via direct DOM inspection): `div[data-testid="stHorizontalBlock"]
+            :nth-of-type(N)` does NOT mean "the Nth horizontal block in this
+            container" the way the original "push Columns right" rule
+            below assumed - Streamlit wraps EVERY st.columns() call in its
+            own individual parent div, so EVERY stHorizontalBlock is
+            trivially "the 1st (and only) div of its type" within its own
+            micro-scope, and :nth-of-type(1) silently matched ALL of them,
+            not just settings_row's. Confirmed live via
+            getBoundingClientRect() + parentElement inspection before
+            fixing - not guessed. Giving each row (settings_row,
+            filter_row) its own real container key sidesteps the whole
+            nth-of-type miscounting problem entirely - nth-of-type is still
+            fine for STCOLUMNS within one row below, since those genuinely
+            are siblings sharing one direct parent (confirmed the same way). */
+            div.st-key-{key_prefix}_filter_row div[data-testid="stColumn"]:nth-of-type(1) button[data-testid="stPopoverButton"] {{
+                border-style: dashed !important;
+            }}
+            div.st-key-{key_prefix}_filter_row div[data-testid="stColumn"]:nth-of-type(n+2) button[data-testid="stPopoverButton"] {{
+                background-color: rgba(96,165,250,.1) !important; border-color: rgba(96,165,250,.3) !important;
+                color: #BFDBFE !important;
+            }}
+            div.st-key-{key_prefix}_filter_row div[data-testid="stColumn"]:nth-of-type(n+2) button[data-testid="stPopoverButton"]:hover {{
+                background-color: rgba(96,165,250,.18) !important; border-color: rgba(96,165,250,.55) !important; color: #F1F5F9 !important;
             }}
             /* Push "Columns" to the right edge of its row, away from FOCUS
             View (real feedback, 2026-08-28) - CSS-only (margin-left: auto
@@ -1601,10 +1671,11 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
             underlying st.toggle()/popover() calls: FOCUS View must stay
             the first widget instantiated in this function or its state
             gets silently reset by any filter button's st.rerun() (real bug,
-            documented below at settings_row). This only targets the FIRST
-            stHorizontalBlock in this container (settings_row) so it can't
-            affect the Add filter/pills row underneath. */
-            div.st-key-{key_prefix}_filter_bar div[data-testid="stHorizontalBlock"]:nth-of-type(1) > div[data-testid="stColumn"]:nth-of-type(2) {{
+            documented below at settings_row). Scoped to settings_row's own
+            key (st-key-{key_prefix}_settings_row) - see the comment above
+            explaining why nth-of-type(1) alone doesn't reliably mean "just
+            this row" and was actually leaking into filter_row too. */
+            div.st-key-{key_prefix}_settings_row div[data-testid="stColumn"]:nth-of-type(2) {{
                 margin-left: auto !important;
             }}
             </style>""",
@@ -1648,7 +1719,8 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
         # defined AFTER the toggle, never reset it; every filter button,
         # defined BEFORE it, always did. Registering the toggle earlier
         # than anything that can call st.rerun() is the actual fix.
-        settings_row = st.columns(2)
+        settings_row_container = st.container(key=f"{key_prefix}_settings_row")
+        settings_row = settings_row_container.columns(2)
         with settings_row[0]:
             focus_view = st.toggle(":material/center_focus_strong: FOCUS View", key=f"{key_prefix}_focus", help="Show columns mapped to the FinOps Open Cost & Usage Specification (FOCUS) instead of the app's internal display names.")
         # Re-asserted every rerun, not just once - same "provider"/"currency"
@@ -1742,7 +1814,8 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
             pass
 
         n_pills = len(active_filters)
-        filter_row = st.columns(n_pills + 1)
+        filter_row_container = st.container(key=f"{key_prefix}_filter_row")
+        filter_row = filter_row_container.columns(n_pills + 1)
         with filter_row[0]:
             add_gen_key = f"{key_prefix}_addfilter_gen"
             add_gen = st.session_state.get(add_gen_key, 0)
@@ -1878,20 +1951,21 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
             show_df[_blank_col] = show_df[_blank_col].apply(lambda v: str(v).strip() if pd.notna(v) and str(v).strip() else "N/A")
 
     # Formatted back into a plain string here, not left as NumberColumn -
-    # real feedback, 2026-08-28: a numeric column right-aligns by default
-    # in this Streamlit build's grid (glide-data-grid), while PAYG Cost/hr
-    # next to it stays a TextColumn and left-aligns, since that one still
-    # needs to show a blank-pricing REASON string sometimes, not just a
-    # number - column_config has no per-column alignment override to force
-    # them to match the other way, so matching the two cost columns means
-    # formatting this one back to text. Values are already currency-
-    # converted (disp["Est. Monthly PAYG Cost"] above), so this must NOT
-    # call fmt() again - that would double-convert for INR.
+    # this column can't be purely numeric anyway: a blank cell (Running,
+    # no cached price) now shows the real reason why instead of a bare
+    # "—" (2026-08-30 - see this section's own comment above), and
+    # column_config has no way to make a column numeric for some rows and
+    # text for others. Values are already currency-converted
+    # (disp["Est. Monthly PAYG Cost"] above), so this must NOT call fmt()
+    # again - that would double-convert for INR.
     _currency_symbol = "₹" if selected_currency == "INR" else "$"
     if "Est. Monthly PAYG Cost" in show_df.columns:
-        show_df["Est. Monthly PAYG Cost"] = show_df["Est. Monthly PAYG Cost"].apply(
-            lambda v: f"{_currency_symbol}{v:,.2f}" if pd.notna(v) else "—"
-        )
+        _blank_reasons = filtered["_monthly_blank_reason"].reindex(show_df.index) if "_monthly_blank_reason" in filtered.columns else None
+        show_df["Est. Monthly PAYG Cost"] = [
+            f"{_currency_symbol}{v:,.2f}" if pd.notna(v)
+            else (_blank_reasons.loc[idx] if _blank_reasons is not None and _blank_reasons.loc[idx] else "—")
+            for idx, v in show_df["Est. Monthly PAYG Cost"].items()
+        ]
 
     # Color-code Power State so "Running" vs "Stopped" reads at a glance
     # without adding a new column - pandas.Styler is explicitly supported
@@ -1945,7 +2019,6 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
             "OS":                     st.column_config.TextColumn(width=90),
             "SKU":                    st.column_config.TextColumn(width=140),
             "Est. Monthly PAYG Cost": st.column_config.TextColumn("Est. Monthly Cost", width=140),
-            "PAYG Cost/hr":           st.column_config.TextColumn("PAYG Cost/hr", width=140),
         },
     )
 
@@ -2722,10 +2795,36 @@ def _render_ri_coverage_tab():
         # int64 (running_count/reserved_qty are explicitly cast to int in
         # analysis/engine.py), and pandas raises a hard TypeError trying
         # to .loc-assign a string into an int64 column directly.
+        #
+        # That fix wasn't complete though - real error caught live in the
+        # terminal, 2026-08-30: pyarrow.lib.ArrowInvalid ("Could not
+        # convert '—' with type str: tried to convert to int64") every
+        # time st.dataframe tried to serialize this table.
+        # .astype(object) only changes the COLUMN's pandas dtype label -
+        # the actual cells for non-volume-based rows are still real
+        # Python int objects sitting in that object-dtype column right
+        # next to "—" strings for volume-based rows. Arrow's own
+        # from_pandas() inspects actual cell values (not just the pandas
+        # dtype) to infer a single Arrow type per column, and a mix of
+        # int and str cells is exactly what trips it - it committed to
+        # int64 from the first rows it sampled, then choked on "—" later
+        # in the same column. Streamlit silently recovers from this (logs
+        # the traceback, then re-serializes with a fallback), so it never
+        # surfaced as a visible crash - just a real error on every single
+        # render of this table. Explicitly stringifying Running/Reserved's
+        # real numeric values too (not just the "—" placeholder) makes
+        # the column genuinely homogeneous - all str, nothing for Arrow to
+        # misinfer - instead of relying on Streamlit's fallback path.
         _is_volume_based = show["coverage_model"] == "unmeasurable"
-        for _col in ("Running", "Reserved", "Status"):
-            show[_col] = show[_col].astype(object)
+        for _col in ("Running", "Reserved"):
+            show[_col] = show[_col].apply(lambda x: "—" if pd.isna(x) else str(int(x)))
             show.loc[_is_volume_based, _col] = "—"
+        # Status is already an all-string column (built by _status()
+        # above, every branch returns a str) - object-casting is a no-op
+        # for dtype purposes, kept only so the "—" assignment below has a
+        # column of the right dtype to write into.
+        show["Status"] = show["Status"].astype(object)
+        show.loc[_is_volume_based, "Status"] = "—"
         if has_pricing_cols:
             # Displayed as a monthly-equivalent (2026-08-29, real feedback:
             # a Reserved Instance isn't billed hour-by-hour the way a
