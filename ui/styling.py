@@ -388,6 +388,29 @@ section[data-testid="stSidebar"] nav span {
 .rec-metric-card .sub { font-size: 11px; color: #94A3B8; margin-top: 4px; }
 .rec-metric-card.combined { border-color: rgba(96,165,250,.35); background: linear-gradient(160deg, #101A2E, #0F1E33); }
 .rec-metric-card.combined .val { color: #60A5FA; }
+/* Rightsizing tab's KPI row (2026-08-30) - same card family, tenant-
+   verdict-colored (amber/red/green) rather than the neutral/blue tones
+   above, matching this tab's own existing Classification-column palette
+   (Overutilized=red/critical, Underutilized=amber/wasting money,
+   savings=green) rather than inventing a new one. */
+.rec-metric-card.under { border-color: rgba(251,191,36,.3); }
+.rec-metric-card.under .val { color: #FBBF24; }
+.rec-metric-card.over { border-color: rgba(248,113,113,.3); }
+.rec-metric-card.over .val { color: #F87171; }
+.rec-metric-card.savings { border-color: rgba(52,211,153,.3); background: linear-gradient(160deg, #101A2E, #0D2A22); }
+.rec-metric-card.savings .val { color: #34D399; }
+
+/* Rightsizing Settings popover (2026-08-30) - groups 8 previously-flat
+   number inputs into labeled sections (Data Window/CPU/Memory/Safety),
+   approved via mockup. Real st.selectbox/st.number_input widgets on
+   either side, unchanged - this is only a section-header divider between
+   them. First group header sits right after the Preset field (no
+   margin-top needed there), later ones get breathing room above. */
+.rs-group-head {
+    font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: #60A5FA;
+    display: flex; align-items: center; gap: 6px; margin: 14px 0 6px;
+    padding-bottom: 6px; border-bottom: 1px solid rgba(96,165,250,.15);
+}
 
 /* Grouped by destination tab, not one row per recommendation - real
    feedback, 2026-08-30: RI Coverage owns most categories, so a flat row

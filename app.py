@@ -3429,44 +3429,61 @@ def _render_rightsizing_tab():
         "shows high pressure; it's only Underutilized if CPU AND memory (when memory data exists) "
         "are both low, so a VM idle on CPU but heavy on memory isn't wrongly flagged for a downsize."
     )
+    # Grouped into labeled sections, 2026-08-30 (real feedback: match
+    # Recommendations/Inventory's visual refresh) - same real widgets
+    # throughout (st.selectbox/st.number_input/st.button), only grouping/
+    # section labels/spacing change, approved via mockup first. Field
+    # labels shortened where their group header now carries context a
+    # longer label previously had to spell out alone (e.g. "CPU
+    # Underutilized threshold (%)" -> "Underutilized (%)" under a "CPU
+    # Thresholds" header) - same info, no longer repeated per field; each
+    # field's own help= tooltip (unchanged) still carries the full
+    # explanation regardless of the shorter visible label.
+    def _rs_group_head(label: str):
+        st.markdown(f'<div class="rs-group-head">{label}</div>', unsafe_allow_html=True)
+
     with st.popover("Rightsizing Settings", icon=":material/settings:"):
         st.selectbox("Preset", list(PRESETS.keys()) + ["Custom"], key=preset_key,
                      on_change=_apply_preset, help=rightsizing_help)
 
+        _rs_group_head("⏱ Data Window")
         r1c1, r1c2 = st.columns(2)
         with r1c1:
             st.selectbox("Percentile", [90, 95, 99], key=f"{key_prefix}_percentile")
         with r1c2:
-            st.number_input("Lookback window (days)", min_value=1, max_value=93,
+            st.number_input("Lookback (days)", min_value=1, max_value=93,
                              key=f"{key_prefix}_lookback_days")
 
+        _rs_group_head("🖥 CPU Thresholds")
         r2c1, r2c2 = st.columns(2)
         with r2c1:
-            st.number_input("CPU Underutilized threshold (%)", min_value=0.0, max_value=100.0,
+            st.number_input("Underutilized (%)", min_value=0.0, max_value=100.0,
                              step=5.0, key=f"{key_prefix}_cpu_under_pct",
                              help="Underutilized (CPU side) triggers when CPU usage drops below this.")
         with r2c2:
-            st.number_input("CPU Overutilized threshold (%)", min_value=0.0, max_value=100.0,
+            st.number_input("Overutilized (%)", min_value=0.0, max_value=100.0,
                              step=5.0, key=f"{key_prefix}_cpu_over_pct",
                              help="Overutilized triggers when CPU usage rises above this.")
 
+        _rs_group_head("🧠 Memory Thresholds")
         r3c1, r3c2 = st.columns(2)
         with r3c1:
-            st.number_input("Memory Underutilized threshold (% used)", min_value=0.0, max_value=100.0,
+            st.number_input("Underutilized (% used)", min_value=0.0, max_value=100.0,
                              step=5.0, key=f"{key_prefix}_mem_under_pct",
                              help="Underutilized (memory side) triggers when memory usage drops below this.")
         with r3c2:
-            st.number_input("Memory Overutilized threshold (% available)", min_value=0.0, max_value=100.0,
+            st.number_input("Overutilized (% avail)", min_value=0.0, max_value=100.0,
                              step=5.0, key=f"{key_prefix}_mem_available_pct",
                              help="Overutilized triggers when *available* (free) memory drops below this.")
 
+        _rs_group_head("🛡 Safety & Minimum Data")
         r4c1, r4c2 = st.columns(2)
         with r4c1:
-            st.number_input("Headroom / safety margin (%)", min_value=0.0, max_value=50.0, step=5.0,
+            st.number_input("Headroom (%)", min_value=0.0, max_value=50.0, step=5.0,
                              key=f"{key_prefix}_headroom_pct",
                              help="A suggested resize must leave at least this much headroom.")
         with r4c2:
-            st.number_input("Minimum days of data", min_value=1, max_value=93,
+            st.number_input("Min days of data", min_value=1, max_value=93,
                              key=f"{key_prefix}_min_days")
 
         if st.button("Save for this tenant", icon=":material/save:", key=f"{key_prefix}_save", width="stretch"):
@@ -3591,10 +3608,31 @@ def _render_rightsizing_tab():
     total_savings = float(rs_df.loc[rs_df["Monthly Savings"] > 0, "Monthly Savings"].sum()) \
         if "Monthly Savings" in rs_df and rs_df["Monthly Savings"].notna().any() else 0.0
 
+    # Visual-only refresh, 2026-08-30 (real feedback: match Recommendations/
+    # Inventory's card language) - same .rec-metric-card family, colored to
+    # this tab's own existing Classification palette (ui/styling.py).
     k1, k2, k3 = st.columns(3)
-    k1.metric(":material/trending_down: Underutilized", under_count)
-    k2.metric(":material/trending_up: Overutilized", over_count)
-    k3.metric(":material/payments: Est. Monthly Savings (downsizes)", fmt(total_savings, 2))
+    with k1:
+        st.markdown(
+            '<div class="rec-metric-card under">'
+            '<div class="lbl">📉 Underutilized</div>'
+            f'<div class="val fl-mono">{under_count}</div>'
+            "</div>", unsafe_allow_html=True,
+        )
+    with k2:
+        st.markdown(
+            '<div class="rec-metric-card over">'
+            '<div class="lbl">📈 Overutilized</div>'
+            f'<div class="val fl-mono">{over_count}</div>'
+            "</div>", unsafe_allow_html=True,
+        )
+    with k3:
+        st.markdown(
+            '<div class="rec-metric-card savings">'
+            '<div class="lbl">💳 Est. Monthly Savings</div>'
+            f'<div class="val fl-mono">{fmt(total_savings, 2)}<span class="unit">/mo</span></div>'
+            "</div>", unsafe_allow_html=True,
+        )
 
     st.divider()
 
