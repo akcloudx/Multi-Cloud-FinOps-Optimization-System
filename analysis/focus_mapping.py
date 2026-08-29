@@ -104,6 +104,24 @@ _SERVICE_CATEGORY_MAP = {
     "Azure DocumentDB": "Databases",
     "Azure Database Migration Service": "Databases",
     "Microsoft Fabric": "Analytics",
+    # Added 2026-08-30 alongside the RI Coverage Rules tab regrouping
+    # (app.py::_render_ri_coverage_tab) - these resource types only ever
+    # appear in db/seed.py's RI_COVERAGE_NOTES / db/aws_seed.py's
+    # AWS_RI_COVERAGE_NOTES (policy reference text, not live inventory
+    # rows), so they were never needed here before and fell through to
+    # "Other". Categorized the same way their closest existing sibling
+    # already is (e.g. Azure SQL Elastic Pool next to Azure SQL Database).
+    "Azure SQL Elastic Pool": "Databases",
+    "Azure SQL Managed Instance Pool": "Databases",
+    "Azure Cache for Redis Enterprise": "Databases",
+    "Azure Backup Storage": "Storage",
+    "Azure NetApp Files": "Storage",
+    "Azure Data Factory": "Analytics",
+    "Azure Data Explorer": "Analytics",
+    "Amazon RDS for Oracle (BYOL)": "Databases",
+    "Amazon RDS for Oracle (License Included)": "Databases",
+    "Amazon RDS for SQL Server": "Databases",
+    "Amazon ElastiCache for Memcached": "Databases",
 }
 
 _PROVIDER_NAMES = {

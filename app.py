@@ -8,7 +8,7 @@ Left sidebar (Workspace): Analyze — a single page whose top tabs are
   Recommendations | Maturity Assessment.
 """
 
-import sys, os, glob, html
+import sys, os, glob, html, re
 _PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _PROJECT_ROOT)
 sys.path.insert(0, os.getcwd())
@@ -1257,6 +1257,65 @@ def _payg_blank_reason(resource_type: str, sku: str) -> str:
     return "Pricing data not available for this resource yet"
 
 
+def _csv_download_button(df: pd.DataFrame, filename: str, key: str, label: str = "Download CSV", right_aligned: bool = False):
+    """Consistent CSV export control for any real tenant-data table on this
+    page (2026-08-30, real feedback: "export csv feature for all the
+    section where table is there and it is required" - one shared helper
+    so every table's export button behaves and looks identically, rather
+    than each call site reimplementing st.download_button separately).
+    `df` should be the exact DataFrame already shown (post display-
+    formatting, e.g. "$1,234.56" strings) - what a user sees on screen is
+    what they'd expect in the file, not a raw/differently-shaped export.
+    `filename` excludes the .csv extension (added here). `key` must be
+    unique per call site - Streamlit requires it for any widget that can
+    appear more than once per rerun, which every one of this button's call
+    sites can (e.g. AWS vs Azure, or a filtered/re-rendered table).
+
+    right_aligned (2026-08-30 follow-up, real feedback + screenshot: the
+    button belongs at the table's top-right, not floating below it, "for
+    all the tabs SP, RI, etc"). Tables that already have their own
+    filter-pill toolbar row (Inventory, RI Coverage's main table) instead
+    slot a real Download CSV button directly into that row via a deferred
+    column reference (see those call sites) - right_aligned is for every
+    OTHER table here, which has no existing row to join, so this renders
+    its own single-row placeholder immediately above wherever it's
+    called - call this BEFORE the matching st.dataframe(...), not after.
+
+    Uses a flex `justify-content: flex-end` wrapper, not a ratio-based
+    st.columns([N, 1]) split - real bug caught live, 2026-08-30
+    (screenshot: the Savings Plan pool's "Every resource" table sits
+    inside a deliberately width-constrained expander, ~a few hundred px,
+    not the page's full width - a fixed [6, 1] ratio split of THAT narrow
+    container left barely 60-70px for the button, wrapping "Download CSV"
+    across 4 lines). flex-end sizes the button to its own real content
+    width and pushes it to the container's right edge regardless of how
+    wide that container actually is - it can never wrap from a ratio
+    squeeze, only from a container narrower than the button itself, an
+    edge case none of this app's real tables hit."""
+    if right_aligned:
+        # The CSS class this maps to must be alphanumeric/underscore-safe,
+        # but `key` itself doesn't have to be - two real call sites pass a
+        # raw pool_label containing a space ("SageMaker AI", "Database
+        # Services") straight through. Sanitized independently here rather
+        # than trusting every call site to remember to pre-sanitize its own
+        # key before passing it in.
+        wrap_key = re.sub(r"[^0-9a-zA-Z_-]", "_", f"{key}_wrap")
+        with st.container(key=wrap_key):
+            st.markdown(
+                f'<style>div.st-key-{wrap_key} {{ display: flex; justify-content: flex-end; }}</style>',
+                unsafe_allow_html=True,
+            )
+            st.download_button(
+                label, data=df.to_csv(index=False), file_name=f"{filename}.csv",
+                mime="text/csv", icon=":material/download:", key=key,
+            )
+        return
+    st.download_button(
+        label, data=df.to_csv(index=False), file_name=f"{filename}.csv",
+        mime="text/csv", icon=":material/download:", key=key,
+    )
+
+
 def _value_checklist(all_opts, key, defaults, search_label="Search values"):
     # A checkbox list, not st.multiselect - real bug seen live (video,
     # 2026-08-24): a multiselect's dropdown is a floating overlay tall
@@ -1665,6 +1724,20 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
             div.st-key-{key_prefix}_filter_row div[data-testid="stColumn"]:nth-of-type(n+2) button[data-testid="stPopoverButton"]:hover {{
                 background-color: rgba(96,165,250,.18) !important; border-color: rgba(96,165,250,.55) !important; color: #F1F5F9 !important;
             }}
+            /* Download CSV pushed to the far right of the SAME row as "Add
+            filter" (2026-08-30, real feedback + screenshot circling the
+            empty space to the right of this exact row) - :last-of-type,
+            not a fixed nth-of-type index, since n_pills (and therefore
+            this row's real column count) varies with how many filters are
+            active. Same margin-left:auto flex trick already proven for
+            "push Columns right" on settings_row below - fit-content
+            columns don't stretch to fill the row, so the auto margin on
+            the last one absorbs 100% of the leftover space and shoves
+            just that column to the edge, leaving Add filter/pills packed
+            left as before. */
+            div.st-key-{key_prefix}_filter_row div[data-testid="stColumn"]:last-of-type {{
+                margin-left: auto !important;
+            }}
             /* Push "Columns" to the right edge of its row, away from FOCUS
             View (real feedback, 2026-08-28) - CSS-only (margin-left: auto
             on a flex item pushes it to the far edge regardless of the
@@ -1816,7 +1889,17 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
 
         n_pills = len(active_filters)
         filter_row_container = st.container(key=f"{key_prefix}_filter_row")
-        filter_row = filter_row_container.columns(n_pills + 1)
+        # +2, not +1 - the extra trailing slot is the Download CSV button's
+        # placeholder (dl_col below), pushed to the row's far right via the
+        # :last-of-type CSS rule above. Streamlit column objects are real
+        # container references, not one-shot render calls - `dl_col` is
+        # written into much further down (2026-08-30), once the actual
+        # display DataFrame (FOCUS or normal mode) is finally ready, but it
+        # still renders in this exact grid slot regardless of when in the
+        # script that happens - the same deferred-container pattern this
+        # app already uses for kpi_cols/grid_cols elsewhere.
+        filter_row = filter_row_container.columns(n_pills + 2)
+        dl_col = filter_row[n_pills + 1]
         with filter_row[0]:
             add_gen_key = f"{key_prefix}_addfilter_gen"
             add_gen = st.session_state.get(add_gen_key, 0)
@@ -1950,6 +2033,8 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
                 "BilledCost":    st.column_config.NumberColumn("BilledCost", format="$%.2f"),
             },
         )
+        with dl_col:
+            _csv_download_button(focus_df[chosen_cols], f"{selected_provider.lower()}_inventory_focus", key=f"{key_prefix}_dl_focus")
         return
 
     # Blank/NaN cells (e.g. Resource Group on an AWS row, or vice versa)
@@ -2034,6 +2119,8 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
             "Est. Monthly PAYG Cost": st.column_config.TextColumn("Est. Monthly Cost", width=140),
         },
     )
+    with dl_col:
+        _csv_download_button(show_df, f"{selected_provider.lower()}_inventory", key=f"{key_prefix}_dl_normal")
 
 
 def _render_inventory_tab():
@@ -2300,7 +2387,9 @@ def _render_sp_pool_economics(pool_label: str, pool_df: pd.DataFrame, existing_c
         else:
             sp_show = commitment_df[["commitment_id", "scope_sku", "scope_region", "hourly_usd_commitment", "term", "expiry_date"]].copy()
             sp_show["hourly_usd_commitment"] = sp_show["hourly_usd_commitment"].apply(lambda x: fmt(x, 4) + "/hr")
-            st.dataframe(_with_mapping_caveat(commitment_df, sp_show), hide_index=True, width="stretch", column_config=_SP_COMMITMENT_COLUMN_CONFIG)
+            sp_show_disp = _with_mapping_caveat(commitment_df, sp_show)
+            _csv_download_button(sp_show_disp, f"{selected_provider.lower()}_{pool_label.lower().replace(' ', '_')}_commitments", key=f"dl_sp_commit_{pool_label.lower().replace(' ', '_')}", right_aligned=True)
+            st.dataframe(sp_show_disp, hide_index=True, width="stretch", column_config=_SP_COMMITMENT_COLUMN_CONFIG)
 
     by_type = (
         pool_df.groupby("Resource Type")
@@ -2401,6 +2490,7 @@ def _render_sp_pool_economics(pool_label: str, pool_df: pd.DataFrame, existing_c
         # previously-undiagnosed behavior. "content" sizes the table to
         # exactly match its own columns' widths instead, so there's never
         # leftover space for anything to grow into.
+        _csv_download_button(elig_show, f"{selected_provider.lower()}_{pool_label.lower().replace(' ', '_')}_resources", key=f"dl_sp_resources_{pool_label.lower().replace(' ', '_')}", right_aligned=True)
         st.dataframe(
             elig_show, hide_index=True, width="content",
             column_config={
@@ -2652,8 +2742,10 @@ def _render_savings_plan_tab():
 
             if not compute_sp_excluded.empty:
                 with st.expander(f"{len(compute_sp_excluded)} running resource(s) excluded from the Compute SP baseline", icon=":material/block:", expanded=False):
+                    _compute_sp_excluded_show = compute_sp_excluded[["Resource Name", "Resource Type", "SKU", "SP Eligibility Note"]]
+                    _csv_download_button(_compute_sp_excluded_show, f"{selected_provider.lower()}_compute_sp_excluded", key="dl_sp_compute_excluded", right_aligned=True)
                     st.dataframe(
-                        compute_sp_excluded[["Resource Name", "Resource Type", "SKU", "SP Eligibility Note"]],
+                        _compute_sp_excluded_show,
                         hide_index=True, width="stretch",
                         column_config={"SP Eligibility Note": st.column_config.TextColumn("Why excluded", width="large")},
                     )
@@ -2694,8 +2786,10 @@ def _render_savings_plan_tab():
 
             if not db_sp_excluded.empty:
                 with st.expander(f"{len(db_sp_excluded)} running resource(s) excluded from the {db_sp_title} baseline", icon=":material/block:", expanded=False):
+                    _db_sp_excluded_show = db_sp_excluded[["Resource Name", "Resource Type", "SKU", "SP Eligibility Note"]]
+                    _csv_download_button(_db_sp_excluded_show, f"{selected_provider.lower()}_database_sp_excluded", key="dl_sp_database_excluded", right_aligned=True)
                     st.dataframe(
-                        db_sp_excluded[["Resource Name", "Resource Type", "SKU", "SP Eligibility Note"]],
+                        _db_sp_excluded_show,
                         hide_index=True, width="stretch",
                         column_config={"SP Eligibility Note": st.column_config.TextColumn("Why excluded", width="large")},
                     )
@@ -3028,6 +3122,7 @@ def _render_ri_coverage_tab():
             for _dcol in ("Daily RI Drain", "Monthly RI Drain"):
                 if _dcol in drain_disp.columns:
                     drain_disp[_dcol] = drain_disp[_dcol].apply(lambda x: fmt(x, 2))
+            _csv_download_button(drain_disp, f"{selected_provider.lower()}_orphaned_ri_drain", key="dl_ri_drain", right_aligned=True)
             st.dataframe(
                 drain_disp, hide_index=True, width="stretch",
                 # Explicit widths for every column (2026-08-29, real
@@ -3265,11 +3360,20 @@ def _render_ri_coverage_tab():
                 div.st-key-ri_cov_filter_row div[data-testid="stColumn"]:nth-of-type(n+2) button[data-testid="stPopoverButton"]:hover {
                     background-color: rgba(96,165,250,.18) !important; border-color: rgba(96,165,250,.55) !important; color: #F1F5F9 !important;
                 }
+                /* Download CSV pushed to the far right of this row - see
+                Inventory's identical rule for the full reasoning. */
+                div.st-key-ri_cov_filter_row div[data-testid="stColumn"]:last-of-type {
+                    margin-left: auto !important;
+                }
                 </style>""",
                 unsafe_allow_html=True,
             )
             filter_row_container = st.container(key="ri_cov_filter_row")
-            filter_row = filter_row_container.columns(len(ri_active_filters) + 1)
+            # +2, not +1 - see Inventory's identical pattern for the full
+            # reasoning (dl_col is a deferred container reference, written
+            # into once `show` is ready further down).
+            filter_row = filter_row_container.columns(len(ri_active_filters) + 2)
+            dl_col = filter_row[len(ri_active_filters) + 1]
             with filter_row[0]:
                 add_gen_key = "ri_cov_addfilter_gen"
                 add_gen = st.session_state.get(add_gen_key, 0)
@@ -3407,6 +3511,8 @@ def _render_ri_coverage_tab():
                     savings_col:     st.column_config.TextColumn("Monthly Savings", width=140),
                 },
             )
+            with dl_col:
+                _csv_download_button(show, f"{selected_provider.lower()}_reservation_coverage", key="dl_ri_coverage")
             if not has_pricing_cols:
                 st.caption(
                     ":material/info: Purchase-cost columns aren't shown - no cached pricing yet for these SKUs; "
@@ -3425,19 +3531,91 @@ def _render_ri_coverage_tab():
     # all, unlike every row in the table above.
     if not ineligible.empty:
         with st.expander(f"{len(ineligible)} resource(s) not eligible for any Reservation", icon=":material/block:", expanded=False):
-            show_i = ineligible.rename(columns={"Resource Type": "Service", "SKU": "SKU / Tier", "eligibility_reason": "Why not eligible"})
-            st.dataframe(
-                show_i[["Service", "SKU / Tier", "Region", "Why not eligible"]], hide_index=True, width="stretch",
-                column_config={
-                    "Service":    st.column_config.TextColumn(width=230),
-                    "SKU / Tier": st.column_config.TextColumn(width=140),
-                    "Region":     st.column_config.TextColumn(width=110),
-                    # "large" keyword width (not a pixel value) - same fix
-                    # already used for the Savings Plan tab's own "why
-                    # excluded" long-prose column.
-                    "Why not eligible": st.column_config.TextColumn(width="large"),
-                },
+            # Cards, not a dataframe (2026-08-30, real feedback - a
+            # screenshot showed "Why not eligible" hard-clipped at the
+            # table's right edge, mid-sentence, with no scrollbar). Same
+            # root cause already fixed for Reservation Coverage Rules just
+            # below this: st.dataframe cells don't wrap prose text
+            # regardless of column width, and this app's global
+            # overflow:hidden rule (needed to round the table wrapper's
+            # corners) clips any content wider than the rendered column.
+            #
+            # Tabs by Service Category + real per-resource names inside
+            # each card (2026-08-30 follow-up, real feedback: "same pattern
+            # UI" as Reservation Coverage Rules below, and "mention
+            # resource names as well or table like structure" - the
+            # earlier SKU(s)/Region(s) summary caption wasn't enough to
+            # identify which actual resource this is).
+            #
+            # `ineligible` (from `cov`) has no Resource Name at all - the
+            # coverage table is grouped by PROFILE (Resource Type/SKU/
+            # Region/OS/Redundancy), not by literal resource, so a profile
+            # with running_count=3 is exactly one row here representing 3
+            # real resources with no name captured at that level. Joins
+            # back against inv_raw (the raw per-resource inventory, already
+            # in scope for this whole tab) on the same profile key to
+            # recover real names just for the ineligible profiles.
+            _profile_keys = ["Resource Type", "SKU", "Region", "OS", "Redundancy"]
+            _ineligible_keys = ineligible[_profile_keys].fillna("N/A").drop_duplicates()
+            _inv_keyed = inv_raw.copy()
+            _inv_keyed[_profile_keys] = _inv_keyed[_profile_keys].fillna("N/A")
+            named = _inv_keyed.merge(_ineligible_keys, on=_profile_keys, how="inner")
+
+            # CSV export (2026-08-30, real feedback: "if someone need to
+            # export the list... how we can do it" - the cards-in-tabs
+            # layout has no single scrollable table left to copy from, and
+            # this is the first download_button anywhere in this app, so
+            # there's no existing export pattern to match). One button for
+            # the FULL list (every category, not just the open tab) -
+            # exporting "the list" means the whole thing, and a user
+            # working from a downloaded file shouldn't have to click
+            # through every tab to reassemble it. Reuses `named` (already
+            # has real per-resource names) joined back to `ineligible` for
+            # the reason text, one row per real resource.
+            _export_df = named.merge(
+                ineligible[_profile_keys + ["eligibility_reason"]].fillna("N/A").drop_duplicates(),
+                on=_profile_keys, how="left",
+            )[["Resource Type", "Resource Name", "SKU", "Region", "eligibility_reason"]].rename(
+                columns={"Resource Type": "Service", "eligibility_reason": "Why Not Eligible"}
             )
+            _csv_download_button(_export_df, f"{selected_provider.lower()}_not_ri_eligible_resources", key="dl_ri_ineligible", right_aligned=True)
+
+            # Grouped by (Service, reason), same reasoning as before - the
+            # reason text is a function of the resource_type/SKU rule
+            # (analysis/ri_eligibility.py), not the individual resource, so
+            # a tenant with many resources of the same ineligible type
+            # would otherwise repeat near-identical prose N times.
+            svc_category = {svc: map_service_category(svc) for svc in ineligible["Resource Type"].unique()}
+            _RI_CATEGORY_ORDER = ["Compute", "Databases", "Storage", "Analytics", "AI and Machine Learning", "Web and Mobile", "Other"]
+            groups = ineligible.groupby(["Resource Type", "eligibility_reason"], dropna=False, sort=False)
+            by_category: dict = {}
+            for (svc, reason), grp in groups:
+                by_category.setdefault(svc_category[svc], []).append((svc, reason, grp))
+            present_categories = [c for c in _RI_CATEGORY_ORDER if c in by_category]
+
+            cat_tabs = st.tabs(present_categories)
+            for tab, cat in zip(cat_tabs, present_categories):
+                with tab:
+                    cat_groups = sorted(by_category[cat], key=lambda g: g[0])
+                    grid_cols = st.columns(2)
+                    for i, (svc, reason, grp) in enumerate(cat_groups):
+                        with grid_cols[i % 2].container(border=True):
+                            grp_keys = grp[_profile_keys].fillna("N/A").drop_duplicates()
+                            grp_named = named.merge(grp_keys, on=_profile_keys, how="inner")
+                            count = len(grp_named) if not grp_named.empty else int(grp["running_count"].sum())
+                            plural = "s" if count != 1 else ""
+                            st.markdown(f"**{svc}** · {count} resource{plural}")
+                            st.markdown(f":material/block: {reason}")
+                            if not grp_named.empty:
+                                show_named = grp_named[["Resource Name", "SKU", "Region"]].rename(columns={"SKU": "SKU / Tier"})
+                                st.dataframe(
+                                    show_named, hide_index=True, width="stretch", row_height=32,
+                                    column_config={
+                                        "Resource Name": st.column_config.TextColumn(width=170),
+                                        "SKU / Tier":     st.column_config.TextColumn(width=120),
+                                        "Region":         st.column_config.TextColumn(width=100),
+                                    },
+                                )
 
     # ── Reference & Methodology - moved to the bottom (2026-08-29, real
     # feedback: this used to sit BEFORE the main table, meaning a user had
@@ -3493,38 +3671,66 @@ def _render_ri_coverage_tab():
                 if svc != _LAMBDA_NOTE_KEY and check_eligibility(svc, "N/A")[0]
             }
 
+        # Tabs by Service Category (2026-08-30, real feedback: "can we have
+        # a similar pattern to what we have for SP" - Savings Plan Coverage
+        # Policy tabs by its own small set of official plan TYPES (Compute/
+        # EC2 Instance/Database/SageMaker SP). Reserved Instances have no
+        # equivalent small first-party taxonomy - they're just sold
+        # per-service, not grouped into a handful of official "RI types"
+        # the way Savings Plans genuinely are - so this reuses this app's
+        # OWN existing FOCUS-based ServiceCategory grouping instead
+        # (analysis/focus_mapping.py::map_service_category, already driving
+        # Inventory's own Service Category filter) rather than inventing a
+        # second, competing category scheme just for this tab.
+        # _SERVICE_CATEGORY_MAP was extended with the handful of resource
+        # types that only ever appear here (policy reference text, not live
+        # inventory rows), so nothing lands in a junk-drawer "Other" tab.
+        svc_category = {svc: map_service_category(svc) for svc in eligible_notes}
+        if _LAMBDA_NOTE_KEY in RI_COVERAGE_NOTES:
+            svc_category[_LAMBDA_NOTE_KEY] = "Compute"  # Lambda Managed Instances bills real EC2 compute - same bucket as EC2/Fargate.
+
+        _RI_CATEGORY_ORDER = ["Compute", "Databases", "Storage", "Analytics", "AI and Machine Learning", "Web and Mobile", "Other"]
+        by_category: dict = {}
+        for svc, cat in svc_category.items():
+            by_category.setdefault(cat, []).append(svc)
+        present_categories = [c for c in _RI_CATEGORY_ORDER if c in by_category]
+
         # Cards, not a dataframe - same real bug already fixed on the
         # Savings Plan Coverage Policy card (2026-08-28): these Covers/
         # Excludes cells are paragraph-length prose, and st.dataframe cells
-        # don't wrap text regardless of column width. 2-column grid - each
-        # card is only 2-3 short lines, one-per-row wasted half the width
-        # for no reason once the list was trimmed to eligible services only.
-        grid_cols = st.columns(2)
-        for i, (svc, (covers, excludes)) in enumerate(eligible_notes.items()):
-            with grid_cols[i % 2].container(border=True):
-                st.markdown(f"**{svc}**")
-                st.markdown(f":material/check_circle: **Covers:** {covers}")
-                st.markdown(f":material/block: **Excludes:** {excludes}")
-
-        if _LAMBDA_NOTE_KEY in RI_COVERAGE_NOTES:
-            # Rendered as its own card IN the grid (2026-08-29, real
-            # feedback: as a plain st.caption() sitting below the grid,
-            # this real, useful disclosure - Lambda genuinely IS RI-
-            # eligible, this app just can't compute a gap for it - read as
-            # an afterthought footnote easy to miss entirely). Same card
-            # shell as its peers so it's discoverable in the same reading
-            # flow, not promoted above the fold (still inside this
-            # collapsed expander - it's a minor caveat about one service,
-            # not urgent like the drain alert at the top of the page) and
-            # not demoted to a floating caption either. Distinguished from
-            # a real Covers/Excludes card by using one "eye-off" line
-            # instead of two, so it doesn't imply this app tracks it.
-            with grid_cols[len(eligible_notes) % 2].container(border=True):
+        # don't wrap text regardless of column width. 2-column grid within
+        # each tab - each card is only 2-3 short lines, one-per-row wasted
+        # half the width for no reason.
+        def _render_ri_coverage_card(svc):
+            if svc == _LAMBDA_NOTE_KEY:
+                # Rendered as its own card (2026-08-29, real feedback: as a
+                # plain st.caption() sitting below the grid, this real,
+                # useful disclosure - Lambda genuinely IS RI-eligible, this
+                # app just can't compute a gap for it - read as an
+                # afterthought footnote easy to miss entirely). Same card
+                # shell as its peers so it's discoverable in the same
+                # reading flow. Distinguished from a real Covers/Excludes
+                # card by using one "eye-off" line instead of two, so it
+                # doesn't imply this app tracks it.
                 st.markdown(f"**{_LAMBDA_NOTE_KEY}**")
                 st.markdown(
                     ":material/visibility_off: Genuinely EC2 RI-eligible, but not shown as a gap/coverage row - "
                     "AWS exposes only pool-level configuration, never a per-instance count to compare against a reservation."
                 )
+                return
+            covers, excludes = RI_COVERAGE_NOTES[svc]
+            st.markdown(f"**{svc}**")
+            st.markdown(f":material/check_circle: **Covers:** {covers}")
+            st.markdown(f":material/block: **Excludes:** {excludes}")
+
+        cat_tabs = st.tabs(present_categories)
+        for tab, cat in zip(cat_tabs, present_categories):
+            with tab:
+                svcs = sorted(by_category[cat])
+                grid_cols = st.columns(2)
+                for i, svc in enumerate(svcs):
+                    with grid_cols[i % 2].container(border=True):
+                        _render_ri_coverage_card(svc)
         # No separate volume-based note here (2026-08-29, real follow-up
         # feedback: a standalone caption was added here first, then moved
         # again the same day) - Volume-Based rows now sit directly in the
@@ -3555,8 +3761,10 @@ def _render_ri_coverage_tab():
             # don't have this concept per AWS's own docs.
             ri_disp["offering_class"] = ri_disp["offering_class"].fillna("N/A").apply(lambda v: v.title() if v != "N/A" else v)
             ri_disp = ri_disp.rename(columns={"offering_class": "Offering Class"})
+            ri_disp_final = _with_mapping_caveat(ri_df, ri_disp)
+            _csv_download_button(ri_disp_final, f"{selected_provider.lower()}_active_reservation_contracts", key="dl_ri_contracts", right_aligned=True)
             st.dataframe(
-                _with_mapping_caveat(ri_df, ri_disp), hide_index=True, width="stretch",
+                ri_disp_final, hide_index=True, width="stretch",
                 column_config={
                     **_SP_COMMITMENT_COLUMN_CONFIG,
                     "hourly_usd_commitment": st.column_config.TextColumn("Monthly Commitment", width=150),
@@ -4214,6 +4422,7 @@ def _render_rightsizing_tab():
 
     styled_rs_df = show_df.style.map(_class_color, subset=["Classification"])
 
+    _csv_download_button(show_df, f"{selected_provider.lower()}_rightsizing", key="dl_rightsizing", right_aligned=True)
     st.dataframe(
         styled_rs_df, hide_index=True, width="stretch",
         row_height=42,  # matches the Inventory tab's own row height, approved via mockup there
