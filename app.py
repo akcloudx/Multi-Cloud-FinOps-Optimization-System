@@ -2307,7 +2307,58 @@ def _render_sp_pool_economics(pool_label: str, pool_df: pd.DataFrame, existing_c
         .reset_index()
         .sort_values("rate", ascending=False)
     )
-    with st.expander(f"What's eligible — {len(pool_df)} resource{'s' if len(pool_df) != 1 else ''}, {fmt(baseline_hr)}/hr", icon=":material/checklist:", expanded=False):
+    elig_container_key = f"{key_prefix}_eligible"
+    with st.container(key=elig_container_key), st.expander(f"What's eligible — {len(pool_df)} resource{'s' if len(pool_df) != 1 else ''}, {fmt(baseline_hr)}/hr", icon=":material/checklist:", expanded=False):
+        elig_show = pool_df[["Resource Name", "Resource Type", "SKU", "PAYG Hourly Cost USD"]].copy()
+        elig_show["PAYG Hourly Cost USD"] = elig_show["PAYG Hourly Cost USD"].apply(lambda x: fmt(x, 4))
+        elig_show = elig_show.rename(columns={"PAYG Hourly Cost USD": "PAYG Cost/hr"})
+        # Dynamic widths, not a fixed dict - real gap caught live,
+        # 2026-08-30: a first attempt hardcoded widths to this app's
+        # longest value ACROSS EVERY provider/pool (e.g. AWS SageMaker's
+        # "Amazon SageMaker Notebook Instance"), so it never clipped
+        # anywhere - but a pool with genuinely short values (this Azure
+        # Compute pool's own "Compute"/"Azure Dedicated Host") sat in a
+        # column sized for a value 3-5x longer than anything it will ever
+        # show, which is exactly the empty-space look this was supposed to
+        # fix. Computed instead from THIS POOL's own real data on every
+        # render - the header label or its own longest real cell,
+        # whichever is longer - so each pool's table is genuinely tight to
+        # what it actually contains, not sized for the app-wide worst case.
+        def _col_width(col: str, min_px: int = 90, max_px: int = 320) -> int:
+            longest_chars = max([len(col)] + [len(str(v)) for v in elig_show[col]])
+            return int(min(max_px, max(min_px, longest_chars * 7.5 + 32)))
+
+        col_widths = {col: _col_width(col) for col in elig_show.columns}
+        # The table's own content-driven width (sum of its column widths,
+        # plus glide-data-grid's own border/cell chrome, ~2px/col) - reused
+        # below as an explicit width on the "By resource type" list so the
+        # two blocks share one width instead of each shrinking to ITS OWN
+        # content independently. Two independently-content-tight blocks
+        # looked *more* inconsistent side by side than the original full-
+        # width stretch did (list ~375px, table ~750px, live-verified
+        # 2026-08-30) - matching them to the table's width (the wider,
+        # more information-dense block) is the one that reads as "one card
+        # laid out together" rather than two unrelated ones stacked.
+        table_width_px = sum(col_widths.values()) + 2 * len(col_widths)
+
+        # The expander's own outer box defaults to full container width
+        # regardless of how narrow its content is (a Streamlit structural
+        # default, not something column_config touches) - left as-is, a
+        # ~750-900px content block sat inside a ~1050px box with well over
+        # 100px of dead space on the right, flagged directly ("the box
+        # outer border is too big"). Constrained here to the content's own
+        # width plus stExpanderDetails' real measured padding (14px each
+        # side, confirmed via live getBoundingClientRect - not guessed),
+        # scoped to this specific expander only via the container's
+        # st-key-* class so every OTHER expander on this page (e.g. "What
+        # you already own", intentionally full-width to match its own
+        # always-stretch table) is untouched.
+        st.markdown(
+            f"<style>.st-key-{elig_container_key} [data-testid='stExpander'] "
+            f"{{ max-width: {table_width_px + 28}px; }}</style>",
+            unsafe_allow_html=True,
+        )
+
         type_rows_html = "".join(
             '<div class="spflow-row">'
             f'<span class="spflow-rowname">{html.escape(str(r["Resource Type"]))}</span>'
@@ -2316,12 +2367,34 @@ def _render_sp_pool_economics(pool_label: str, pool_df: pd.DataFrame, existing_c
             "</div>"
             for _, r in by_type.iterrows()
         )
-        st.markdown(f'<div class="spflow-cardhead">By resource type</div>{type_rows_html}', unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="spflow-cardhead">By resource type</div>'
+            f'<div class="spflow-list" style="width:{table_width_px}px;">{type_rows_html}</div>',
+            unsafe_allow_html=True,
+        )
         st.markdown('<div class="spflow-cardhead" style="margin-top:16px;">Every resource</div>', unsafe_allow_html=True)
-        elig_show = pool_df[["Resource Name", "Resource Type", "SKU", "PAYG Hourly Cost USD"]].copy()
-        elig_show["PAYG Hourly Cost USD"] = elig_show["PAYG Hourly Cost USD"].apply(lambda x: fmt(x, 4))
-        elig_show = elig_show.rename(columns={"PAYG Hourly Cost USD": "PAYG Cost/hr"})
-        st.dataframe(elig_show, hide_index=True, width="stretch")
+        # width="content", not "stretch" - the ACTUAL root cause of the
+        # empty space, found by reading Streamlit's own installed source
+        # (DataFrame.*.js) directly after the dynamic-width attempt above
+        # still showed no visible change: "stretch" tells the underlying
+        # grid (glide-data-grid) to redistribute any leftover space across
+        # columns marked as growable whenever the summed column widths
+        # fall short of the container's full width - confirmed in the
+        # bundle's own column-sizing code (a `grow` mechanism triggered by
+        # `n < r` - summed widths less than available width). That
+        # redistribution was silently overriding every explicit
+        # column_config width passed above, on every attempt, regardless
+        # of what the values were - not a caching issue, a real,
+        # previously-undiagnosed behavior. "content" sizes the table to
+        # exactly match its own columns' widths instead, so there's never
+        # leftover space for anything to grow into.
+        st.dataframe(
+            elig_show, hide_index=True, width="content",
+            column_config={
+                col: st.column_config.TextColumn(width=w)
+                for col, w in col_widths.items()
+            },
+        )
 
 
 # Shared by every "existing commitments" table in the Savings Plan tab

@@ -337,10 +337,27 @@ section[data-testid="stSidebar"] nav span {
    is shared. */
 .spflow-cardhead { font-size: 12.5px; color: #94A3B8; margin-bottom: 12px; }
 .spflow-cardhead b { color: #F1F5F9; }
+/* Wraps the "By resource type" rows so the WHOLE block shrinks to fit its
+   own widest row's real content instead of stretching to the expander's
+   full width - real feedback, 2026-08-30: fixing the "Every resource"
+   table's own same over-stretching problem (below) made this section's
+   identical issue stand out even more starkly, sitting content-tight next
+   to it. display:inline-block + width:fit-content on the PARENT (not each
+   row) so every row still shares one consistent width and the border-
+   bottom dividers line up - a per-row fit-content would make each row a
+   different width based on its own name length, misaligning the borders
+   between rows instead of fixing anything. */
+.spflow-list { display: inline-block; width: fit-content; max-width: 100%; }
 .spflow-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid #1E293B; font-size: 12.5px; }
 .spflow-row:last-child { border-bottom: none; }
 .spflow-rowname { flex: 1; }
-.spflow-rowcount { color: #94A3B8; width: 90px; }
+/* text-align: right added 2026-08-30 - real inconsistency caught live:
+   this and .spflow-rowrate are the row's two numeric-ish columns sitting
+   right next to each other, but only rate was right-aligned - count
+   defaulted to left, so "5 resources"/"1 resource" started flush-left
+   while "$0.6280/hr" ended flush-right, breaking the clean vertical scan
+   two adjacent numeric columns should have. */
+.spflow-rowcount { color: #94A3B8 !important; width: 90px; text-align: right; }
 .spflow-rowrate { width: 90px; text-align: right; }
 .spflow-econrow { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 14px; }
 .spflow-econlabel { font-size: 10.5px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: #526279; }
