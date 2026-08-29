@@ -382,6 +382,31 @@ section[data-testid="stSidebar"] nav span {
 .spflow-planid { font-family: 'JetBrains Mono', monospace; color: #F1F5F9; }
 .spflow-plandetail { color: #94A3B8; flex: 1; }
 .spflow-planrate { color: #F1F5F9; font-weight: 600; }
+
+/* Sidebar "Log out" / "Switch mode" pseudo-buttons (ui/auth_page.py) - a
+   plain <a href>, not st.link_button, which the installed LinkButton.*.js
+   bundle confirms hardcodes target="_blank" with no override (every click
+   opened a second tab - real user feedback, 2026-08-30). A bare anchor has
+   no target attribute, so browsers default to _self (same tab) while still
+   being a genuine navigation (needed to clear st.navigation()'s sidebar
+   menu, which nothing short of a real page load resets - see
+   require_login()'s own comment). Colors hand-matched to a default
+   Streamlit secondary button against this app's dark sidebar theme
+   (.streamlit/config.toml [theme.dark.sidebar]) since a raw anchor gets
+   none of st.link_button's automatic theme-matched styling - same
+   dark-only-not-light-aware tradeoff this file already makes for the
+   signin card/drain alert above, not a new gap. */
+.fl-sidebar-linkbtn {
+    display: flex; align-items: center; justify-content: center;
+    width: 100%; box-sizing: border-box;
+    padding: 0.5rem 1rem; margin: 0.25rem 0 0.75rem;
+    background: #1E293B; border: 1px solid #334155; border-radius: 8px;
+    color: #F1F5F9 !important; text-decoration: none !important;
+    font-size: 14px; font-weight: 400; line-height: 1.6; cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease;
+}
+.fl-sidebar-linkbtn:hover { background: #26364D; border-color: #45566E; }
+.fl-sidebar-linkbtn:visited { color: #F1F5F9 !important; }
 </style>
 """
 

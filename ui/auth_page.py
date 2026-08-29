@@ -89,6 +89,41 @@ def require_login() -> dict:
     until someone is authenticated. Returns the session's user dict once
     authenticated. Call once, right after st.set_page_config() and database
     init, before anything else renders."""
+    # Real bug reported 2026-08-30: after logout, the main content
+    # correctly falls through to the login screen, but the SIDEBAR still
+    # shows the previous run's logged-in nav menu (Home/Tenant Management/
+    # User Management) until a manual browser refresh - that menu is
+    # rendered by st.navigation() itself (called much later in app.py,
+    # only when logged in), not by anything in this function, so it never
+    # gets a chance to be told "gone" on a run that returns before ever
+    # reaching st.navigation() again. Three attempts to force a reload
+    # from a normal st.button's click handler all failed, each verified
+    # live in the browser: st.sidebar.empty() (that stale menu isn't a
+    # normal element app code can clear via the usual delta mechanism), a
+    # st.components.v1.html <script>window.parent.location.reload()
+    # (didn't execute - iframe/CSP sandboxing blocks reaching
+    # window.parent here), and a st.markdown(..., unsafe_allow_html=True)
+    # <meta http-equiv="refresh"> tag (browsers only reliably honor that
+    # when it's genuinely in the document's initial <head>, not when
+    # React-rendered into the body later). A real st.link_button (an
+    # ACTUAL <a href> the browser navigates on its own) is the one thing
+    # confirmed to actually trigger a real navigation and clear the stale
+    # menu - a first version of this fix used one for a SEPARATE
+    # "Finish logging out" confirmation click, since a link_button can't
+    # run Python on click and _clear_session() needs to happen somewhere -
+    # real follow-up feedback: that extra click/screen wasn't wanted, "Log
+    # out" should be one click, full stop. Fixed by making "Log out"
+    # ITSELF the real link (see render_logout_control() below - a
+    # st.link_button straight to "/?logout=1"), and doing the actual
+    # session teardown HERE, at the top of the very next (genuinely
+    # navigated-to, sidebar-resetting) page load, keyed off that query
+    # param - the user still only clicks once, the real navigation just
+    # happens to be a fraction of a second before the teardown instead of
+    # a fraction after it.
+    if st.query_params.get("logout") == "1":
+        _clear_session()
+        del st.query_params["logout"]
+
     if st.session_state.get("auth_user"):
         return st.session_state["auth_user"]
 
@@ -421,9 +456,29 @@ def render_logout_control():
     if not user:
         return
     st.caption(f"Signed in as **{user['display_name'] or user['username']}**")
-    if st.button("Log out", use_container_width=True):
-        _clear_session()
-        st.rerun()
+    # A real link (genuine <a href>, not a Streamlit button + rerun) - see
+    # require_login()'s own handling of "?logout=1" for why: only an
+    # actual browser navigation clears the sidebar's st.navigation() nav
+    # menu, which stays stuck from the prior logged-in run otherwise. One
+    # click, no confirmation screen - the session teardown happens on the
+    # destination page's own load, keyed off this same query param.
+    #
+    # NOT st.link_button - confirmed via the installed LinkButton.*.js
+    # bundle that it hardcodes target="_blank" with no way to override, so
+    # every click opened a second tab (real user feedback, 2026-08-30).
+    # Switching to a raw <a> wasn't enough by itself, either - confirmed via
+    # the installed StreamlitMarkdown.*.js bundle that st.markdown's own
+    # link renderer ALSO force-defaults target to "_blank" for any anchor
+    # that doesn't specify one itself (`target: i || "_blank"` - real user
+    # re-test after a full server restart still showed a new tab, which is
+    # what led to checking this bundle instead of assuming plain-HTML
+    # semantics would hold). Explicitly setting target="_self" here wins
+    # over that default, since a real (truthy) target on the source tag is
+    # exactly what that check looks for.
+    st.markdown(
+        '<a class="fl-sidebar-linkbtn" href="/?logout=1" target="_self">Log out</a>',
+        unsafe_allow_html=True,
+    )
 
 
 def render_switch_mode_control():
@@ -443,8 +498,20 @@ def render_switch_mode_control():
     env_mode = st.session_state.get("env_mode_widget", "Demo / Benchmark Mode")
     other_mode = "Production" if env_mode == "Demo / Benchmark Mode" else "Demo / Benchmark Mode"
     st.caption(f"**Data Source Environment:** {env_mode}")
-    if st.button(f"🔁 Switch to {other_mode}", use_container_width=True,
-                 help="Switching signs you out - sign back in for the other mode. Demo and Live are fully separate accounts and data now, not just a view toggle."):
-        _clear_session()
-        st.rerun()
+    # Same real-link fix as the Log out button (render_logout_control()
+    # above) - this button signs out exactly the same way, so it needs the
+    # identical treatment: a plain <a href target="_self">, not
+    # st.link_button (forces a new tab) and not a Streamlit button + rerun
+    # (doesn't clear the stale sidebar nav) - and the explicit target="_self"
+    # matters here too, since st.markdown's own link renderer force-defaults
+    # to target="_blank" for any anchor that doesn't set one (see the other
+    # control's comment for how this was actually confirmed). One click, no
+    # confirmation screen, same tab.
+    st.markdown(
+        f'<a class="fl-sidebar-linkbtn" href="/?logout=1" target="_self" '
+        f'title="Switching signs you out - sign back in for the other mode. '
+        f'Demo and Live are fully separate accounts and data now, not just a '
+        f'view toggle.">🔁 Switch to {other_mode}</a>',
+        unsafe_allow_html=True,
+    )
     return env_mode
