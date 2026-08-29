@@ -356,6 +356,56 @@ section[data-testid="stSidebar"] nav span {
 .spflow-plandetail { color: #94A3B8; flex: 1; }
 .spflow-planrate { color: #F1F5F9; font-weight: 600; }
 
+/* Recommendations tab redesign (2026-08-30) - replaced a 5-card list that
+   mostly duplicated RI Coverage/Savings Plan Analysis's own headlines
+   (often with a WORSE $0.0 figure where those tabs already had real
+   pricing - see _render_recommendations_tab()'s own comment) with a
+   single combined savings projection - the one number neither tab can
+   answer alone. Approved via an HTML mockup (Artifact) first; these
+   classes are ported near-verbatim from that mockup (same colors,
+   spacing, gradients) rather than approximated with native st.metric/
+   st.container, specifically to keep the built page close to what was
+   actually approved - real feedback that previous ports had drifted
+   further from their mockups than necessary. */
+.rec-headline-card {
+    background: linear-gradient(160deg, #101A2E 0%, #0D2A22 130%);
+    border: 1px solid rgba(52,211,153,.28); border-radius: 16px; padding: 26px 28px; margin-bottom: 20px;
+}
+.rec-headline-eyebrow { font-size: 11.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: #34D399; margin-bottom: 10px; }
+/* No max-width here (the mockup had 620px, scoped to its own 800px-wide
+   preview container) - real feedback, 2026-08-30: ported literally into
+   the real app, where this card spans much more width, that same cap
+   forced an unnecessarily cramped wrap. Lets the sentence use the card's
+   own real width instead. */
+.rec-headline-sentence { font-size: 22px; font-weight: 700; line-height: 1.35; }
+.rec-headline-sentence b { color: #34D399; }
+.rec-headline-sub { font-size: 12.5px; color: #94A3B8; margin-top: 10px; }
+
+.rec-metric-card { background: #101A2E; border: 1px solid #1E293B; border-radius: 12px; padding: 16px 18px; height: 100%; }
+.rec-metric-card .lbl { font-size: 10.5px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: #526279; margin-bottom: 8px; }
+.rec-metric-card .val { font-size: 19px; font-weight: 700; }
+.rec-metric-card .val .unit { font-size: 11px; color: #94A3B8; font-weight: 600; }
+.rec-metric-card .sub { font-size: 11px; color: #94A3B8; margin-top: 4px; }
+.rec-metric-card.combined { border-color: rgba(96,165,250,.35); background: linear-gradient(160deg, #101A2E, #0F1E33); }
+.rec-metric-card.combined .val { color: #60A5FA; }
+
+/* Grouped by destination tab, not one row per recommendation - real
+   feedback, 2026-08-30: RI Coverage owns most categories, so a flat row
+   list repeated "→ RI Coverage" 3-4 times with most of each row empty.
+   One card per destination tab, items listed compactly inside instead. */
+.rec-group-card {
+    background: #101A2E; border: 1px solid #1E293B; border-radius: 10px; padding: 14px 16px; margin-bottom: 10px;
+}
+.rec-group-head { font-size: 12px; font-weight: 700; color: #60A5FA; margin-bottom: 8px; }
+.rec-group-item {
+    display: flex; align-items: center; gap: 10px; padding: 7px 0; font-size: 13px; color: #F1F5F9;
+    border-top: 1px solid rgba(30,41,59,.6);
+}
+.rec-group-item:first-of-type { border-top: none; }
+.rec-group-item .dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.rec-group-item .dot.hi { background: #F87171; }
+.rec-group-item .dot.med { background: #FBBF24; }
+
 /* Sidebar "Log out" / "Switch mode" pseudo-buttons (ui/auth_page.py) - a
    plain <a href>, not st.link_button, which the installed LinkButton.*.js
    bundle confirms hardcodes target="_blank" with no override (every click

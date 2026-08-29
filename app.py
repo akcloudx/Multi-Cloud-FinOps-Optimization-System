@@ -98,10 +98,6 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── Detect active theme for chart adaptation ────────────────────────────────
-_theme_type = st.context.theme.type  # "dark" or "light"
-is_dark_theme = (_theme_type == "dark")
-
 # Initialize Databases (Cached for instant reloads)
 from db.schema import init_db, get_engine
 from db.seed import seed_if_empty, COMPUTE_SP_ELIGIBLE_TYPES, DATABASE_SP_ELIGIBLE_TYPES
@@ -144,7 +140,6 @@ from data.sync_pipeline import run_ingestion_pipeline
 from pricing.retail_pricing import usd, fmt_currency, get_inr_rate
 from pricing.commitment_pricing import get_commitment_prices, MONTH_HOURS
 from pricing.azure_vm_flexibility import get_vm_flexibility_groups
-from ui.charts import get_recommendation_opportunity_chart
 from commitments.existing_commitments import (
     get_existing_savings_plans,
     get_existing_reservations,
@@ -3011,103 +3006,162 @@ def _real_projected_savings():
 # ═══════════════════════════════════════════════════════════════════════════════
 # ANALYZE — RECOMMENDATIONS
 # ═══════════════════════════════════════════════════════════════════════════════
-def _render_recommendations_tab():
-    st.subheader(f"Actionable FinOps Recommendations ({selected_provider})")
-    st.caption("One clear next action per issue - not one card per affected resource.")
-    _finops_tag("Optimize Usage & Cost", "Usage Optimization & Rate Optimization")
+# Which tab actually owns the detail for each recommendation category -
+# used by the pointer rows below instead of re-rendering that detail here.
+_REC_CATEGORY_TAB = {
+    "RI Leakage":                "RI Coverage",
+    "RI Purchase Gap":           "RI Coverage",
+    "RI Pooled Capacity Review": "RI Coverage",
+    "RI Rebalance":              "RI Coverage",
+    "Savings Plan Purchase":     "Savings Plan Analysis",
+    "Savings Plan Leakage":      "Savings Plan Analysis",
+}
 
-    high_count = sum(1 for r in recs if r.get("severity") == "HIGH")
-    med_count  = sum(1 for r in recs if r.get("severity") == "MEDIUM")
-    heuristic_savings_mo = sum(r.get("financial_impact_hr", 0.0) for r in recs) * 730
+
+def _render_recommendations_tab():
+    st.subheader(f"{selected_provider} Savings Opportunity")
+    st.caption(
+        "What implementing the recommended Savings Plan and Reserved Instance purchases would actually "
+        "get you - the one number neither the Savings Plan Analysis nor RI Coverage tab can answer alone."
+    )
+    _finops_tag("Optimize Usage & Cost", "Rate Optimization")
+
+    # Redesigned 2026-08-30 - real user question ("isn't this already
+    # covered under the Reservation section?") that turned out to be right,
+    # traced precisely: every one of the 5 recommendation categories here
+    # already has its own headline on RI Coverage or Savings Plan Analysis
+    # (RI Coverage's own 2026-08-29 redesign already leads with a headline
+    # + badges + the orphaned-RI drain alert as "the most urgent issue" -
+    # the exact triage-first pattern this tab used to also claim as its own
+    # value), and 3 of the 5 (RI Purchase Gap, RI Pooled Capacity Review,
+    # RI Rebalance) carry a hardcoded financial_impact_hr of 0.0 in
+    # generate_recommendations() - meaning this tab's old cards for those
+    # were a WORSE copy (no $ figure) of what RI Coverage already shows
+    # with real pricing via ri_gap_pricing(). The one thing that genuinely
+    # doesn't exist anywhere else: a COMBINED number - RI Coverage only
+    # knows about RI, Savings Plan Analysis only knows about SP, neither
+    # can say what doing BOTH gets you. That combined figure
+    # (_real_projected_savings(), already existed, just buried as one
+    # metric among five redundant cards) is now this tab's entire focus.
+    #
+    # Special-cased below: "Live Connection" recs (no tenant connected / no
+    # sync yet) are operational blockers, not optimization opportunities -
+    # they can't be folded into a savings projection, so they're shown
+    # as-is rather than forced into the layout below.
+    if len(recs) == 1 and recs[0].get("category") == "Live Connection":
+        r = recs[0]
+        st.warning(f"**{r['title']}**\n\n{r['detail']}")
+        st.info(f"**Next step:** {r.get('action', '')}")
+        return
+
+    # Orphaned Capacity dropped entirely, not just its old card - it's
+    # already the FIRST thing RI Coverage shows (a styled st.error() alert,
+    # "the most urgent issue" by that tab's own page-order design), so a
+    # third restatement here (this tab used to have both a card AND count
+    # it into the $ total) added noise, not coverage. real_savings below
+    # never included its $ either (it only ever summed SP/RI PURCHASE
+    # savings, not drain-avoidance) - unlike the old heuristic fallback,
+    # which used to fold it in inconsistently.
+    actionable = [r for r in recs if r.get("type") != "OPTIMAL" and r.get("category") != "Orphaned Capacity"]
+
+    if not actionable:
+        st.success(f"✅ Commitment portfolio is optimally configured for {selected_provider} - no additional Savings Plan or Reserved Instance purchases recommended right now.")
+        return
 
     # Two savings figures exist in this app: this heuristic total (a rough,
     # always-available safety-buffer estimate) and the real commitment-
-    # pricing-based projection below (accurate, but needs cached Azure
-    # pricing to compute). Previously these lived in two different tabs
-    # showing two different numbers for a similarly-worded metric - a real
-    # source of confusion. Now: the real figure REPLACES the heuristic one
-    # in the headline metric whenever it's available, with the heuristic
-    # kept only as an always-on fallback - one trustworthy number, not two
-    # competing ones.
+    # pricing-based projection (accurate, but needs cached pricing to
+    # compute) - the real figure REPLACES the heuristic one whenever it's
+    # available, one trustworthy number, not two competing ones.
     real_savings = _real_projected_savings()
+    heuristic_savings_mo = sum(r.get("financial_impact_hr", 0.0) for r in actionable) * 730
     headline_savings_mo = real_savings["total_monthly_savings"] if real_savings else heuristic_savings_mo
-    savings_label = "Total Monthly Savings Potential" if real_savings else "Total Monthly Savings Potential (estimated)"
 
-    with st.container(border=True):
-        rc1, rc2, rc3 = st.columns(3)
-        rc1.metric("Critical Priority Actions", f"{high_count} items", delta="Immediate Action Required" if high_count > 0 else "None", delta_color="inverse" if high_count > 0 else "off")
-        rc2.metric("Purchase / Review Opportunities", f"{med_count} items", delta="Savings Available" if med_count > 0 else "Optimal", delta_color="normal" if med_count > 0 else "off")
-        rc3.metric(savings_label, fmt(headline_savings_mo, 2) + "/mo", delta="Identified Opportunity")
+    baseline_hr = float(
+        inv_raw.loc[inv_raw["Resource State"] == "Running", "PAYG Hourly Cost USD"].sum()
+    ) if not inv_raw.empty else 0.0
+    baseline_mo = baseline_hr * 730
+    pct_of_baseline = (headline_savings_mo / baseline_mo * 100) if baseline_mo > 0 else 0.0
+
+    # No backslash-escaping of "$" here (an earlier version of this code
+    # had one, ported from the Savings Plan Analysis tab's headline where
+    # it's genuinely needed - real bug caught live, 2026-08-30: that
+    # escape is a MARKDOWN-level convention (Streamlit's markdown parser
+    # strips a leading "\" before rendering), but this whole block is raw
+    # HTML via unsafe_allow_html=True - HTML has no such escape sequence,
+    # so the literal backslash character was rendering on screen instead
+    # of being stripped. Plain fmt() output is correct here.
+    pct_note = f" — about {pct_of_baseline:.1f}% of your {fmt(baseline_mo, 2)}/mo on-demand baseline" if baseline_mo > 0 else ""
+    st.markdown(
+        '<div class="rec-headline-card">'
+        '<div class="rec-headline-eyebrow">If implemented</div>'
+        f'<div class="rec-headline-sentence">Implementing the recommended purchases would save '
+        f'<b>{fmt(headline_savings_mo, 2)}/month</b>{pct_note}.</div>'
+        '<div class="rec-headline-sub">'
+        + ("Using real cached commitment pricing where available "
+           f"({real_savings['sp_term']} Savings Plan, {real_savings['ri_term']} RI) - term choices made on "
+           "the Savings Plan Analysis / RI Coverage tabs." if real_savings else
+           "Safety-buffer estimate - real cached commitment pricing isn't available yet for this tenant's SKUs.")
+        + '</div></div>',
+        unsafe_allow_html=True,
+    )
 
     if real_savings:
-        with st.expander("💡 Savings Plan vs. Reserved Instance breakdown (real cached pricing)", expanded=False):
-            st.caption(
-                f"Using the term choices selected on the Savings Plan Analysis tab ({real_savings['sp_term']} for Compute) "
-                f"and the RI Coverage tab ({real_savings['ri_term']}) - change them there to update this."
+        m1, m2, m3 = st.columns(3)
+        with m1:
+            st.markdown(
+                '<div class="rec-metric-card">'
+                f'<div class="lbl">Savings Plan ({real_savings["sp_term"]})</div>'
+                f'<div class="val fl-mono">{fmt(real_savings["sp_monthly_savings"], 2)}<span class="unit">/mo</span></div>'
+                "</div>", unsafe_allow_html=True,
             )
-            b1, b2, b3 = st.columns(3)
-            b1.metric(f"Savings Plan ({real_savings['sp_term']})", fmt(real_savings["sp_monthly_savings"], 2) + "/mo")
-            b2.metric(f"Reserved Instance ({real_savings['ri_term']})", fmt(real_savings["ri_monthly_savings"], 2) + "/mo")
-            b3.metric("Combined Total", fmt(real_savings["total_monthly_savings"], 2) + "/mo")
-    else:
-        st.info(
-            "ℹ️ Real commitment-rate pricing isn't available yet for AWS (or there's no cached pricing for "
-            "this Azure tenant's SKUs) - the figure above is the safety-buffer estimate used for each "
-            "recommendation's individual $ impact below, not a real cached rate.", icon="ℹ️",
+        with m2:
+            st.markdown(
+                '<div class="rec-metric-card">'
+                f'<div class="lbl">Reserved Instance ({real_savings["ri_term"]})</div>'
+                f'<div class="val fl-mono">{fmt(real_savings["ri_monthly_savings"], 2)}<span class="unit">/mo</span></div>'
+                "</div>", unsafe_allow_html=True,
+            )
+        with m3:
+            st.markdown(
+                '<div class="rec-metric-card combined">'
+                '<div class="lbl">Combined Total</div>'
+                f'<div class="val fl-mono">{fmt(real_savings["total_monthly_savings"], 2)}<span class="unit">/mo</span></div>'
+                "</div>", unsafe_allow_html=True,
+            )
+        st.markdown("<div style='margin-bottom:22px;'></div>", unsafe_allow_html=True)
+
+    # Grouped by destination tab, not one row per recommendation - real
+    # feedback, 2026-08-30: with RI Coverage owning most categories, a
+    # flat list repeated "→ RI Coverage" 3-4 times, most of each row's
+    # width empty. One card per tab, items listed compactly underneath,
+    # cuts the repetition and reads as "2 places to go," not "4 rows to
+    # scan." Groups ordered by their own highest-severity item.
+    severity_rank = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
+    groups: dict[str, list] = {}
+    for r in actionable:
+        groups.setdefault(_REC_CATEGORY_TAB.get(r.get("category"), "Other"), []).append(r)
+
+    st.caption("WHERE THIS COMES FROM")
+    for tab_name, items in sorted(
+        groups.items(),
+        key=lambda kv: min(severity_rank.get(r.get("severity"), 3) for r in kv[1]),
+    ):
+        items_sorted = sorted(items, key=lambda r: severity_rank.get(r.get("severity"), 3))
+        rows_html = "".join(
+            '<div class="rec-group-item">'
+            f'<span class="dot {"hi" if r.get("severity") == "HIGH" else "med"}"></span>'
+            f'<span class="txt">{html.escape(r["title"])}</span>'
+            "</div>"
+            for r in items_sorted
         )
-
-    fig_recs = get_recommendation_opportunity_chart(recs, is_dark=is_dark_theme)
-    st.plotly_chart(fig_recs, width="stretch")
-
-    st.divider()
-    actionable = [r for r in recs if r.get("type") != "OPTIMAL"]
-    if not actionable:
-        st.success(f"✅ Commitment portfolio is optimally configured for {selected_provider} - no optimization opportunities detected right now.")
-    else:
-        severity_order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
-        for r in sorted(actionable, key=lambda r: severity_order.get(r.get("severity"), 3)):
-            impact_mo = r.get("financial_impact_hr", 0.0) * 730
-            with st.container(border=True):
-                col_t, col_i = st.columns([3, 1])
-                with col_t:
-                    st.markdown(f"### {r.get('icon', '')} {r['title']}")
-                    st.caption(r.get("category", ""))
-                with col_i:
-                    if impact_mo > 0:
-                        st.markdown(f"#### 💰 {fmt(impact_mo, 2)}/mo")
-                    else:
-                        st.markdown("#### Sizing action")
-                st.markdown(r["detail"])
-                st.info(f"**Next action:** {r.get('action', '')}")
-                items = r.get("items") or []
-                if items:
-                    with st.expander(f"📋 {len(items)} affected resource{'s' if len(items) != 1 else ''}"):
-                        items_df = pd.DataFrame(items)
-                        # Currency-aware (2026-08-29, real feedback) - only
-                        # the Orphaned Capacity recommendation's items carry
-                        # real $ figures today (analysis/engine.py's
-                        # orphan_rows, raw numeric, no currency baked into
-                        # the column name - same reasoning as the RI
-                        # Coverage tab's own drain-alert table above).
-                        # Every other recommendation type's items are plain
-                        # counts/labels, so this is a no-op for them.
-                        for _dcol in ("Daily RI Drain", "Monthly RI Drain"):
-                            if _dcol in items_df.columns:
-                                items_df[_dcol] = items_df[_dcol].apply(lambda x: fmt(x, 2))
-                        st.dataframe(items_df, hide_index=True, width="stretch")
-
-    with st.expander(f"📋 Full recommendation table ({len(recs)} categories)", expanded=False):
-        master_data = [
-            {
-                "Severity": r.get("severity", "LOW"),
-                "Category": r.get("category", ""),
-                "Title": r.get("title", ""),
-                "Next Action": r.get("action", ""),
-                "Est. Monthly Savings": fmt(r.get("financial_impact_hr", 0.0) * 730, 2),
-            }
-            for r in recs
-        ]
-        st.dataframe(pd.DataFrame(master_data), hide_index=True, width="stretch")
+        st.markdown(
+            '<div class="rec-group-card">'
+            f'<div class="rec-group-head">→ {html.escape(tab_name)}</div>'
+            f"{rows_html}"
+            "</div>",
+            unsafe_allow_html=True,
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
