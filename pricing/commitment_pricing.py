@@ -330,16 +330,31 @@ def _fetch_azure_sp_rates(resource_type: str, sku: str, region: str, os_: str, r
 
 
 def _fetch_azure_ri_rates(resource_type: str, sku: str, region: str, os_: str, redundancy: str = "N/A") -> dict:
-    """Returns {"1yr": float|None, "3yr": float|None}, normalized to $/hr:
-    total-term price / (term_months * 730), multiplied first by
-    plan.reservation_multiplier for services priced per-unit rather than
-    per-instance (e.g. SQL Database/MI are priced per vCore, not per
-    database - see pricing/sku_mapping.py). COMPUTE COST ONLY - see
+    """Returns {"1yr": float|None, "3yr": float|None, "confirmed_empty": bool},
+    normalized to $/hr: total-term price / (term_months * 730), multiplied
+    first by plan.reservation_multiplier for services priced per-unit
+    rather than per-instance (e.g. SQL Database/MI are priced per vCore,
+    not per database - see pricing/sku_mapping.py). COMPUTE COST ONLY - see
     _fetch_azure_sp_rates / _compute_only_items for why OS license is
     excluded rather than added back as a surcharge. redundancy selects the
     matching meter the same way as the Consumption side - see
-    _filter_by_redundancy."""
-    result = {"1yr": None, "3yr": None}
+    _filter_by_redundancy.
+
+    "confirmed_empty" (2026-08-30) - a REAL, durable "this exact SKU has no
+    Reservation offering in this exact region" fact, distinct from every
+    other reason this function can return no rates (unsupported plan,
+    missing sku/region, a transient API exception - all genuinely "we
+    don't know", not "we know it's unavailable"). Added after a real,
+    live-confirmed case: analysis/ri_eligibility.py's static per-family
+    guesswork had both NP-series and HC-series VMs hardcoded as globally
+    ineligible, when they're actually real, purchasable Reservation
+    products - just region-restricted to where that specialized hardware
+    is deployed (NP: US West 2; HC: CA Central, UK South). A static list
+    checked against one region can't see that; a live per-region result
+    can. True ONLY in the one branch below where the query genuinely
+    executed and came back with zero matching Reservation items - every
+    other early return leaves this False (unknown, not confirmed)."""
+    result = {"1yr": None, "3yr": None, "confirmed_empty": False}
     if not sku or sku == "N/A" or not region:
         return result
 
@@ -364,6 +379,7 @@ def _fetch_azure_ri_rates(resource_type: str, sku: str, region: str, os_: str, r
     ri_items = _exclude_noise_meters(ri_items)
     ri_items = _filter_by_redundancy(ri_items, redundancy)
     if not ri_items:
+        result["confirmed_empty"] = True
         return result
 
     ri_os_matched = _compute_only_items(ri_items, plan, os_)
@@ -449,8 +465,16 @@ _ELASTICACHE_RI_RESOURCE_TYPES = {
 
 def _upsert(session: Session, cached: dict, provider: str, instrument: str,
             resource_type: str, region: str, sku: str, os_: str, redundancy: str, term: str,
-            hourly_rate: Optional[float], payg_rate: Optional[float], now_iso: str):
-    if hourly_rate is None:
+            hourly_rate: Optional[float], payg_rate: Optional[float], now_iso: str,
+            confirmed_empty: bool = False):
+    # confirmed_empty (2026-08-30) lets a row get written even with
+    # hourly_rate=None - see _fetch_azure_ri_rates' own docstring for why
+    # this distinction matters (a live-confirmed "no offering here" is
+    # real, durable information, not the same as "never checked"). A row
+    # existing at all (regardless of whether its rate is null) now means
+    # "we have live information about this exact combo" - a MISSING row
+    # still means "genuinely unknown," the same as before this change.
+    if hourly_rate is None and not confirmed_empty:
         return
     key = (provider, instrument, resource_type, region, sku, os_, redundancy, term)
     row = cached.get(key)
@@ -529,8 +553,9 @@ def refresh_commitment_prices(engine, resource_rows: list[dict], provider: str =
                 _upsert(session, cached, provider, "SavingsPlan", resource_type, region, sku, os_, redundancy, "3yr", sp_rates.get("3yr"), sp_rates.get("payg"), now_iso)
             if ri_rates:
                 payg_for_ri = (sp_rates or {}).get("payg")
-                _upsert(session, cached, provider, "ReservedInstance", resource_type, region, sku, os_, redundancy, "1yr", ri_rates.get("1yr"), payg_for_ri, now_iso)
-                _upsert(session, cached, provider, "ReservedInstance", resource_type, region, sku, os_, redundancy, "3yr", ri_rates.get("3yr"), payg_for_ri, now_iso)
+                ri_confirmed_empty = ri_rates.get("confirmed_empty", False)
+                _upsert(session, cached, provider, "ReservedInstance", resource_type, region, sku, os_, redundancy, "1yr", ri_rates.get("1yr"), payg_for_ri, now_iso, confirmed_empty=ri_confirmed_empty)
+                _upsert(session, cached, provider, "ReservedInstance", resource_type, region, sku, os_, redundancy, "3yr", ri_rates.get("3yr"), payg_for_ri, now_iso, confirmed_empty=ri_confirmed_empty)
 
         session.commit()
 

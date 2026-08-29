@@ -61,6 +61,47 @@ def _lookup_rate(prices_df: pd.DataFrame, instrument: str, term: str, resource_t
     return float(m.iloc[0]["effective_hourly_rate_usd"])
 
 
+def check_live_ri_availability(prices_df: pd.DataFrame, resource_type: str, region: str, sku: str, os_: str, redundancy: str = "N/A"):
+    """Real, per-region RI eligibility signal from the live-synced pricing
+    cache, added 2026-08-30 alongside pricing/commitment_pricing.py's new
+    "confirmed_empty" cache writes - see that module's own docstring for
+    the concrete NP-series/HC-series bug this exists to fix (both globally
+    excluded by a static per-family list built from a single-region scan,
+    when they're actually real, region-restricted Reservation products).
+
+    Returns:
+      True  - a row exists (either term) with a REAL cached rate: this
+              exact (resource_type, region, sku, os, redundancy) has been
+              live-confirmed to have a genuine Reservation offering.
+      False - a row exists (either term) but the rate is null: a live
+              query genuinely ran and found nothing for this exact combo
+              (pricing/commitment_pricing.py's "confirmed_empty" case) -
+              this is real, durable negative information, not a guess.
+      None  - no row at all for this combo: genuinely unknown (never
+              synced, or this SKU/region hasn't been queried yet) - the
+              caller should fall back to the static family-level rules,
+              same as before this function existed.
+
+    This is intentionally SKU/region-EXACT, not family-level - it can only
+    speak for combos this tenant's own sync has actually touched. A live
+    False here is authoritative for eligibility purposes; a None is not a
+    verdict, just missing information.
+    """
+    if prices_df is None or prices_df.empty:
+        return None
+    m = prices_df[
+        (prices_df["instrument"] == "ReservedInstance") &
+        (prices_df["resource_type"] == resource_type) &
+        (prices_df["region"] == region) &
+        (prices_df["sku"] == sku) &
+        (prices_df["os"] == os_) &
+        (prices_df["redundancy"] == (redundancy or "N/A"))
+    ]
+    if m.empty:
+        return None
+    return bool(m["effective_hourly_rate_usd"].notna().any())
+
+
 def _lookup_payg(prices_df: pd.DataFrame, resource_type: str, region: str, sku: str, os_: str, redundancy: str = "N/A"):
     """The PAYG rate cached alongside the commitment rates, from the exact
     same API snapshot - deliberately preferred over whatever PAYG number
@@ -234,6 +275,41 @@ def ri_gap_pricing(coverage_table: pd.DataFrame, inv_raw: pd.DataFrame, prices_d
                 savings.append(None)
         out[rate_col] = rates
         out[savings_col] = savings
+
+    # Real cross-tab inconsistency caught live, 2026-08-30 (user directly
+    # compared two pages and found they disagreed): every consumer of this
+    # function's Monthly Savings columns implicitly assumes "priced" means
+    # the SAME thing everywhere - but before this pass, a row priced for
+    # ONE term and not another (e.g. a real demo case: "Azure Disk
+    # Storage" had a cached 1-Year rate but no 3-Year rate) contributed to
+    # ONE term's savings sum but not the other's, silently. That's fine in
+    # isolation for a single-term total, but the RI Coverage tab shows
+    # BOTH terms' totals side by side ("Total commitment if purchased:
+    # 1-Year $X - 3-Year $Y") and the Recommendations tab's combined-
+    # savings projection (combined_monthly_savings(), below) independently
+    # sums whichever ONE term it's asked for - two pages, each claiming to
+    # describe "RI savings for N resources," silently built from different
+    # row counts depending on which one happened to have that specific
+    # term's rate cached. Confirmed via a direct script: RI Coverage's own
+    # 1-Year figure and Recommendations' 1-Year figure disagreed ($312.02
+    # vs $318.77) the moment this restriction lived only in app.py's RI
+    # Coverage rendering code instead of here, the one shared function
+    # every consumer actually reads from.
+    #
+    # Fixed at the SOURCE, not per-caller: a row must have a real rate for
+    # EVERY term in TERMS to keep ANY term's savings figure - one row
+    # missing pricing for even one term has its savings nulled out for
+    # ALL terms, not just the missing one. This makes "priced" mean the
+    # exact same population everywhere this function's output is
+    # consumed, so RI Coverage's headline, its Total Commitment line, and
+    # Recommendations' combined total can never drift apart again just
+    # because one caller remembered a restriction another didn't.
+    term_rate_cols = [f"RI Rate {TERM_LABELS[t]} ($/hr)" for t in TERMS]
+    term_savings_cols = [f"Monthly Savings if Purchased ({TERM_LABELS[t]})" for t in TERMS]
+    _missing_some_term = out[term_rate_cols].isna().any(axis=1)
+    for savings_col in term_savings_cols:
+        out.loc[_missing_some_term, savings_col] = None
+
     return out
 
 

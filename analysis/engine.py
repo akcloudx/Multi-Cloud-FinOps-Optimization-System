@@ -841,6 +841,34 @@ def _apply_aws_size_flexibility(merged: pd.DataFrame) -> pd.DataFrame:
     # a real 0.0 rather than a missing column/NaN on Azure rows, non-
     # eligible AWS rows, or rows never grouped below.
     merged["partial_ri_credit_fraction"] = 0.0
+    # "Flexibility" column (2026-08-30, real feedback: a row like "0
+    # running, 1 reserved, Fully Covered" looked like a contradiction until
+    # traced live - the reservation's own capacity had been reallocated to
+    # cover a DIFFERENT SKU in the same flexibility group, invisible
+    # anywhere in the table). Three states, set uniformly here (same
+    # "every row gets a real value, never a missing column" discipline as
+    # partial_ri_credit_fraction above) then narrowed below as each row's
+    # real disposition becomes known: "N/A" (this service/row has no
+    # flexibility concept at all - the default, e.g. every non-EC2/RDS
+    # row), "Not Flexible" (EC2/RDS but excluded by a real rule - non-
+    # Linux OS, an excluded instance family, an unparseable SKU, or simply
+    # no peer SKU present to flex with right now), "Flexible" (genuinely
+    # grouped with at least one other SKU - this row's capacity CAN move
+    # to/from that group, whether or not it happened to get used this
+    # render).
+    merged["flexibility_status"] = "N/A"
+    # "Flex Group" (2026-08-30, real follow-up feedback: "Flexible" alone
+    # says a row is linked to something else, but not WHICH SKU - a real
+    # practical question with no answer anywhere in this app). A named
+    # label (not a row-to-row link) is the honest granularity: the
+    # underlying mechanic is a SHARED POOL across every SKU in the same
+    # family/class-type, not necessarily one row directly covering
+    # another - a group of 3+ SKUs can have multiple rows jointly
+    # contributing, so claiming "covered by SKU X specifically" would be
+    # fabricating precision the real allocation doesn't have. Matching on
+    # this text across rows (same family, same Region column already
+    # shown) is how a reader finds the rest of the group.
+    merged["flex_group_label"] = ""
 
     is_ec2 = merged["Resource Type"] == "Amazon EC2"
     is_rds = merged["Resource Type"].isin(_RDS_FLEX_ELIGIBLE_TYPES)
@@ -854,30 +882,44 @@ def _apply_aws_size_flexibility(merged: pd.DataFrame) -> pd.DataFrame:
         row = merged.loc[idx]
         if row["Resource Type"] == "Amazon EC2":
             if row["OS"] != "Linux":
+                merged.at[idx, "flexibility_status"] = "Not Flexible"
                 continue
             parsed = _parse_ec2_sku(row["SKU"])
             if parsed is None:
+                merged.at[idx, "flexibility_status"] = "Not Flexible"
                 continue
             family, size = parsed
             if family in _EC2_FLEX_EXCLUDED_FAMILIES:
+                merged.at[idx, "flexibility_status"] = "Not Flexible"
                 continue
             key = ("EC2", row["Region"], family)
             units = _EC2_NORM_FACTOR[size]
         else:
             parsed = _parse_rds_sku(row["SKU"])
             if parsed is None:
+                merged.at[idx, "flexibility_status"] = "Not Flexible"
                 continue
             class_type, size = parsed
             units = _rds_norm_factor(size, row["Redundancy"])
             if units is None:
+                merged.at[idx, "flexibility_status"] = "Not Flexible"
                 continue
             key = ("RDS", row["Region"], row["Resource Type"], class_type)
         groups.setdefault(key, []).append(idx)
         norm_units[idx] = units
 
-    for idx_group in groups.values():
+    for group_key, idx_group in groups.items():
         if len(idx_group) < 2:
-            continue  # only one SKU present in this family/class-type - nothing to reconcile
+            # Only one SKU present in this family/class-type right now -
+            # eligible in principle, but nothing to actually reconcile
+            # against, so it behaves identically to a non-flexible row.
+            for i in idx_group:
+                merged.at[i, "flexibility_status"] = "Not Flexible"
+            continue
+        group_label = f"{group_key[2]} family" if group_key[0] == "EC2" else f"{group_key[3]} class"
+        for i in idx_group:
+            merged.at[i, "flexibility_status"] = "Flexible"
+            merged.at[i, "flex_group_label"] = group_label
         rows = [
             {"idx": i, "running_count": int(merged.at[i, "running_count"]),
              "reserved_qty": int(merged.at[i, "reserved_qty"]), "norm_units": norm_units[i]}
@@ -964,6 +1006,15 @@ def _apply_azure_vm_size_flexibility(merged: pd.DataFrame, flex_groups_df: pd.Da
     has_own_reservation = merged["reserved_qty"] > 0
     excluded_locked = has_own_reservation & (flex_value != "On")
     candidate_mask = is_compute & ~excluded_locked
+    # "flexibility_status" (2026-08-30) - see _apply_aws_size_flexibility's
+    # own comment for the full rationale; this column was already
+    # initialized to "N/A" for every row there (that function always runs
+    # first in reservation_analysis()). A Compute row that's locked out
+    # here (an "Off"/unknown reservation on a profile that already owns
+    # one) genuinely IS eligible for the flexibility CONCEPT, just
+    # excluded for this specific reason - "Not Flexible", not the generic
+    # "N/A" default a non-Compute row keeps.
+    merged.loc[is_compute & excluded_locked, "flexibility_status"] = "Not Flexible"
     if not candidate_mask.any():
         return merged
 
@@ -978,15 +1029,24 @@ def _apply_azure_vm_size_flexibility(merged: pd.DataFrame, flex_groups_df: pd.Da
         row = merged.loc[idx]
         found = group_lookup.get((row["Region"], row["SKU"]))
         if found is None:
+            merged.at[idx, "flexibility_status"] = "Not Flexible"
             continue
         group_name, ratio = found
         key = ("VM", row["Region"], group_name)
         groups.setdefault(key, []).append(idx)
         norm_units[idx] = ratio
 
-    for idx_group in groups.values():
+    for group_key, idx_group in groups.items():
         if len(idx_group) < 2:
-            continue  # only one SKU present in this flexibility group - nothing to reconcile
+            # Only one SKU present in this flexibility group right now -
+            # eligible in principle, but nothing to actually reconcile
+            # against, so it behaves identically to a non-flexible row.
+            for i in idx_group:
+                merged.at[i, "flexibility_status"] = "Not Flexible"
+            continue
+        for i in idx_group:
+            merged.at[i, "flexibility_status"] = "Flexible"
+            merged.at[i, "flex_group_label"] = group_key[2]
         rows = [
             {"idx": i, "running_count": int(merged.at[i, "running_count"]),
              "reserved_qty": int(merged.at[i, "reserved_qty"]) if flex_value.at[i] == "On" else 0,
@@ -1004,19 +1064,75 @@ def _apply_azure_vm_size_flexibility(merged: pd.DataFrame, flex_groups_df: pd.Da
     return merged
 
 
-def _finalize_coverage_layer(merged: pd.DataFrame) -> pd.DataFrame:
+def _aggregate_supply_by_profile(supply: pd.DataFrame, keys: list) -> pd.DataFrame:
+    """Collapses multiple separate commitment rows sharing the exact same
+    profile (identical join-key tuple) into one row per profile, summing
+    reserved_qty - a real, severe bug fixed here 2026-08-30, found while
+    auditing this module for production readiness. Without this, a tenant
+    with 2+ SEPARATE RI purchases for the identical SKU/region/OS (routine
+    in real production - RIs are typically bought incrementally over time,
+    not as one combined transaction) produced ONE OUTPUT ROW PER COMMITMENT
+    from the outer join in reservation_analysis() below, each carrying the
+    SAME FULL running_count and only ITS OWN commitment's reserved_qty -
+    overstating gap by a multiple of however many separate purchases
+    existed for that profile, not caught by the curated demo data (which
+    happens to have exactly one commitment per profile everywhere).
+    Confirmed via a synthetic script: 10 running instances covered by two
+    separate purchases of 4 each (8 total, real gap 2) produced two rows
+    each independently showing gap=6 (10-4), rather than one row showing
+    the correct gap=2 (10-8) - this fed directly into the RI Coverage
+    tab's badges/table AND generate_recommendations()'s "RI Purchase Gap"
+    card (analysis/engine.py's own instance_gaps["gap"].sum()), so the
+    error wasn't confined to one display, it inflated both the coverage
+    gap count and the "n_profiles" count app-wide.
+
+    Per-commitment columns not needed downstream (commitment_id,
+    hourly_usd_commitment, term, expiry_date - confirmed via a repo-wide
+    grep: the "Active Reservation Contracts" table sources these straight
+    from raw ri_df, never from this coverage table) are dropped by this
+    aggregation; only reserved_qty (summed) and instance_flexibility
+    (kept "On" only if EVERY commitment folded into this one profile is
+    "On" - a mixed batch is conservatively treated as not-uniformly-
+    flexible rather than guessed, same "can't determine, don't guess"
+    discipline _apply_azure_vm_size_flexibility already applies to an
+    unknown/missing value) survive into the merge.
+    """
+    if supply.empty:
+        return supply
+    agg = {"reserved_qty": "sum"}
+    if "instance_flexibility" in supply.columns:
+        agg["instance_flexibility"] = lambda s: "On" if (s == "On").all() else ""
+    return supply.groupby(keys, as_index=False).agg(agg)
+
+
+def _finalize_coverage_layer(merged: pd.DataFrame, prices_df: pd.DataFrame = None) -> pd.DataFrame:
     """Shared eligibility/coverage-model/gap-zeroing finalization applied to
     a demand-supply merged DataFrame, regardless of which layer produced it
     (main tenant-wide, Global-scope, or the Single subscription/resource
     group scoped layers added 2026-08-23) - factored out so each layer's own
     join logic (which genuinely differs - different key columns per layer)
-    doesn't have to duplicate this identical ~20-line finalization block."""
+    doesn't have to duplicate this identical ~20-line finalization block.
+
+    prices_df (2026-08-30, optional) - the tenant's own synced
+    CommitmentPriceCache rows, threaded through to check_eligibility() so
+    it can check a live, per-region signal before falling back to the
+    static rules in analysis/ri_eligibility.py - see that function's own
+    docstring for why this matters (a static family-level guess is a real
+    maintenance liability; live data for combos this tenant has actually
+    synced is authoritative). None (the default, and every existing call
+    site until app.py's own callers were updated) preserves the exact
+    prior behavior - static rules only."""
     if merged.empty:
         merged["is_eligible"] = pd.Series(dtype=bool)
         merged["eligibility_reason"] = pd.Series(dtype=str)
         merged["coverage_model"] = pd.Series(dtype=str)
         return merged
-    elig = merged.apply(lambda r: check_eligibility(r["Resource Type"], r["SKU"]), axis=1)
+    elig = merged.apply(
+        lambda r: check_eligibility(
+            r["Resource Type"], r["SKU"], r.get("Region"), r.get("OS"), r.get("Redundancy"), prices_df,
+        ),
+        axis=1,
+    )
     merged["is_eligible"]        = elig.apply(lambda t: t[0])
     merged["eligibility_reason"] = elig.apply(lambda t: t[1])
     merged.loc[~merged["is_eligible"], "gap"] = 0
@@ -1039,6 +1155,7 @@ def reservation_analysis(
     inventory_df: pd.DataFrame,
     ri_df:        pd.DataFrame,
     flex_groups_df: pd.DataFrame = None,
+    prices_df: pd.DataFrame = None,
 ) -> RIAnalysisResult:
     """
     Gap / excess analysis for ALL Azure Reserved Instance / Reserved Capacity types.
@@ -1062,6 +1179,13 @@ def reservation_analysis(
     different redundancy would be silently pooled into one demand bucket,
     understating a real coverage gap on whichever one the reservation
     doesn't actually apply to.
+
+    prices_df (2026-08-30, optional): the tenant's own CommitmentPriceCache
+    rows, threaded through to every _finalize_coverage_layer() call below
+    so eligibility can consult live, per-region pricing data before
+    falling back to analysis/ri_eligibility.py's static rules - see that
+    module's check_eligibility() for the full rationale. None (the
+    default) preserves the exact prior static-only behavior.
 
     flex_groups_df (2026-08-29): the AzureVmFlexibilityGroup cache, read
     via pricing/azure_vm_flexibility.py::get_vm_flexibility_groups(engine)
@@ -1208,6 +1332,11 @@ def reservation_analysis(
         # field (should be rare/never for this app's demo-only Commitment
         # data, but avoids silently dropping coverage for old rows).
         supply = _resolve_missing_resource_type(supply, inventory_df)
+        # Collapses multiple separate commitment rows sharing one profile
+        # into one - see _aggregate_supply_by_profile's own docstring for
+        # the real bug this fixes (2+ RI purchases for the same SKU
+        # duplicating running_count across one output row per purchase).
+        supply = _aggregate_supply_by_profile(supply, ["Resource Type", "SKU", "Region", "OS", "Redundancy"])
 
     # Merge demand + supply on all 5 dimensions
     merged = demand.merge(
@@ -1223,7 +1352,7 @@ def reservation_analysis(
     # isn't a "gap", it's simply out of scope for this program. Zeroing gap here
     # also keeps generate_recommendations() from suggesting a purchase that
     # Azure wouldn't actually let you make.
-    merged = _finalize_coverage_layer(merged)
+    merged = _finalize_coverage_layer(merged, prices_df)
 
     # AWS EC2/RDS RI instance-size-flexibility reconciliation (2026-08-29) -
     # see _apply_aws_size_flexibility's own docstring and this module's
@@ -1287,6 +1416,7 @@ def reservation_analysis(
         ]].copy()
         global_supply["Redundancy"] = global_supply["Redundancy"].fillna("N/A")
         global_supply = _resolve_missing_resource_type(global_supply, inventory_df)
+        global_supply = _aggregate_supply_by_profile(global_supply, ["Resource Type", "SKU", "OS", "Redundancy"])
 
         global_merged = global_demand.merge(
             global_supply, on=["Resource Type", "SKU", "OS", "Redundancy"], how="outer"
@@ -1296,7 +1426,7 @@ def reservation_analysis(
         global_merged["reserved_qty"]  = global_merged["reserved_qty"].astype(int)
         global_merged["gap"]           = (global_merged["running_count"] - global_merged["reserved_qty"]).clip(lower=0)
         global_merged["excess"]        = (global_merged["reserved_qty"] - global_merged["running_count"]).clip(lower=0)
-        global_merged = _finalize_coverage_layer(global_merged)
+        global_merged = _finalize_coverage_layer(global_merged, prices_df)
 
         merged = pd.concat([merged, global_merged], ignore_index=True)
 
@@ -1360,6 +1490,7 @@ def reservation_analysis(
             ]].copy()
             sub_supply["Redundancy"] = sub_supply["Redundancy"].fillna("N/A")
             sub_supply = _resolve_missing_resource_type(sub_supply, inventory_df)
+            sub_supply = _aggregate_supply_by_profile(sub_supply, ["Resource Type", "SKU", "Region", "OS", "Redundancy", "Subscription"])
 
             sub_merged = sub_demand.merge(
                 sub_supply, on=["Resource Type", "SKU", "Region", "OS", "Redundancy", "Subscription"], how="outer"
@@ -1368,7 +1499,7 @@ def reservation_analysis(
             sub_merged["reserved_qty"]  = sub_merged["reserved_qty"].astype(int)
             sub_merged["gap"]           = (sub_merged["running_count"] - sub_merged["reserved_qty"]).clip(lower=0)
             sub_merged["excess"]        = (sub_merged["reserved_qty"] - sub_merged["running_count"]).clip(lower=0)
-            sub_merged = _finalize_coverage_layer(sub_merged)
+            sub_merged = _finalize_coverage_layer(sub_merged, prices_df)
             merged = pd.concat([merged, sub_merged], ignore_index=True)
 
         if not ri_df_rg_scoped.empty:
@@ -1398,6 +1529,7 @@ def reservation_analysis(
             ]].copy()
             rg_supply["Redundancy"] = rg_supply["Redundancy"].fillna("N/A")
             rg_supply = _resolve_missing_resource_type(rg_supply, inventory_df)
+            rg_supply = _aggregate_supply_by_profile(rg_supply, ["Resource Type", "SKU", "Region", "OS", "Redundancy", "Subscription", "Resource Group"])
 
             rg_merged = rg_demand.merge(
                 rg_supply, on=["Resource Type", "SKU", "Region", "OS", "Redundancy", "Subscription", "Resource Group"], how="outer"
@@ -1406,7 +1538,7 @@ def reservation_analysis(
             rg_merged["reserved_qty"]  = rg_merged["reserved_qty"].astype(int)
             rg_merged["gap"]           = (rg_merged["running_count"] - rg_merged["reserved_qty"]).clip(lower=0)
             rg_merged["excess"]        = (rg_merged["reserved_qty"] - rg_merged["running_count"]).clip(lower=0)
-            rg_merged = _finalize_coverage_layer(rg_merged)
+            rg_merged = _finalize_coverage_layer(rg_merged, prices_df)
             merged = pd.concat([merged, rg_merged], ignore_index=True)
 
     # AWS "Zonal" EC2 Reserved Instances (split off as ri_df_az_scoped above)
@@ -1442,6 +1574,7 @@ def reservation_analysis(
         ]].copy()
         az_supply["Redundancy"] = az_supply["Redundancy"].fillna("N/A")
         az_supply = _resolve_missing_resource_type(az_supply, inventory_df)
+        az_supply = _aggregate_supply_by_profile(az_supply, ["Resource Type", "SKU", "Region", "OS", "Redundancy", "Availability Zone"])
 
         az_merged = az_demand.merge(
             az_supply, on=["Resource Type", "SKU", "Region", "OS", "Redundancy", "Availability Zone"], how="outer"
@@ -1450,7 +1583,7 @@ def reservation_analysis(
         az_merged["reserved_qty"]  = az_merged["reserved_qty"].astype(int)
         az_merged["gap"]           = (az_merged["running_count"] - az_merged["reserved_qty"]).clip(lower=0)
         az_merged["excess"]        = (az_merged["reserved_qty"] - az_merged["running_count"]).clip(lower=0)
-        az_merged = _finalize_coverage_layer(az_merged)
+        az_merged = _finalize_coverage_layer(az_merged, prices_df)
         merged = pd.concat([merged, az_merged], ignore_index=True)
 
     # Orphaned RI drain: Stopped VMs/resources whose profile is covered by an RI.

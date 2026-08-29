@@ -2778,8 +2778,17 @@ def _render_ri_coverage_tab():
         return
 
     def _status(row):
+        # "■" swatch, not an emoji, prepended uniformly (2026-08-30, table
+        # restructure - mockup approved) - a canvas-rendered st.dataframe
+        # cell can only take a plain colored TEXT string (confirmed: no
+        # real background/border-radius support, same ceiling already hit
+        # by Inventory's Power State and Rightsizing's Classification
+        # columns), so a small colored block character is the honest
+        # approximation of a "swatch" achievable here - the whole cell
+        # string (glyph + text) gets one Styler color below, same
+        # technique already proven working, not a new untested mechanism.
         if row["gap"] > 0:
-            base = f"⚠️ Short by {int(row['gap'])}"
+            base = f"■ Short by {int(row['gap'])}"
             # partial_ri_credit_fraction (2026-08-29, analysis/engine.py's
             # size-flexibility reconciliation - both
             # _apply_aws_size_flexibility and, as of the Azure equivalent
@@ -2802,8 +2811,8 @@ def _render_ri_coverage_tab():
                 base += f" · {frac * 100:.0f}% pre-covered"
             return base
         if row["excess"] > 0:
-            return f"ℹ️ {int(row['excess'])} Idle"
-        return "✅ Fully Covered"
+            return f"■ {int(row['excess'])} Idle"
+        return "■ Fully Covered"
 
     cov["Status"] = cov.apply(_status, axis=1)
 
@@ -2835,32 +2844,124 @@ def _render_ri_coverage_tab():
     savings_col = f"Monthly Savings if Purchased ({ri_term_choice})"
     has_pricing_cols = rate_col in instance_cov.columns
 
-    # ── Headline: one answer, badges for the rest ───────────────────────
-    def _md(x: str) -> str:
-        return x.replace("$", "\\$")
+    # One consistent, fully-priced resource set for EVERY dollar figure on
+    # this card (headline savings AND the Total commitment line below) -
+    # real bug caught live, 2026-08-30: computing the headline's savings
+    # from "priced for the currently-selected term" and the Total
+    # commitment line from "priced for every term" silently drew on
+    # different row counts (e.g. one real case: headline summed 4 rows,
+    # commitment summed 3 - a resource with a cached 1-Year rate but no
+    # 3-Year rate). A user reported "I didn't understand the calculation" -
+    # traced to exactly this mismatch. Computed ONCE here, before the
+    # headline, and reused below - no separate "N of M"/"excludes N"
+    # disclosure text either (tried that, real feedback: "too much logic
+    # to remind" for what should be a glance) - the $ figures just quietly
+    # reflect whatever's actually priced, same "can't determine, don't
+    # guess" approach this app already uses everywhere else.
+    gap_rows = instance_cov[instance_cov["gap"] > 0]
+    term_rate_cols = [f"RI Rate {label} ($/hr)" for label in TERM_LABELS.values() if f"RI Rate {label} ($/hr)" in gap_rows.columns]
+    fully_priced = gap_rows.dropna(subset=term_rate_cols) if term_rate_cols else gap_rows.iloc[0:0]
 
+    # ── Headline: one answer, cards for the rest ─────────────────────────
+    # Visual-only refresh, 2026-08-30 (real feedback: match Recommendations/
+    # Savings Plan Analysis's card language) - plain st.markdown "####" +
+    # 4 native st.badge() pills replaced with the same .rec-headline-card /
+    # .rec-metric-card families used everywhere else. Approved via mockup
+    # first. Raw HTML via unsafe_allow_html now (not markdown ":green[]"/
+    # ":orange[]" spans) - same reason Savings Plan Analysis's headline
+    # made this switch: no _md() "$" escaping needed once markdown's KaTeX
+    # math-mode trigger is out of the picture entirely.
     plural = "s" if needs_more != 1 else ""
+    is_warning = False
+    sub = ""
     if needs_more == 0:
-        headline = ":green[You're already well covered] — no additional Reserved Instance purchases recommended right now."
+        sentence = "<b>You're already well covered</b> — no additional Reserved Instance purchases recommended right now."
     else:
-        total_gap_savings = instance_cov.loc[instance_cov["gap"] > 0, savings_col].dropna().sum() if has_pricing_cols else 0.0
+        total_gap_savings = fully_priced[savings_col].dropna().sum() if has_pricing_cols and savings_col in fully_priced.columns else 0.0
         if total_gap_savings > 0:
-            headline = (
-                f"Purchasing RIs for **{needs_more} resource profile{plural}** would save about "
-                f":green[**{_md(fmt(total_gap_savings, 2))}/month**] at the {ri_term_choice} rate."
+            sentence = (
+                f"Purchasing RIs for <b>{needs_more} resource profile{plural}</b> would save about "
+                f"<b>{fmt(total_gap_savings, 2)}/month</b> at the {ri_term_choice} rate."
             )
         else:
-            headline = f":orange[**{needs_more} resource profile{plural}**] {'is' if needs_more == 1 else 'are'} running without a matching Reservation."
-    st.markdown(f"#### {headline}")
+            is_warning = True
+            sentence = f"<b>{needs_more} resource profile{plural}</b> {'is' if needs_more == 1 else 'are'} running without a matching Reservation."
+            sub = "Pricing unavailable for these SKUs right now — the coverage gap is still real."
+    st.markdown(
+        f'<div class="rec-headline-card{" warn" if is_warning else ""}">'
+        '<div class="rec-headline-eyebrow">Reserved Instance Coverage</div>'
+        f'<div class="rec-headline-sentence">{sentence}</div>'
+        + (f'<div class="rec-headline-sub">{sub}</div>' if sub else "")
+        + "</div>",
+        unsafe_allow_html=True,
+    )
 
-    badge_cols = st.columns(4)
-    badge_cols[0].badge(f"{fully_covered} Fully Covered", icon=":material/check_circle:", color="green")
-    badge_cols[1].badge(f"{needs_more} Need More RI", icon=":material/trending_up:", color="orange")
-    badge_cols[2].badge(f"{idle} Idle / Unused", icon=":material/pause_circle:", color="blue")
-    badge_cols[3].badge(f"{not_eligible} Not RI-Eligible", icon=":material/block:", color="gray")
+    # Term toggle moved here, directly under the headline it actually
+    # drives (2026-08-30, real feedback: it used to sit below the drain
+    # alert and coverage table - visually disconnected from the $ figure
+    # in the headline above, which changes when this is clicked, with two
+    # unrelated sections sandwiched in between). Same control, same
+    # session_state key, same downstream reads (ri_term_choice/
+    # ri_term_key/rate_col/savings_col already read live before the
+    # headline was built above) - purely a position change.
+    st.segmented_control(
+        "Model new-purchase pricing at term",
+        options=["1-Year", "3-Year"],
+        default=ri_term_choice,
+        key="ri_term_display",
+        help="Drives the purchase-cost columns below and the Recommendations tab's combined savings projection.",
+    )
+    st.session_state["ri_term_widget"] = ri_term_key
 
-    # ── Orphaned-RI drain alert - moved here, right after the headline/
-    # badges (2026-08-29, real feedback: "too cluttered, too much to
+    # Total $ commitment over the full term, not just the monthly savings -
+    # same real gap Savings Plan Analysis's own headline already flagged
+    # ("the headline says how much you'd SAVE, not what you'd actually be
+    # signing up to PAY") and the same fix: one caption showing both
+    # terms' real total cost side by side, not just the currently-selected
+    # one. Computed per row (not from one blended rate, unlike Savings
+    # Plan's single pool-wide rate) since every gap>0 row here can be a
+    # different SKU/region at a different real reserved rate. Reuses the
+    # SAME fully_priced set the headline above already computed - see that
+    # block's comment for why (both dollar figures on this card now
+    # describe the identical resource set, not independently-filtered
+    # ones).
+    if needs_more > 0 and has_pricing_cols:
+        def _md(x: str) -> str:
+            return x.replace("$", "\\$")
+        term_cost_parts = []
+        for t, label in TERM_LABELS.items():
+            t_rate_col = f"RI Rate {label} ($/hr)"
+            if t_rate_col not in fully_priced.columns:
+                continue
+            hours_in_term = MONTH_HOURS * (12 if t == "1yr" else 36)
+            total_cost = (fully_priced["gap"] * fully_priced[t_rate_col] * hours_in_term).sum()
+            term_cost_parts.append(f"{label} {_md(fmt(total_cost, 0))}")
+        if term_cost_parts:
+            st.caption(f"Total commitment if purchased: {' · '.join(term_cost_parts)}")
+
+    st.divider()
+
+    kpi_cols = st.columns(4)
+    _ri_kpi_cards = [
+        ("savings", "✅ Fully Covered", fully_covered, "no action needed"),
+        ("under", "📈 Need More RI", needs_more, "real gap to close"),
+        ("combined", "⏸️ Idle / Unused", idle, "consider exchanging"),
+        ("neutral", "🚫 Not RI-Eligible", not_eligible, "no Reservation product exists"),
+    ]
+    for col, (tone, label, value, sub_label) in zip(kpi_cols, _ri_kpi_cards):
+        with col:
+            st.markdown(
+                f'<div class="rec-metric-card {tone}">'
+                f'<div class="lbl">{label}</div>'
+                f'<div class="val fl-mono">{value}</div>'
+                f'<div class="sub">{sub_label}</div>'
+                "</div>",
+                unsafe_allow_html=True,
+            )
+    st.divider()
+
+    # ── Orphaned-RI drain alert - promoted here, right after the headline/
+    # stats (2026-08-29, real feedback: "too cluttered, too much to
     # understand" - this was previously the LAST thing on the page, after
     # 8 other sections, even though it's the single most actionable item
     # here (real $ being wasted right now on a stopped resource with an
@@ -2921,20 +3022,6 @@ def _render_ri_coverage_tab():
                 },
             )
 
-    st.segmented_control(
-        "Model new-purchase pricing at term",
-        options=["1-Year", "3-Year"],
-        default=ri_term_choice,
-        key="ri_term_display",
-        help="Drives the purchase-cost columns below and the Recommendations tab's combined savings projection.",
-    )
-    # ri_term_choice/ri_term_key/rate_col/savings_col were already read
-    # live above (before this widget call) and are guaranteed identical to
-    # this widget's value - no need to re-derive them from its return.
-    # Still mirrored into "ri_term_widget" for _real_projected_savings()
-    # (Recommendations tab), which reads it on a later, separate render.
-    st.session_state["ri_term_widget"] = ri_term_key
-
     # Header renamed from "Per-Resource Coverage" (2026-08-29, real
     # feedback: that title stopped being accurate the moment this table
     # gained a "Coverage Type" column that explicitly says some rows are
@@ -2960,7 +3047,7 @@ def _render_ri_coverage_tab():
     st.caption(
         "Each row is one resource profile (SKU + region + OS). \"Coverage Type\" shows how the Reservation "
         "applies - Per-Instance rows are a literal purchase recommendation; Pooled and Volume-Based rows apply "
-        "automatically across your subscription, so treat their Status as a rough signal only (see Note)."
+        "automatically across your subscription, so treat their Status as a rough signal only (see Coverage Rules below)."
     )
     _shown_cov = pd.concat([instance_cov, capacity_cov, unmeasurable_cov], ignore_index=True) \
         if not (instance_cov.empty and capacity_cov.empty and unmeasurable_cov.empty) else pd.DataFrame()
@@ -2971,23 +3058,33 @@ def _render_ri_coverage_tab():
             "running_count": "Running", "reserved_qty": "Reserved",
         }).copy()
         _COVERAGE_TYPE_LABEL = {"instance": "Per-Instance", "capacity": "Pooled", "unmeasurable": "Volume-Based"}
-        # Short phrases, not sentences (2026-08-29, real feedback + a
-        # screenshot showing a different long-text column on this same
-        # table clipped with no closing border when given width="large" -
-        # this table already carries 10 other explicit-width columns, and
-        # a "large" 11th column competing for the remainder isn't reliable
-        # here, same lesson already applied to that other column below.
-        # Sized to the real longest value below (~40 chars) rather than a
-        # relative keyword; the FULL explanation still lives in the
-        # Reservation Coverage Rules expander's per-service cards - this
-        # is a pointer, not a restatement.
-        _COVERAGE_TYPE_NOTE = {
-            "instance": "",
-            "capacity": "Rough signal only, not a purchase instruction",
-            "unmeasurable": "No per-resource gap possible - see Coverage Rules",
-        }
         show["Coverage Type"] = show["coverage_model"].map(_COVERAGE_TYPE_LABEL)
-        show["Note"] = show["coverage_model"].map(_COVERAGE_TYPE_NOTE)
+        # Flexibility column (2026-08-30, real feedback: "0 running, 1
+        # reserved, Fully Covered" looked like a contradiction until traced
+        # live - the reservation's own capacity had been reallocated to
+        # cover a DIFFERENT SKU in the same AWS/Azure size-flexibility
+        # group, invisible anywhere in the table). Sourced directly from
+        # analysis/engine.py's _apply_aws_size_flexibility /
+        # _apply_azure_vm_size_flexibility, which already compute this
+        # exact classification internally to decide what to group - this
+        # just surfaces it instead of discarding it. .get() with a
+        # fallback Series, not show["flexibility_status"] directly - the
+        # column only exists at all when reservation_analysis() actually
+        # ran a flexibility pass (never true for a coverage_table built
+        # from an empty/pre-sync tenant).
+        show["Flexibility"] = show.get("flexibility_status", pd.Series("N/A", index=show.index)).fillna("N/A")
+        # "Flex Group" (2026-08-30, real follow-up: "how do I know WHICH
+        # RI is covering this?") - "Flexible" alone says a row is linked
+        # to something else, not what. Shows the real family/class-type
+        # name (e.g. "Ddsv5 Series", "m5 family") for any row currently
+        # marked Flexible, blank otherwise - match this text across rows
+        # (same Region already shown as its own column) to find the rest
+        # of the group. Deliberately a label, not a row-to-row link: the
+        # real mechanic is a shared pool across every SKU in the group,
+        # not necessarily one specific row covering another - a group of
+        # 3+ SKUs can have several rows jointly contributing.
+        show["Flex Group"] = show.get("flex_group_label", pd.Series("", index=show.index)).fillna("")
+        show.loc[show["Flex Group"] == "", "Flex Group"] = "—"
         # Volume-Based rows' running_count/reserved_qty/gap ARE computed
         # internally (same merge every other row goes through), but
         # deliberately not shown - a service sold in 100 TB/1 PiB blocks
@@ -3044,62 +3141,255 @@ def _render_ri_coverage_tab():
             # and caches, needed as-is for the underlying $ math (gap *
             # (payg - rate) * 730) - only the DISPLAYED value is converted
             # (* 730) and re-labeled via column_config below; nothing about
-            # the actual computation changes. Pooled/Volume-Based rows
-            # already come through as NaN here (ri_gap_pricing() only ever
-            # prices coverage_model == "instance" rows) - "—" for both,
-            # same as a genuinely un-priced Per-Instance row.
+            # the actual computation changes.
+            #
+            # Real inconsistency caught live, 2026-08-30 (user circled it
+            # directly in a screenshot): ri_gap_pricing() only gates
+            # Monthly Savings by coverage_model == "instance" - it prices
+            # RI Rate for EVERY row regardless, since a raw rate lookup
+            # doesn't care whether the row is a literal per-profile
+            # purchase or not. That meant a Pooled row (e.g. "Azure SQL
+            # Managed Instance Pool", coverage_model="capacity") could show
+            # a real-looking "$687.33/mo" Rate with NO Monthly Savings next
+            # to it to justify it - looked like a broken calculation, not
+            # a deliberate choice, and directly contradicts the Coverage
+            # Type column's own tooltip ("Pooled ... not a purchase
+            # instruction"). A prior comment here claimed Pooled rows
+            # "already come through as NaN" for rate too - confirmed false
+            # via a direct script against real demo data (10 of 12 Pooled
+            # rows had a real cached rate). Blanked explicitly here to
+            # match Monthly Savings and the stated Coverage Type semantics:
+            # only Per-Instance rows show either $ column now.
+            #
+            # SAME real inconsistency, second half - also caught live: a
+            # Per-Instance row with gap == 0 (Fully Covered or Idle) could
+            # STILL show a real RI Rate ("Azure Dedicated Host" -
+            # $2,290.67/mo) with no Monthly Savings, for the identical
+            # reason - ri_gap_pricing() only gates Savings by gap > 0, not
+            # Rate. There's nothing to buy on a gap=0 row, so a purchase
+            # rate has no purpose being shown either.
+            _no_purchase_needed = show["coverage_model"] != "instance"
+            if "gap" in show.columns:
+                _no_purchase_needed = _no_purchase_needed | (show["gap"] == 0)
+            show.loc[_no_purchase_needed, rate_col] = pd.NA
             show[rate_col] = show[rate_col].apply(lambda x: fmt(x * 730, 2) if pd.notna(x) else "—")
             show[savings_col] = show[savings_col].apply(lambda x: fmt(x, 2) if pd.notna(x) else "—")
-        cols = ["Service", "SKU / Tier", "Region", "OS", "Coverage Type", "Running", "Reserved", "Status"]
+
+        # Status Category (2026-08-30, table restructure - real feedback:
+        # "structure it properly ... add filter feature like Inventory") -
+        # a bucketed version of the free-text Status column, used ONLY for
+        # filtering below. The real Status carries a per-row number
+        # ("Short by 2", "Short by 5"), which would make a values-
+        # checklist filter list dozens of near-duplicate entries instead
+        # of a clean Fully Covered/Short/Idle/Not tracked bucket.
+        def _status_category(val):
+            if val == "—":
+                return "Not tracked"
+            if "Short by" in val:
+                return "Short"
+            if "Idle" in val:
+                return "Idle"
+            return "Fully Covered"
+        show["Status Category"] = show["Status"].apply(_status_category)
+
+        # ── Filter bar (real feedback: "add filter feature just like what
+        # we have on Inventory") - reuses the same _value_checklist popover
+        # + pill pattern and CSS scoping trick as Inventory's own filter
+        # bar, scoped to this table's own 4 useful dimensions (Service,
+        # Coverage Type, Status, Region) rather than porting Inventory's
+        # whole FOCUS View/Columns-picker/URL-persistence machinery, which
+        # solves problems specific to Inventory (a FOCUS spec view, a much
+        # larger column set) that don't exist on this tab.
+        _ri_filter_specs = [("Service", "Service"), ("Coverage Type", "Coverage Type"), ("Flexibility", "Flexibility"), ("Status Category", "Status"), ("Region", "Region")]
+        _ri_label_to_col = {label: col for col, label in _ri_filter_specs}
+
+        def _ri_filter_opts(label):
+            col = _ri_label_to_col[label]
+            normalized = show[col].astype(str)
+            return normalized, sorted(normalized.unique().tolist())
+
+        def _ri_bump(gen_key):
+            st.session_state[gen_key] = st.session_state.get(gen_key, 0) + 1
+
+        ri_filters_key = "ri_cov_active_filters"
+        if ri_filters_key not in st.session_state:
+            st.session_state[ri_filters_key] = []
+        ri_active_filters = st.session_state[ri_filters_key]
+        _ri_valid_labels = {l for _, l in _ri_filter_specs}
+        if any(f["label"] not in _ri_valid_labels for f in ri_active_filters):
+            ri_active_filters[:] = [f for f in ri_active_filters if f["label"] in _ri_valid_labels]
+
+        with st.container(key="ri_cov_filter_bar"):
+            st.markdown(
+                """<style>
+                div.st-key-ri_cov_filter_bar div[data-testid="stHorizontalBlock"] { gap: 0.5rem; }
+                div.st-key-ri_cov_filter_bar div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] {
+                    width: fit-content !important; flex: 0 0 auto !important; min-width: 0 !important;
+                }
+                div.st-key-ri_cov_filter_bar button[data-testid="stPopoverButton"] {
+                    border-radius: 999px !important; border-color: #263349 !important;
+                    transition: border-color 0.15s ease, background-color 0.15s ease, color 0.15s ease;
+                }
+                div.st-key-ri_cov_filter_bar button[data-testid="stPopoverButton"]:hover {
+                    border-color: rgba(96,165,250,.5) !important; color: #60A5FA !important;
+                }
+                div.st-key-ri_cov_filter_row div[data-testid="stColumn"]:nth-of-type(1) button[data-testid="stPopoverButton"] {
+                    border-style: dashed !important;
+                }
+                div.st-key-ri_cov_filter_row div[data-testid="stColumn"]:nth-of-type(n+2) button[data-testid="stPopoverButton"] {
+                    background-color: rgba(96,165,250,.1) !important; border-color: rgba(96,165,250,.3) !important;
+                    color: #BFDBFE !important;
+                }
+                div.st-key-ri_cov_filter_row div[data-testid="stColumn"]:nth-of-type(n+2) button[data-testid="stPopoverButton"]:hover {
+                    background-color: rgba(96,165,250,.18) !important; border-color: rgba(96,165,250,.55) !important; color: #F1F5F9 !important;
+                }
+                </style>""",
+                unsafe_allow_html=True,
+            )
+            filter_row_container = st.container(key="ri_cov_filter_row")
+            filter_row = filter_row_container.columns(len(ri_active_filters) + 1)
+            with filter_row[0]:
+                add_gen_key = "ri_cov_addfilter_gen"
+                add_gen = st.session_state.get(add_gen_key, 0)
+                with st.popover("Add filter", icon=":material/add:", key=f"ri_cov_addfilter_popover_{add_gen}"):
+                    available = [l for _, l in _ri_filter_specs if l not in [f["label"] for f in ri_active_filters]]
+                    if not available:
+                        st.caption("All filterable fields are already added.")
+                    else:
+                        st.markdown("**Filter results**")
+                        pending_key = "ri_cov_pending_filter_field"
+                        if st.session_state.get(pending_key) not in available:
+                            st.session_state[pending_key] = available[0]
+                        new_label = st.selectbox("Filter", available, key=pending_key)
+                        _, opts = _ri_filter_opts(new_label)
+                        new_values = _value_checklist(opts, key=f"ri_cov_addfilter_{new_label}_{add_gen}", defaults=[])
+                        fc1, fc2 = st.columns(2)
+                        if fc1.button("Apply", type="primary", width="stretch", key=f"ri_cov_addfilter_apply_{new_label}"):
+                            ri_active_filters.append({"label": new_label, "values": new_values})
+                            _ri_bump(add_gen_key)
+                            st.rerun()
+                        if fc2.button("Cancel", width="stretch", key=f"ri_cov_addfilter_cancel_{new_label}"):
+                            _ri_bump(add_gen_key)
+                            st.rerun()
+
+            for i, f in enumerate(list(ri_active_filters)):
+                with filter_row[i + 1]:
+                    summary = "all" if not f["values"] else (f["values"][0] if len(f["values"]) == 1 else f"{len(f['values'])} selected")
+                    edit_gen_key = f"ri_cov_editfilter_gen_{i}"
+                    edit_gen = st.session_state.get(edit_gen_key, 0)
+                    pill_col, x_col = st.columns(2)
+                    with x_col:
+                        if st.button("✕", key=f"ri_cov_editfilter_x_{i}", help=f"Remove {f['label']} filter"):
+                            ri_active_filters.pop(i)
+                            st.rerun()
+                    with pill_col, st.popover(f"{f['label']} equals {summary}", key=f"ri_cov_editfilter_popover_{i}_{edit_gen}"):
+                        _, opts = _ri_filter_opts(f["label"])
+                        st.markdown("**Filter results**")
+                        new_values = _value_checklist(opts, key=f"ri_cov_editfilter_{i}_{edit_gen}", defaults=f["values"])
+                        fc1, fc2 = st.columns(2)
+                        if fc1.button("Apply", type="primary", width="stretch", key=f"ri_cov_editfilter_apply_{i}"):
+                            f["values"] = new_values
+                            _ri_bump(edit_gen_key)
+                            st.rerun()
+                        if fc2.button("Remove filter", width="stretch", key=f"ri_cov_editfilter_remove_{i}"):
+                            ri_active_filters.pop(i)
+                            st.rerun()
+
+        _ri_mask = pd.Series(True, index=show.index)
+        for f in ri_active_filters:
+            normalized, opts = _ri_filter_opts(f["label"])
+            active_vals = f["values"] if f["values"] else opts
+            _ri_mask &= normalized.isin(active_vals)
+        show = show[_ri_mask]
+
+        cols = ["Service", "SKU / Tier", "Region", "OS", "Coverage Type", "Flexibility", "Flex Group", "Running", "Reserved", "Status"]
         if has_pricing_cols:
             cols += [rate_col, savings_col]
-        cols += ["Note"]
         show = show[[c for c in cols if c in show.columns]]
 
-        # Same real pandas.Styler technique already used for the Inventory
-        # tab's Power State and the Rightsizing tab's Classification columns
-        # - color Status instead of adding a badge column, since a
-        # canvas-rendered st.dataframe can't render real badge widgets.
-        def _status_color(val):
-            if val == "—":
-                return "color: #64748B;"
-            if val.startswith("⚠️"):
-                return "color: #FBBF24;"
-            if val.startswith("ℹ️"):
-                return "color: #60A5FA;"
-            return "color: #34D399;"
+        if show.empty:
+            st.caption("No rows match the current filters.")
+        else:
+            # Same real pandas.Styler technique already used for the
+            # Inventory tab's Power State and the Rightsizing tab's
+            # Classification columns - color Status instead of adding a
+            # badge column, since a canvas-rendered st.dataframe can't
+            # render real badge widgets. Matches on substring, not a fixed
+            # prefix (2026-08-30, table restructure) - Status now leads
+            # with a plain "■" swatch glyph on every branch, not a
+            # branch-specific emoji, so the text itself ("Short by"/
+            # "Idle") is what distinguishes color now.
+            def _status_color(val):
+                if val == "—":
+                    return "color: #64748B;"
+                if "Short by" in val:
+                    return "color: #FBBF24;"
+                if "Idle" in val:
+                    return "color: #60A5FA;"
+                return "color: #34D399;"
 
-        styled_show = show.style.map(_status_color, subset=["Status"])
-        st.dataframe(
-            styled_show, hide_index=True, width="stretch", row_height=42,
-            column_config={
-                # Explicit widths for every column (2026-08-29, real
-                # feedback - a full pass across every table on this tab:
-                # sized to this app's own real longest values, same rule
-                # established this session for every other table here.
-                "Service":       st.column_config.TextColumn(pinned=True, width=230),
-                "SKU / Tier":    st.column_config.TextColumn(width=140),
-                "Region":        st.column_config.TextColumn(width=110),
-                "OS":            st.column_config.TextColumn(width=80),
-                "Coverage Type": st.column_config.TextColumn(width=110),
-                "Running":       st.column_config.TextColumn(width=90),
-                "Reserved":      st.column_config.TextColumn(width=90),
-                # Widened 2026-08-29 (was 140) - Status can now carry a
-                # "· NN% pre-covered" partial-credit suffix (see _status()
-                # above), sized to fit that longest realistic real value
-                # rather than a generic guess - same "explicit width sized
-                # to the real longest value" rule established this session.
-                "Status":        st.column_config.TextColumn(width=260),
-                rate_col:        st.column_config.TextColumn(f"RI Rate ({ri_term_choice}) $/mo", width=140),
-                savings_col:     st.column_config.TextColumn("Monthly Savings", width=140),
-                "Note":          st.column_config.TextColumn(width=280),
-            },
-        )
-        if not has_pricing_cols:
-            st.caption(
-                ":material/info: Purchase-cost columns aren't shown - no cached pricing yet for these SKUs; "
-                "re-run a sync from the tenant's Manage dialog on the Home page."
+            styled_show = show.style.map(_status_color, subset=["Status"])
+            st.dataframe(
+                styled_show, hide_index=True, width="stretch", row_height=42,
+                column_config={
+                    # Explicit widths for every column (2026-08-29, real
+                    # feedback - a full pass across every table on this tab:
+                    # sized to this app's own real longest values, same rule
+                    # established this session for every other table here.
+                    "Service":       st.column_config.TextColumn(pinned=True, width=230),
+                    "SKU / Tier":    st.column_config.TextColumn(width=140),
+                    "Region":        st.column_config.TextColumn(width=110),
+                    "OS":            st.column_config.TextColumn(width=80),
+                    # help= replaces the old per-row "Note" column
+                    # (2026-08-30 restructure) - Note was empty for every
+                    # Per-Instance row and only ever carried real content
+                    # for Pooled/Volume-Based rows, duplicating exactly
+                    # what Coverage Type already flags and what the
+                    # Reservation Coverage Rules expander below explains in
+                    # full - a mostly-blank 280px column wasn't earning its
+                    # place. One header tooltip covers the same ground.
+                    "Coverage Type": st.column_config.TextColumn(
+                        width=110,
+                        help="Per-Instance = literal 1-for-1 purchase, directly actionable. Pooled/Volume-Based "
+                             "apply automatically across your subscription - treat their Status as a rough "
+                             "signal, not a purchase instruction. See Reservation Coverage Rules below.",
+                    ),
+                    # Explains why a row's own Running/Reserved numbers can
+                    # look surprising in isolation - "Flexible" means this
+                    # row's reservation can cover (or be covered by) a
+                    # DIFFERENT SKU in the same family, so a low/zero
+                    # Running count next to a real Reserved count isn't
+                    # necessarily a wasted purchase.
+                    "Flexibility": st.column_config.TextColumn(
+                        width=100,
+                        help="Flexible = this reservation's capacity can move to/from other SKUs in the same "
+                             "family (a real Azure/AWS mechanic). Not Flexible = excluded by a specific rule "
+                             "(OS, family, an \"Off\" reservation, no peer SKU right now). N/A = this service "
+                             "has no flexibility concept at all.",
+                    ),
+                    "Flex Group": st.column_config.TextColumn(
+                        width=130,
+                        help="For Flexible rows only: the real family/class-type name shared with the other "
+                             "SKU(s) pooling capacity with this row. Match this text (within the same Region) "
+                             "to find them.",
+                    ),
+                    "Running":       st.column_config.TextColumn(width=90),
+                    "Reserved":      st.column_config.TextColumn(width=90),
+                    # Widened 2026-08-29 (was 140) - Status can now carry a
+                    # "· NN% pre-covered" partial-credit suffix (see _status()
+                    # above), sized to fit that longest realistic real value
+                    # rather than a generic guess - same "explicit width sized
+                    # to the real longest value" rule established this session.
+                    "Status":        st.column_config.TextColumn(width=260),
+                    rate_col:        st.column_config.TextColumn(f"RI Rate ({ri_term_choice}) $/mo", width=140),
+                    savings_col:     st.column_config.TextColumn("Monthly Savings", width=140),
+                },
             )
+            if not has_pricing_cols:
+                st.caption(
+                    ":material/info: Purchase-cost columns aren't shown - no cached pricing yet for these SKUs; "
+                    "re-run a sync from the tenant's Manage dialog on the Home page."
+                )
     else:
         st.caption("No reservation-trackable resources in inventory yet.")
 
@@ -4171,7 +4461,18 @@ def load_benchmark_data(days: int, buffer: float, provider: str, sp_eligible_typ
     wf            = run_waterfall(inv_raw, ri_df, sp_df, simulate_days=days)
     sp_res        = savings_plan_analysis(inv_raw, sp_df, safety_buffer=buffer, eligible_types=list(sp_eligible_types))
     flex_groups_df = get_vm_flexibility_groups(get_engine(provider, "demo")) if provider == "Azure" else None
-    ri_res        = reservation_analysis(inv_raw, ri_df, flex_groups_df)
+    # Region-aware eligibility (2026-08-30) - a live per-region signal from
+    # this tenant's own synced pricing cache overrides the static family
+    # rules in analysis/ri_eligibility.py wherever it exists (see that
+    # module's check_eligibility() for why - a static list is a real
+    # maintenance liability; two real errors, NP-series and HC-series VMs,
+    # were caught precisely because they'd been marked globally ineligible
+    # from a single-region scan). Fetched here rather than reused from the
+    # module-level `prices_df` (app.py, further down) because that variable
+    # doesn't exist yet at the point this cached function is called -
+    # same DB read either way, just done locally instead of threaded in.
+    ri_prices_df = get_commitment_prices(get_engine(provider, "demo"), provider=provider)
+    ri_res        = reservation_analysis(inv_raw, ri_df, flex_groups_df, ri_prices_df)
     # currency/inr_rate (2026-08-29, real feedback) - explicit params on
     # THIS cached function too, not just generate_recommendations() - a
     # @st.cache_data function's return value is cached by its OWN
@@ -4204,7 +4505,12 @@ def load_live_data(provider: str, tenant_id: int, days: int, buffer: float, sp_e
     wf            = run_waterfall(inv_raw, ri_df, sp_df, simulate_days=days)
     sp_res        = savings_plan_analysis(inv_raw, sp_df, safety_buffer=buffer, eligible_types=list(sp_eligible_types))
     flex_groups_df = get_vm_flexibility_groups(get_engine(provider, "live")) if provider == "Azure" else None
-    ri_res        = reservation_analysis(inv_raw, ri_df, flex_groups_df)
+    # Region-aware eligibility (2026-08-30) - see load_benchmark_data's own
+    # comment above for the full rationale. Matters even more here than in
+    # demo mode: a real production tenant's actual region is exactly the
+    # kind of live fact a static, single-region-researched list can't see.
+    ri_prices_df = get_commitment_prices(get_engine(provider, "live"), provider=provider)
+    ri_res        = reservation_analysis(inv_raw, ri_df, flex_groups_df, ri_prices_df)
     # currency/inr_rate - see load_benchmark_data's own comment on why
     # these must be explicit params of THIS cached function, not just
     # generate_recommendations()'s.

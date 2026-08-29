@@ -25,22 +25,44 @@ from typing import Tuple
 
 
 _VM_FAMILY_RE = re.compile(r"^(?:Basic|Standard)_([A-Za-z]+)")
-# Families confirmed live 2026-08 to have ZERO Reservation entries anywhere
-# in the Retail Prices API - a full-catalog scan (all VM Consumption AND
-# Reservation items in eastus, ~12,000 rows across both price types), not a
-# narrow single-query guess (see the DC-series/MI-Hyperscale correction
-# earlier this session for why that distinction matters). A: legacy
-# entry-level series (both Basic_A and Standard_A tiers - spot-checked
-# Basic_A1/G2 directly: current effectiveStartDate, i.e. still an active
-# current meter, genuinely just never had RI enabled). G/GS: legacy 2015-era
-# series, superseded by newer families, no RI ever added. DS: legacy
-# Premium-Storage-suffix naming (mostly superseded by newer Dsv5-style
-# capacity-suffix naming, which DOES have RI - this only affects the old
-# "DS2_v2"-style names specifically). NP: FPGA-accelerated series, no RI.
-# H (base, NOT its HB/HC/HX variants - those DO have RI): older H-series
-# generation. HC: has real Consumption + Savings Plan, but no Reservation.
-# PB: newer AMD-based series, neither RI nor SP found.
-_VM_FAMILIES_NO_RI = {"A", "G", "GS", "DS", "NP", "H", "HC", "PB"}
+# Families with NO Reservation entries anywhere in the Retail Prices API -
+# re-verified 2026-08-30 with a genuinely different methodology than the
+# claim this replaced. The prior version of this set (and its own comment
+# claiming a "full-catalog scan") was checked against ONLY eastus - two
+# real, live-confirmed errors traced directly to that one blind spot: NP
+# and HC both have ZERO entries in eastus but real, currently-active
+# Reservation pricing in the specific regions where that hardware actually
+# exists (NP: US West 2; HC: CA Central and UK South, some effective since
+# 2021) - a single-region scan can prove a family unavailable THERE, never
+# that it's unavailable everywhere. Every family below was re-checked with
+# an UNFILTERED-BY-REGION query (armSkuName eq '<sku>' and priceType eq
+# 'Reservation', no armRegionName clause), which returns real zero-
+# everywhere-or-not-at-all - a query design NP/HC's original check didn't
+# use.
+#   A: Standard_A2_v2 - zero entries, any region.
+#   G: Standard_G2 - zero entries, any region.
+#   GS: Standard_GS2 - zero entries, any region.
+#   DS: Standard_DS2_v2 - zero entries, any region (newer Dsv5-style
+#       capacity-suffix naming DOES have RI - this only affects the old
+#       "DS2_v2"-style names specifically).
+#   H (base, NOT its HB/HC/HX variants): Standard_H8 - zero entries, any
+#       region.
+#   PB: Standard_PB6s - zero entries, any region.
+# NP and HC REMOVED from this set 2026-08-30 (see above - both genuinely
+# have real Reservation pricing, just region-restricted to where that
+# specialized hardware is actually deployed). B also required a real
+# split, not a blanket call either way - see _vm_eligibility() below.
+#
+# Known, disclosed limitation: this whole approach is still family-level,
+# not region-level - a family kept in this set because eastus (or any
+# other single region checked) has zero entries could still have a real,
+# narrow regional exception this pass didn't happen to query for, the
+# exact failure mode that produced the NP/HC errors above. A more correct
+# design would check (family, tenant's actual region) rather than a global
+# per-family yes/no, at the cost of a live API call per distinct region
+# instead of a static set - not implemented here, flagged as a real
+# follow-up rather than silently left as a repeat of the same mistake.
+_VM_FAMILIES_NO_RI = {"A", "G", "GS", "DS", "H", "PB"}
 
 
 def _vm_eligibility(sku: str) -> Tuple[bool, str]:
@@ -50,6 +72,21 @@ def _vm_eligibility(sku: str) -> Tuple[bool, str]:
     s = (sku or "").strip()
     if not s or s == "N/A":
         return True, "Assumed a mainstream VM series with Reserved Instance support (SKU not captured for this resource)."
+    # B-series needed a genuine split, not a single verdict either way -
+    # caught live 2026-08-30 (a user's real Azure pricing calculator
+    # screenshot showed "not available" for a classic Standard_B2ms, which
+    # a first, too-hasty fix generalized to "exclude all B" - a broader
+    # re-check (a full Reservation-price scan across all VM families,
+    # eastus) surfaced Standard_B2pls_v2 and Standard_B32s_v2 WITH real
+    # Reservation pricing, both from the newer "Bpsv2/Bsv2" generation.
+    # Confirmed directly: classic B2ms/B2s/B4ms (no version suffix) all
+    # return zero Reservation entries in any region; the "_v2" generation
+    # is a real, separate, currently-eligible product line, not the same
+    # thing under new naming.
+    if s.startswith(("Standard_B", "Basic_B")):
+        if s.endswith("_v2"):
+            return True, "Newer 'Bpsv2/Bsv2'-generation burstable VMs have a real Reserved Instance offering (confirmed live) - unlike the classic B-series, which does not."
+        return False, "Classic B-series (burstable) VMs have no Reserved Instance offering - confirmed live against the Retail Prices API, zero entries in any region. (The newer '_v2' B-series generation IS eligible - a different, unrelated product line.)"
     m = _VM_FAMILY_RE.match(s)
     family = m.group(1) if m else ""
     if family in _VM_FAMILIES_NO_RI:
@@ -365,10 +402,43 @@ _RULES = {
 }
 
 
-def check_eligibility(resource_type: str, sku: str) -> Tuple[bool, str]:
+def check_eligibility(resource_type: str, sku: str, region: str = None, os_: str = None,
+                       redundancy: str = None, prices_df=None) -> Tuple[bool, str]:
     """Returns (is_eligible, reason). Resource types with no rule encoded yet
     default to eligible with a generic note - we'd rather under-flag than
-    assert a wrong exclusion for a service we haven't researched."""
+    assert a wrong exclusion for a service we haven't researched.
+
+    region/os_/redundancy/prices_df (2026-08-30, all optional, backward
+    compatible with every existing caller that doesn't pass them) - when
+    given, a LIVE, per-region signal from the tenant's own synced pricing
+    cache is checked FIRST and wins over every static rule below. This
+    exists because the static rules in this file are inherently a
+    maintenance liability: they're built from research done at some point
+    against SOME region, and Azure's real catalog can have regional
+    exceptions that research never saw - confirmed live, twice, the same
+    day this parameter was added (NP-series and HC-series VMs were both
+    hardcoded here as globally ineligible, when they're real, purchasable
+    Reservation products just restricted to the specific regions where
+    that hardware is deployed - a single-region scan can prove "not
+    available THERE," never "not available anywhere," and this file's own
+    prior comments had generalized the former into the latter). A live
+    signal is authoritative for the EXACT SKU/region it was fetched for;
+    it says nothing about other regions, so a False here doesn't get
+    written back into the static rules - it only overrides the verdict
+    for resources this tenant's own sync has actually confirmed.
+
+    No live data for this combo (prices_df empty/None, region not given,
+    or nothing synced yet for this SKU) falls through to the exact same
+    static rules as before - this only ever makes an ineligible verdict
+    MORE accurate when live data exists, never less accurate when it
+    doesn't."""
+    if prices_df is not None and region:
+        from analysis.commitment_economics import check_live_ri_availability
+        live = check_live_ri_availability(prices_df, resource_type, region, sku, os_, redundancy or "N/A")
+        if live is True:
+            return True, f"Live-confirmed: a real Reserved Instance rate is currently cached for this exact SKU in {region} - overrides any static assumption below."
+        if live is False:
+            return False, f"Live-confirmed: a live pricing query found zero Reserved Instance offerings for this exact SKU in {region} - real, per-region evidence, not a static guess."
     fn = _RULES.get(resource_type)
     if fn is None:
         return True, f"No specific Azure reservation eligibility rule encoded yet for '{resource_type}' - treat this gap number cautiously."

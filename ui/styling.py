@@ -424,6 +424,12 @@ section[data-testid="stSidebar"] nav span {
 .rec-metric-card.over .val { color: #F87171; }
 .rec-metric-card.savings { border-color: rgba(52,211,153,.3); background: linear-gradient(160deg, #101A2E, #0D2A22); }
 .rec-metric-card.savings .val { color: #34D399; }
+/* RI Coverage's "Not RI-Eligible" card (2026-08-30) - a genuinely neutral
+   state (no Reservation product exists for this service), not good news
+   or a problem, so it gets this app's existing gray token (already used
+   for volume-based "—" placeholders elsewhere) rather than reusing under/
+   over/savings' emotionally-loaded colors. */
+.rec-metric-card.neutral .val { color: #64748B; }
 
 /* Rightsizing Settings popover (2026-08-30) - groups 8 previously-flat
    number inputs into labeled sections (Data Window/CPU/Memory/Safety),
