@@ -3167,12 +3167,15 @@ def _render_recommendations_tab():
 # ═══════════════════════════════════════════════════════════════════════════════
 # ANALYZE — FINOPS MATURITY ASSESSMENT
 # ═══════════════════════════════════════════════════════════════════════════════
+# Plain-language pairing added 2026-08-30 - real feedback that "Crawl/Walk/
+# Run" alone doesn't land without already knowing the term; every place
+# this shows up now pairs it with a plain word, never bare.
 _STAGE_STYLE = {
-    "Run":               ("🟢", "Run"),
-    "Walk":               ("🔵", "Walk"),
-    "Crawl":              ("🟡", "Crawl"),
-    "Below Crawl":        ("🔴", "Below Crawl"),
-    "Not Yet Measurable": ("⚪", "Not Yet Measurable"),
+    "Run":               ("🟢", "Run", "Automated"),
+    "Walk":               ("🔵", "Walk", "Has a process"),
+    "Crawl":              ("🟡", "Crawl", "Manual, basic visibility"),
+    "Below Crawl":        ("🔴", "Below Crawl", "Needs attention"),
+    "Not Yet Measurable": ("⚪", "Not Yet Measurable", "Not tracked yet"),
 }
 
 _CAPABILITY_LINKS = {
@@ -3183,6 +3186,11 @@ _CAPABILITY_LINKS = {
     "Forecasting": "a roadmap item - needs a forecasting model not yet built",
 }
 
+# Usage Optimization/Anomaly Management now carry a real KPI badge (COIN,
+# Anomaly Detection Rate) - reuses st.badge's color enum, same pattern
+# already established on the RI Coverage tab's own badge row.
+_KPI_BADGE_COLOR = {"good": "green", "warn": "orange", "bad": "red"}
+
 
 def _render_maturity_tab():
     st.subheader(f"FinOps Maturity Assessment ({selected_provider})")
@@ -3192,32 +3200,42 @@ def _render_maturity_tab():
     )
     _finops_tag("Manage the FinOps Practice", "FinOps Assessment")
 
+    # Rewritten 2026-08-30 - real feedback ("I didn't understand this") on
+    # the previous version, which led with the industry body ("The FinOps
+    # Foundation... publishes a Maturity Model") before explaining what
+    # the tab actually measures. Now leads with the plain question -
+    # process maturity, not spend - then the stage names, then the
+    # honesty policy, each its own short line rather than one dense
+    # paragraph. Attribution line appended separately below (CC BY 4.0
+    # per the FinOps Foundation's own brand guidance - the Framework's
+    # CONTENT is openly licensed with attribution, distinct from their
+    # separately-protected logo/trademark, which this app doesn't use).
     with st.expander("ℹ️ What is this, and why is it separate from Recommendations?", expanded=True):
         st.markdown(
-            "The **FinOps Foundation** - the industry body behind FinOps, comparable to PMI for project "
-            "management - publishes a **Maturity Model**: a standard rubric with three stages, "
-            "**Crawl → Walk → Run**, and published numeric thresholds for some capabilities "
-            "(e.g. *Commitment Discounts*: Crawl ≥60%, Walk ≥75%, Run ≥80% of eligible spend covered).\n\n"
-            "This is a **different question** than the Recommendations tab. Recommendations answers "
-            "*\"what should I do right now\"*. This tab answers *\"how mature is my cost-optimization "
-            "practice overall, and what capability is worth investing in next.\"* Every score below comes "
-            "from this session's real computed numbers - actual RI/SP coverage %, actual orphaned-resource "
-            "detection - checked against the official published thresholds, never an invented number. "
-            "Where the app doesn't have the underlying data yet (tagging, forecasting), that's shown "
-            "honestly as **Not Yet Measurable** instead of a fake score."
+            "Not how much you spend - **how systematic your process is.** Same spend, same coverage "
+            "% - one tenant checks manually once a quarter, another's automated and continuous. "
+            "Different maturity, same numbers.\n\n"
+            "**Crawl → Walk → Run:** manual visibility → a repeatable process → fully automated.\n\n"
+            "Real numbers only, checked against FinOps Foundation's published criteria. No data yet? "
+            "Shown as **Not tracked yet** - never a fake score."
+        )
+        st.caption(
+            "This tab implements the FinOps Foundation's Capability taxonomy and Maturity Model "
+            "(Domains, Capabilities, Crawl/Walk/Run stages) - Framework content licensed **CC BY 4.0**, "
+            "attributed to the [FinOps Foundation](https://www.finops.org/framework/). This app is an "
+            "independent implementation, not a FinOps Foundation-certified product."
         )
 
-    assessments = run_maturity_assessment(sp_result, ri_result, inv_raw, recs)
+    assessments = run_maturity_assessment(sp_result, ri_result, inv_raw, recs, currency=selected_currency, inr_rate=_inr_rate)
 
     stage_counts = {}
     for a in assessments:
         stage_counts[a.stage] = stage_counts.get(a.stage, 0) + 1
-    k1, k2, k3, k4, k5 = st.columns(5)
-    k1.metric("🟢 Run", stage_counts.get("Run", 0))
-    k2.metric("🔵 Walk", stage_counts.get("Walk", 0))
-    k3.metric("🟡 Crawl", stage_counts.get("Crawl", 0))
-    k4.metric("🔴 Below Crawl", stage_counts.get("Below Crawl", 0))
-    k5.metric("⚪ Not Measurable", stage_counts.get("Not Yet Measurable", 0))
+    for col, stage_key in zip(st.columns(5), _STAGE_STYLE.keys()):
+        icon, label, plain = _STAGE_STYLE[stage_key]
+        with col:
+            st.metric(f"{icon} {label}", stage_counts.get(stage_key, 0))
+            st.caption(plain)
 
     st.info(
         "The Maturity Model's own guidance: *\"focus less on maturing each Capability to 'Run' "
@@ -3228,14 +3246,17 @@ def _render_maturity_tab():
     st.divider()
 
     for a in assessments:
-        icon, label = _STAGE_STYLE.get(a.stage, ("⚪", a.stage))
+        icon, label, plain = _STAGE_STYLE.get(a.stage, ("⚪", a.stage, ""))
         with st.container(border=True):
             c1, c2 = st.columns([3, 1])
             with c1:
                 st.markdown(f"**{a.capability}** · _{a.domain}_")
+                if a.kpi_label:
+                    st.badge(a.kpi_label, color=_KPI_BADGE_COLOR.get(a.kpi_tone, "gray"))
                 st.caption(a.headline)
             with c2:
                 st.markdown(f"### {icon} {label}")
+                st.caption(plain)
             with st.expander("Methodology & evidence", expanded=False):
                 st.caption(a.detail)
                 st.caption(f"**Evidence source:** {a.evidence}")
