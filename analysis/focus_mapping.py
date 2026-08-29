@@ -117,17 +117,17 @@ FOCUS_COLUMN_DEFINITIONS = [
     ("ProviderName", "The company providing the service billed.", "Selected cloud platform."),
     ("InvoiceIssuerName", "The entity issuing the invoice (may differ from ProviderName for resellers).", "Same as ProviderName - no reseller/CSP layer tracked."),
     ("BillingAccountId", "Unique identifier of the overall billing account.", "Subscription / account ID."),
-    ("ChargeCategory", "Highest-level classification of a charge: Usage, Purchase, Tax, Credit, or Adjustment.", "Always 'Usage' - Purchase (commitment buys), Tax, Credit and Adjustment rows aren't unified into this ledger yet."),
+    ("ChargeCategory", "Highest-level classification of a charge: Usage, Purchase, Tax, Credit, or Adjustment.", "Always 'Usage' - Purchase/Tax/Credit/Adjustment rows aren't tracked here yet."),
     ("ResourceId", "Provider-assigned unique identifier of the resource.", "Direct 1:1 mapping."),
     ("ResourceName", "Display name of the resource.", "Direct 1:1 mapping."),
     ("ResourceType", "The specific type of resource, e.g. an instance/SKU family.", "Mapped from the resource's SKU."),
-    ("ServiceName", "The name of the service associated with the charge.", "Mapped from the internal Resource Type field."),
-    ("ServiceCategory", "Highest-level classification of a service by its core function (controlled list).", "Mapped per-service - see _SERVICE_CATEGORY_MAP."),
+    ("ServiceName", "The name of the service associated with the charge.", "Mapped from Resource Type."),
+    ("ServiceCategory", "Highest-level classification of a service by its core function (controlled list).", "Mapped per-service, using this app's own category rules."),
     ("RegionId", "Provider-assigned identifier for the region/location of the resource.", "Direct 1:1 mapping."),
     ("PricingUnit", "The unit a resource is priced in.", "Always 'Hour' - every tracked resource here is hourly PAYG-priced."),
     ("ListUnitPrice", "The list (undiscounted) price per PricingUnit.", "PAYG hourly rate."),
-    ("ListCost", "Cost before any discounts, at list price.", "PAYG hourly rate x (avg. daily running hours / 24) x 730 (monthly estimate, same MONTH_HOURS convention the RI/Savings Plan engines already use)."),
-    ("BilledCost", "The actual invoiced cost, net of discounts, excluding amortization.", "Shown equal to ListCost at this per-resource view - real RI/Savings-Plan discount economics are computed separately (pooled, not per-resource) in the RI Coverage and Savings Plan Analysis tabs."),
+    ("ListCost", "Cost before any discounts, at list price.", "PAYG hourly rate x running hours, converted to a monthly estimate."),
+    ("BilledCost", "The actual invoiced cost, net of discounts, excluding amortization.", "Same as ListCost here - real discounts are computed separately, see RI Coverage / Savings Plan Analysis."),
 ]
 
 

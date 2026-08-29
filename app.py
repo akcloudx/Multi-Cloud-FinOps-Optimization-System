@@ -1909,15 +1909,27 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
         focus_df = to_focus_view(raw_filtered, selected_provider)
         with st.expander(f"ℹ️ FOCUS v{FOCUS_SPEC_VERSION} column reference", expanded=False):
             st.caption(f"Columns below follow the [FinOps Open Cost & Usage Specification]({FOCUS_SPEC_URL}) v{FOCUS_SPEC_VERSION}. Each is mapped from this app's internal schema as noted.")
+            # Explicit widths - real bug caught live, 2026-08-30: this table
+            # had none at all, so its longest "How it's populated here"
+            # values got clipped (screenshot showed ChargeCategory's own
+            # explanation cut off mid-sentence). Sized to this table's own
+            # real longest values, same rule already established for every
+            # other table in this app. The trailing note that used to sit
+            # below this table (BilledCost/EffectiveCost) was removed the
+            # same round - real feedback: it duplicated the BilledCost row
+            # right above almost word-for-word, and its EffectiveCost
+            # mention pointed at a column that isn't shown anywhere in this
+            # table at all (deliberately excluded - see focus_mapping.py's
+            # own module docstring for why), so it referenced something
+            # impossible to actually find.
             st.dataframe(
                 pd.DataFrame(FOCUS_COLUMN_DEFINITIONS, columns=["FOCUS Column", "Spec Definition", "How it's populated here"]),
                 hide_index=True, width="stretch", key=f"{key_prefix}_focus_reference_table",
-            )
-            st.caption(
-                "**Note on BilledCost/EffectiveCost:** BilledCost is shown equal to ListCost at this per-resource "
-                "snapshot. This app *does* compute real discount economics from active RI/Savings-Plan commitments, "
-                "but that math applies against pooled commitments across many resources - see the **RI Coverage** "
-                "and **Savings Plan Analysis** tabs for the actual $ savings, rather than a guessed per-resource split."
+                column_config={
+                    "FOCUS Column":              st.column_config.TextColumn(width=150),
+                    "Spec Definition":            st.column_config.TextColumn(width=330),
+                    "How it's populated here":    st.column_config.TextColumn(width=300),
+                },
             )
         # Explicit, mode-specific key on both this and the normal-mode
         # table below - without one, st.dataframe's identity is inferred
