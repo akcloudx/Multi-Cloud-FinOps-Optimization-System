@@ -46,6 +46,20 @@ if "currency" in st.query_params:
 else:
     initial_currency = "USD"
 
+# _pending_currency takes priority over the query string, same reasoning as
+# _pending_provider below - real bug found 2026-08-30 (a temporary debug
+# caption on the sidebar confirmed it directly): the Home page's "Dash"
+# button calls st.switch_page(analyze_page), which clears st.query_params
+# AND resets the currency widget's own session_state entry on its way to
+# the destination page - "reassert st.query_params every rerun" (the fix
+# that closes this same gap for a plain sidebar-link click) never applied
+# here, since switch_page() doesn't carry that rerun's query params
+# forward into the next page's script execution at all. Set right before
+# switch_page, consumed exactly once here, one rerun later, before the
+# widget ever reads a default - see that button's own comment.
+if "_pending_currency" in st.session_state:
+    initial_currency = st.session_state.pop("_pending_currency")
+
 # Cloud Platform (Azure/AWS) had NO persistence at all before this - a
 # hardcoded default="Azure" and nothing reading/writing query params for it,
 # so it reverted to Azure on every single refresh regardless of what was
@@ -999,6 +1013,17 @@ def page_home():
     st.write("")
     st.markdown("Connect a cloud tenant, review its sync status, or jump into its dashboard - all from Tenant Management.")
     if st.button("Go to Tenant Management", icon=":material/domain:", type="primary"):
+        # Same _pending_currency/_pending_provider relay as the Dash
+        # button's switch_page(analyze_page) call below - found live
+        # 2026-08-30 via the browser: this is a SEPARATE st.switch_page()
+        # call site that never got the same fix, so currency (and
+        # provider - untested before, but switch_page's own behavior is
+        # provider-agnostic, so it's exposed to the identical reset) also
+        # reverted to USD/Azure landing on Tenant Management specifically.
+        # Every st.switch_page() call in this app needs this relay, not
+        # just the one that happened to get reported first.
+        st.session_state["_pending_provider"] = selected_provider
+        st.session_state["_pending_currency"] = selected_currency
         st.switch_page(tenant_mgmt_page)
 
 
@@ -1094,6 +1119,20 @@ def page_tenant_management():
                     # script (see the "provider" persistence comment there) before
                     # the widget ever reads a default, so it can't be stale.
                     st.session_state["_pending_provider"] = selected_provider
+                    # currency needs the identical relay (real bug found
+                    # 2026-08-30 via a temporary debug caption on the
+                    # sidebar: switching to INR on Home, then clicking
+                    # this exact Dash button, landed on the Analyze page
+                    # with currency back to USD - AND session_state's own
+                    # "currency_selector_widget" entry had reset too, not
+                    # just the query string, confirming switch_page()
+                    # really does start a fresh script context here, same
+                    # as it does for provider - the "reassert every
+                    # rerun" fix for a plain sidebar-link click/refresh
+                    # (below, in the sidebar section) never could have
+                    # covered this path, since switch_page() doesn't carry
+                    # THAT rerun's query params forward at all.
+                    st.session_state["_pending_currency"] = selected_currency
                     st.switch_page(analyze_page)
                 if b2.button("Manage", icon=":material/settings:", key=f"home_manage_{t.id}", width="stretch"):
                     st.session_state["_manage_tenant_id"] = t.id
@@ -3682,8 +3721,25 @@ with st.sidebar:
         key="currency_selector_widget",
         help="Toggle between US Dollar and Indian Rupee (live exchange rate).",
     )
+    # Real bug reported 2026-08-29 (screenshot: sidebar caption showed
+    # "Currency USD" and the whole Analyze page priced in USD, right after
+    # clicking a sidebar nav link with INR selected, even though the
+    # toggle widget ITSELF still visually showed INR highlighted). Root
+    # cause: st.segmented_control can transiently return None for one
+    # rerun right after a sidebar nav-link navigation (before the
+    # frontend fully resyncs component state) - the old fallback then
+    # read `initial_currency`, which comes from st.query_params, and
+    # that URL can be stale after a nav-link click (same "sidebar nav
+    # links don't reliably carry query params forward" limitation this
+    # file's own comments already document for the login session token
+    # just below - never fully closed for currency specifically). The
+    # widget's OWN session_state entry stays correct the whole time
+    # (proven by the toggle's own correct visual state in that exact
+    # screenshot) - preferred first, before falling back to the
+    # URL-derived value, which is only reliable on a genuinely fresh
+    # page load (no prior selection to fall back to at all).
     if not selected_currency:
-        selected_currency = initial_currency
+        selected_currency = st.session_state.get("currency_selector_widget") or initial_currency
 
     # Update query parameters to persist selection across page refreshes
     st.query_params["currency"] = selected_currency
