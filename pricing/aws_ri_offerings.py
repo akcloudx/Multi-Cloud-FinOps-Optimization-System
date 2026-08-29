@@ -148,7 +148,19 @@ def fetch_ec2_ri_rates(creds: AWSCredentials, instance_type: str, region: str, o
     anywhere else - Convertible RIs trade a lower discount for the
     ability to exchange instance families, out of scope for a
     per-resource $ estimate). Tenancy fixed to "default" (shared) -
-    this app's inventory doesn't capture Dedicated Host/Instance tenancy."""
+    this app's inventory doesn't capture Dedicated Host/Instance tenancy.
+
+    Tries the bare ProductDescription first (e.g. "Linux/UNIX"), then the
+    "(Amazon VPC)"-suffixed variant only if that returns nothing - a real,
+    disclosed ambiguity found 2026-08-30: the enum has always carried both
+    forms (a EC2-Classic-vs-VPC distinction from before EC2-Classic was
+    fully retired), and without live credentials this app can't confirm
+    which form today's real, currently-sold offerings actually carry.
+    Querying both defensively (rather than guessing one) means a wrong
+    guess degrades to one extra free API call, not a silent all-zero
+    price for every EC2 RI - same "don't let an unresolved ambiguity
+    silently zero out real data" discipline as Azure's own disclosed ISF
+    ratio-property ambiguity."""
     result = {"1yr": None, "3yr": None}
     if not HAS_BOTO3 or not instance_type or not region:
         return result
@@ -159,6 +171,11 @@ def fetch_ec2_ri_rates(creds: AWSCredentials, instance_type: str, region: str, o
             InstanceType=instance_type, ProductDescription=product_description,
             OfferingClass="standard", InstanceTenancy="default", IncludeMarketplace=False,
         ).get("ReservedInstancesOfferings", [])
+        if not offerings:
+            offerings = client.describe_reserved_instances_offerings(
+                InstanceType=instance_type, ProductDescription=f"{product_description} (Amazon VPC)",
+                OfferingClass="standard", InstanceTenancy="default", IncludeMarketplace=False,
+            ).get("ReservedInstancesOfferings", [])
     except (ClientError, BotoCoreError):
         return result
     offerings = [o for o in offerings if o.get("OfferingType") == "No Upfront" and o.get("Scope") == "Region"]

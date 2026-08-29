@@ -568,6 +568,13 @@ AWS_DATABASE_SP_TYPES = {
     "Amazon Neptune Serverless",      # added 2026-08-23 - same confirmation, AWS's Database Savings Plans announcement explicitly calls out Neptune Serverless coverage.
     "Amazon Neptune Analytics",       # added 2026-08-23 - confirmed via AWS's March 2026 announcement extending Database Savings Plans coverage to Neptune Analytics specifically (a separate product from Neptune Database/Neptune Serverless).
     "AWS DMS Serverless",             # added 2026-08-23 - same DMS product family as "AWS DMS Replication Instance" above (already confirmed Database-SP-eligible).
+    # Added 2026-08-30 alongside the Aurora Serverless v2 RI-ineligibility
+    # fix (aws/connector.py::map_rds_engine, analysis/ri_eligibility.py) -
+    # confirmed via AWS's own Database Savings Plans coverage: it applies
+    # flexibly across Aurora (provisioned AND Serverless v2), RDS,
+    # DynamoDB, ElastiCache, DocumentDB, Neptune - explicitly covering
+    # Serverless v2 capacity that cannot be Reserved-Instance-covered.
+    "Amazon Aurora (MySQL Serverless)", "Amazon Aurora (PostgreSQL Serverless)",
 }
 
 # SageMaker AI Savings Plans - a genuinely separate, first-class Savings Plan
@@ -600,6 +607,19 @@ AWS_RI_COVERAGE_NOTES = {
     # Two; BYOL covers both SE2 and Enterprise Edition).
     "Amazon RDS for Oracle (BYOL)": ("RDS DB instance hourly compute capacity (size-flexible within family)", "Storage (GB-month), provisioned IOPS, automated backups, the Oracle license itself (bring your own)"),
     "Amazon RDS for Oracle (License Included)": ("RDS DB instance hourly compute capacity - bundled Oracle Standard Edition Two license (Enterprise Edition has no License Included option)", "Storage (GB-month), provisioned IOPS, automated backups. NOT size-flexible - AWS's own docs exclude License Included from Reserved Instance instance-size flexibility, same restriction as SQL Server"),
+    # Added 2026-08-30 - split out of the flat "Amazon Aurora (MySQL)"/
+    # "(PostgreSQL)" labels once aws/connector.py started detecting the
+    # real "db.serverless" DBInstanceClass (previously silently mislabeled
+    # as ordinary provisioned Aurora, wrongly defaulting to RI-eligible).
+    # NOT RI-eligible - AWS's own docs confirm Reserved Instances apply to
+    # instance-based Aurora only. PAYG rate is currently NOT computed for
+    # this SKU either (shows $0/hr): Aurora Serverless v2 bills by live ACU
+    # usage, not a fixed instanceType the Price List API can look up by -
+    # same class of gap DocumentDB/Neptune Serverless had before their own
+    # dedicated MinCapacity-floor pricing functions were built; not yet
+    # built here, a disclosed follow-up rather than a silent wrong number.
+    "Amazon Aurora (MySQL Serverless)":      ("Not applicable - no Reserved Instance product exists (Serverless v2 bills per-ACU-hour, no fixed instance class to reserve)", "PAYG rate not currently computed either (no fixed instanceType to look up) - live ACU-hour usage stays unpriced until a dedicated capacity-floor pricing function exists"),
+    "Amazon Aurora (PostgreSQL Serverless)": ("Not applicable - no Reserved Instance product exists (Serverless v2 bills per-ACU-hour, no fixed instance class to reserve)", "PAYG rate not currently computed either (no fixed instanceType to look up) - live ACU-hour usage stays unpriced until a dedicated capacity-floor pricing function exists"),
     # Reserved Capacity is a real, current DynamoDB product (confirmed via
     # AWS's own docs - up to 54%/77% off) - genuinely eligible, NOT
     # excluded. But it's purchased and viewed Console-only: dynamodb:

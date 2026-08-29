@@ -279,6 +279,22 @@ def _disk_eligibility(sku: str) -> Tuple[bool, str]:
     return False, f"Premium SSD smaller than P30 ('{sku}') - Azure only sells Disk Reservations from P30 (1 TiB) up."
 
 
+# Added 2026-08-30 during the wider AWS RI audit. Confirmed via AWS's own
+# EC2 Mac Instances FAQ: "available only as On-Demand Instances... not
+# available as Spot Instances or Reserved Instances" - Mac instances are
+# billed per Dedicated Host with a 24-hour minimum allocation (Apple's
+# macOS EULA), and Savings-Plan-eligible instead (both Compute and
+# Instance SP). All real Mac SKUs share this prefix (mac1.metal,
+# mac2.metal, mac2-m2.metal, mac2-m2pro.metal, mac2-m1ultra.metal,
+# mac-m3ultra.metal, mac-m4.metal/m4pro/m4max - confirmed against
+# botocore's own DescribeReservedInstancesOfferings InstanceType enum).
+def _ec2_eligibility(sku: str) -> Tuple[bool, str]:
+    s = (sku or "").strip().lower()
+    if s.startswith("mac"):
+        return False, "EC2 Mac instances have no Reserved Instance offering - confirmed via AWS's own Mac Instances FAQ (available only as On-Demand, billed per Dedicated Host with a 24-hour minimum allocation for Apple's macOS EULA). Eligible for Compute/Instance Savings Plans instead."
+    return True, "EC2 Standard/Convertible Reserved Instances are broadly available across current-generation instance families."
+
+
 _RULES = {
     "Compute":                       _vm_eligibility,
     "Azure SQL Database":            _sql_db_eligibility,
@@ -356,12 +372,29 @@ _RULES = {
     # INeligible resources), but fragile and confusing, not a real EC2
     # rule. This is EC2's own, dedicated rule: EC2 Standard/Convertible
     # Reserved Instances are broadly available across current-generation
-    # instance families (unlike Azure's VM lineup, no confirmed family-wide
-    # RI exclusions are known for EC2 - not a claim this has had the same
-    # full-catalog audit Azure's _VM_FAMILIES_NO_RI got, just that no
-    # exclusion is known, matching the "default eligible" precedent already
-    # used elsewhere in this file for services without a researched gap).
-    "Amazon EC2":                     lambda sku: (True, "EC2 Standard/Convertible Reserved Instances are broadly available across current-generation instance families."),
+    # instance families.
+    # Updated 2026-08-30 during the wider AWS RI audit: unlike Azure's VM
+    # lineup, AWS doesn't publish a static family-exclusion list or expose
+    # an unauthenticated catalog API this app can scan the way Azure's
+    # Retail Prices API allowed - DescribeReservedInstancesOfferings'
+    # InstanceType enum (checked via botocore's service model) includes
+    # Mac/high-memory/P4-P5-Trn instance types too, but that only proves
+    # the API accepts a query for them, not that real offerings exist for
+    # it (the exact same "enum presence isn't proof of a product" trap
+    # already caught for SageMaker's Reserved Capacity above). Mac
+    # instances are the one exclusion with actual documented AWS text
+    # behind it (confirmed via AWS's own EC2 Mac Instances FAQ): "available
+    # only as On-Demand Instances... not available as Spot Instances or
+    # Reserved Instances" - billed per Dedicated Host with a 24-hour
+    # minimum allocation (Apple's macOS EULA), Savings-Plan-eligible
+    # instead (both Compute and Instance SP). High-memory (u-*/u7i-*) and
+    # P4/P5/Trn ML instances were researched too but found NO equivalent
+    # documented exclusion (Capacity Blocks for ML is a real, separate
+    # purchase option for the latter, but nothing found stating it
+    # replaces/excludes standard RIs) - left eligible=True, same
+    # "don't assert an exclusion we can't confirm" discipline as
+    # everywhere else in this file, not a claim they've been fully audited.
+    "Amazon EC2":                     _ec2_eligibility,
     "Amazon DocumentDB":              lambda sku: (False, "Amazon DocumentDB has no Reserved Instance offering - confirmed via boto3's docdb service model (no DescribeReservedDBInstances-equivalent operation exists). Eligible for Database Savings Plans instead."),
     # Added 2026-08-23 alongside DocumentDB Serverless's new live fetch
     # (aws/connector.py) - genuinely can't have an RI even in principle
@@ -395,10 +428,34 @@ _RULES = {
     # without an explicit rule here, so it had been silently defaulting to
     # eligible=True (check_eligibility()'s "no rule encoded yet" fallback),
     # the exact same regression class already caught once for DocumentDB
-    # Serverless. Confirmed via boto3's sagemaker service model: no
-    # Reserved*-style operation exists for either resource type.
-    "Amazon SageMaker Endpoint":          lambda sku: (False, "SageMaker Endpoints have no Reserved Instance offering - confirmed via boto3's sagemaker service model (no Reserved*-style operation exists). Eligible for SageMaker AI Savings Plans instead."),
-    "Amazon SageMaker Notebook Instance": lambda sku: (False, "SageMaker Notebook Instances have no Reserved Instance offering - confirmed via boto3's sagemaker service model (no Reserved*-style operation exists). Eligible for SageMaker AI Savings Plans instead."),
+    # Serverless.
+    # Corrected 2026-08-30: the sagemaker service model DOES have
+    # Reserved*-style operations (DescribeReservedCapacity,
+    # ListUltraServersByReservedCapacity) - confirmed live via AWS's own API
+    # reference. But their InstanceType is restricted to a fixed enum of
+    # large-scale training/inference accelerators only (ml.p4d.24xlarge,
+    # ml.p5.48xlarge, ml.trn1.32xlarge, ml.p6-b200.48xlarge, etc.) - this is
+    # SageMaker HyperPod's Reserved Capacity for distributed training
+    # clusters, an architecturally different resource this app doesn't
+    # track, not a reservation for Endpoints or Notebook Instances (same
+    # "real reservation, wrong resource type" pattern already found for
+    # Azure Data Factory). The eligibility conclusion below is unchanged.
+    "Amazon SageMaker Endpoint":          lambda sku: (False, "SageMaker Endpoints have no Reserved Instance offering - SageMaker's Reserved Capacity (HyperPod) only covers large-scale training/inference accelerator instances (e.g. ml.p4d, ml.p5, ml.trn1), not endpoint hosting instances. Eligible for SageMaker AI Savings Plans instead."),
+    "Amazon SageMaker Notebook Instance": lambda sku: (False, "SageMaker Notebook Instances have no Reserved Instance offering - SageMaker's Reserved Capacity (HyperPod) only covers large-scale training/inference accelerator instances (e.g. ml.p4d, ml.p5, ml.trn1), not notebook instances. Eligible for SageMaker AI Savings Plans instead."),
+    # Added 2026-08-30 - found during the wider AWS RI audit: aws/connector.py's
+    # RDS inventory fetch (describe_db_instances) captured Aurora Serverless
+    # v2 instances (real DBInstanceClass "db.serverless") completely
+    # undetected, unlike the DocumentDB/Neptune Serverless fetches right
+    # above it in that file, which explicitly branch on a Serverless
+    # signal. Without this rule those rows fell through to the generic
+    # "Amazon Aurora (MySQL)"/"(PostgreSQL)" label and defaulted to
+    # eligible=True - the exact same regression class already caught for
+    # DocumentDB Serverless. Confirmed live: AWS's own Reserved DB
+    # Instances docs state Reserved Instances apply to instance-based
+    # Aurora only; Serverless v2 bills per-ACU-hour with no fixed instance
+    # class to reserve.
+    "Amazon Aurora (MySQL Serverless)":      lambda sku: (False, "Aurora Serverless v2 has no Reserved Instance offering - Reserved Instances apply to instance-based Aurora only (confirmed via AWS's own docs); Serverless v2 bills per-ACU-hour with no fixed instance class to reserve. Eligible for Database Savings Plans instead."),
+    "Amazon Aurora (PostgreSQL Serverless)": lambda sku: (False, "Aurora Serverless v2 has no Reserved Instance offering - Reserved Instances apply to instance-based Aurora only (confirmed via AWS's own docs); Serverless v2 bills per-ACU-hour with no fixed instance class to reserve. Eligible for Database Savings Plans instead."),
 }
 
 

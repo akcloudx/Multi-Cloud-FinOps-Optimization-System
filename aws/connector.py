@@ -589,7 +589,7 @@ _RDS_ENGINE_LABELS = {
 }
 
 
-def map_rds_engine(engine: str, license_model: str = None) -> str:
+def map_rds_engine(engine: str, license_model: str = None, db_instance_class: str = None) -> str:
     """RDS's `Engine` field (e.g. "mysql", "aurora-postgresql") - confirmed
     valid values via https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_CreateDBInstance.html's
     Engine parameter enum. Falls back to the raw engine string (rather than
@@ -609,20 +609,40 @@ def map_rds_engine(engine: str, license_model: str = None) -> str:
     LicenseModel value is a fixed, non-choice constant per engine, not a
     real product variant to split on).
 
+    db_instance_class splits Aurora only (added 2026-08-30) into "Amazon
+    Aurora (MySQL Serverless)" / "(PostgreSQL Serverless)" - Aurora
+    Serverless v2 instances have a real, distinct DBInstanceClass of
+    literally "db.serverless" (confirmed live via AWS's own docs), and bill
+    per-ACU-hour rather than a fixed instance class, so they have NO
+    Reserved Instance offering at all (confirmed: AWS's own Reserved DB
+    Instances docs state "Reserved Instances apply to instance-based
+    Aurora only", Serverless v2 gets Database Savings Plans instead - same
+    "real reservation restriction this app was silently missing" class of
+    bug as DocumentDB/Neptune Serverless, caught 2026-08-30 during the
+    wider AWS RI audit). Provisioned Aurora instances (any other
+    DBInstanceClass) are unaffected and keep the flat "(MySQL)"/
+    "(PostgreSQL)" label, including their existing RI size-flexibility
+    eligibility (see analysis/engine.py's _RDS_FLEX_ELIGIBLE_TYPES).
+
     Callers pass real RDS values: inventory rows pass DescribeDBInstances'
     own `LicenseModel` field directly ("bring-your-own-license" /
-    "license-included"); reservation rows have no such field, so the
-    caller (pricing/aws_commitment_mapping.py) pre-parses the real
-    ProductDescription "(li)" suffix (confirmed via AWS's own CLI docs
-    example, "oracle-se2(li)") into the same "license-included" string
-    before calling this. Defaults to BYOL when not supplied - the safer
-    direction for this app's purposes, since every real call site for
-    Oracle rows DOES supply it (see both call sites)."""
+    "license-included") and `DBInstanceClass` field directly; reservation
+    rows have no such fields, so the caller (pricing/aws_commitment_mapping.py)
+    pre-parses the real ProductDescription "(li)" suffix (confirmed via
+    AWS's own CLI docs example, "oracle-se2(li)") into the same
+    "license-included" string before calling this, and never passes
+    db_instance_class at all (a reservation offering is never itself
+    Serverless - defaults to None, which correctly stays on the
+    provisioned label). Defaults to BYOL when license_model isn't
+    supplied - the safer direction for this app's purposes, since every
+    real call site for Oracle rows DOES supply it (see both call sites)."""
     base = _RDS_ENGINE_LABELS.get((engine or "").lower(), engine or "Unknown")
     if base == "Amazon RDS for Oracle":
         if (license_model or "").strip().lower() in ("license-included", "license included"):
             return "Amazon RDS for Oracle (License Included)"
         return "Amazon RDS for Oracle (BYOL)"
+    if base in ("Amazon Aurora (MySQL)", "Amazon Aurora (PostgreSQL)") and (db_instance_class or "").strip().lower() == "db.serverless":
+        return base[:-1] + " Serverless)"
     return base
 
 
@@ -772,7 +792,7 @@ def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
                     records.append({
                         "Resource ID":             db.get("DBInstanceArn") or db.get("DBInstanceIdentifier", ""),
                         "Resource Name":           db.get("DBInstanceIdentifier", ""),
-                        "Resource Type":           map_rds_engine(db.get("Engine", ""), db.get("LicenseModel")),
+                        "Resource Type":           map_rds_engine(db.get("Engine", ""), db.get("LicenseModel"), db.get("DBInstanceClass")),
                         "Resource State":          _map_rds_state(db.get("DBInstanceStatus", "")),
                         "Region":                  region,
                         "OS":                      "N/A",

@@ -455,7 +455,26 @@ def _fetch_aws_ri_rates(resource_type: str, sku: str, region: str, os_: str, red
     a genuine price difference RDS's own API models via a MultiAZ filter.
     Returns all-None for unmapped resource types or when aws_creds is
     missing, same graceful-degradation discipline as every other fetch
-    in this module."""
+    in this module.
+
+    FOLLOW-UP, not yet built (flagged 2026-08-30, deferred by user request
+    during the AWS RI audit): unlike _fetch_azure_ri_rates above, this
+    function returns a flat {"1yr": None, "3yr": None} with no per-term
+    "confirmed_empty" signal - a genuinely-no-RI-product term (e.g. an RDS
+    engine that only ever sells 1-Year, the same real shape as Azure's own
+    Disk Storage case this app already handles) is indistinguishable here
+    from "couldn't fetch" or "not synced yet". Building it properly means
+    each pricing/aws_ri_offerings.py fetch function returning a per-term
+    "found zero real offerings" vs "query failed/no data" distinction, the
+    same shape _fetch_azure_ri_rates already returns - deferred rather
+    than guessed because every fetch function in aws_ri_offerings.py
+    carries its own "not independently live-tested" disclosure (no AWS
+    credentials available in this environment); building this blind
+    against undocumented-in-practice API response shapes risks a repeat
+    of the exact under-scanned-assumption mistake already caught for
+    Azure's NP/HC VM families. Revisit once a real tenant with AWS
+    RI-read permissions has run a sync and the true per-term response
+    shapes for each service can be checked against real data."""
     result = {"1yr": None, "3yr": None}
     if not aws_creds or not sku or sku == "N/A" or not region:
         return result
