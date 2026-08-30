@@ -298,8 +298,24 @@ def _render_azure_connect_form(key_prefix: str, mode: str = "live"):
                 # subscription-sync call needed here anymore.
                 res = run_ingestion_pipeline("Azure", creds=new_az, tenant_db_id=tenant_db_id)
                 record_sync_result("Azure", mode, tenant_db_id, res["status"], res["message"])
+                # PARTIAL treated as real progress, not a failure (2026-08-30,
+                # real bug caught live: a tenant whose inventory genuinely
+                # synced but hit a KNOWN, already-disclosed tenant-wide role
+                # gap for Reservations/Savings Plan data was shown a scary
+                # red error box identical to a true connection failure, and
+                # the form stayed open even though the tenant was already
+                # saved and real inventory was already synced - same
+                # "PARTIAL is progress, not failure" principle
+                # run_ingestion_pipeline() itself already applies to its own
+                # status field, just not respected here before now. Still
+                # returns True (closes the form) since there's nothing left
+                # to retry from this form - the missing role has to be
+                # granted in Azure, not fixed by re-submitting credentials.
                 if res["status"] == "SUCCESS":
                     st.success(f"🎉 **Live Tenant Ingestion Complete!** {res['message']}")
+                    return True
+                elif res["status"] == "PARTIAL":
+                    st.warning(f"⚠️ **Tenant connected, partial sync:** {res['message']}")
                     return True
                 else:
                     st.error(f"❌ Connection or Ingestion Error: {res['message']}")

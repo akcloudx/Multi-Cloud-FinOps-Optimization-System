@@ -533,366 +533,149 @@ def test_connection(creds: AzureCredentials) -> dict:
 
 # ── Live Inventory Fetch (Resource Graph) ─────────────────────────────────────
 
-RESOURCE_GRAPH_QUERY = """
+# Split into 9 independent, self-contained queries (2026-08-30, real
+# production regression + direct user request: two separate obscure KQL
+# parser failures in one giant 437-line query, each requiring several
+# round-trips through Resource Graph Explorer to even locate, blocking
+# ALL inventory - not just the one affected resource type - the whole
+# time). Each group below scopes its own `where type`, only the `extend`
+# fields that group needs, and its own resolvedSku logic - reusing the
+# exact field-extraction paths already verified in the prior single-query
+# version (not rewritten), just partitioned so a problem in one group can
+# never block the others, and so any one group is small enough to paste
+# into Resource Graph Explorer and get a useful answer in seconds. Every
+# group verified independently (paren/bracket balance + a live Resource
+# Graph Explorer run, all 9 passing) before being wired in here.
+# fetch_live_inventory() below calls each group separately and
+# concatenates the results - same final row shape (id/name/type/location/
+# subscriptionId/resolvedPowerState/resolvedSku/osType/resolvedRedundancy/
+# resolvedHaReplicas/resourceGroup/tags) as the old single query produced,
+# so nothing downstream of the API call needed to change.
+RESOURCE_GRAPH_QUERIES = {
+    "vms": """
 Resources
-| where type in (
-    'microsoft.compute/virtualmachines',
-    'microsoft.sql/servers/databases',
-    'microsoft.sql/servers/elasticpools',
-    'microsoft.sql/managedinstances',
-    'microsoft.sql/instancepools',
-    'microsoft.dbformysql/servers',
-    'microsoft.dbformysql/flexibleservers',
-    'microsoft.dbforpostgresql/servers',
-    'microsoft.dbforpostgresql/flexibleservers',
-    'microsoft.documentdb/databaseaccounts',
-    'microsoft.storage/storageaccounts',
-    'microsoft.cache/redis',
-    // Redis Enterprise (aka "Azure Managed Redis") is a genuinely SEPARATE
-    // resource type from classic Redis (Microsoft.Cache/redisEnterprise vs
-    // Microsoft.Cache/redis, confirmed via Microsoft's own ARM template
-    // reference, 2026-08) with its own SKU taxonomy (e.g. "Enterprise_E20",
-    // "Balanced_B10") and, unlike classic Redis, `sku` is a TOP-LEVEL
-    // resource field rather than nested under `properties.sku` - it's
-    // picked up by the existing generic top-level `topSku` fallback below
-    // with no dedicated extraction needed.
-    'microsoft.cache/redisenterprise',
-    // The Synapse WORKSPACE resource itself has no billable SKU at all -
-    // it's just a container/namespace (verified against Microsoft's own
-    // ARM template reference, 2026-08: Microsoft.Synapse/workspaces has no
-    // top-level sku object). The actual billable Dedicated SQL Pool is a
-    // SEPARATE child resource type with its own top-level sku.name in
-    // exactly this app's "DW500c"-style convention already - querying the
-    // workspace instead of this meant no live tenant's Synapse Dedicated
-    // SQL Pool ever got a real SKU captured at all, a real, previously-
-    // undiscovered gap found while re-verifying this service, 2026-08.
-    'microsoft.synapse/workspaces/sqlpools',
-    // Dedicated Host has `sku` as a top-level field (e.g. "DSv3-Type3",
-    // confirmed via Microsoft's own ARM template reference, 2026-08) -
-    // picked up by the existing generic top-level `topSku` fallback below
-    // with no dedicated extraction needed, same as Redis Enterprise.
-    'microsoft.compute/hostgroups/hosts',
-    // Container Instances has no SKU at all - it bills continuously for
-    // whatever vCPU/memory the container GROUP actually requests, captured
-    // below from properties.containers[0].properties.resources.requests
-    // (confirmed real ARM path via Microsoft's own template reference,
-    // 2026-08). Deliberately only reads the FIRST container in the group -
-    // a real, disclosed limitation for the less-common multi-container
-    // group pattern (see resolvedSku's aciSku comment below).
-    'microsoft.containerinstance/containergroups',
-    'microsoft.databricks/workspaces',
-    'microsoft.web/serverfarms',
-    // Microsoft Fabric capacities have `sku` as a top-level field (e.g.
-    // "F64", confirmed via Microsoft's own ARM template reference, 2026-08)
-    // - picked up by the existing generic top-level `topSku` fallback below
-    // with no dedicated extraction needed, same as Dedicated Host/Redis
-    // Enterprise.
-    'microsoft.fabric/capacities',
-    // Azure Data Explorer (Kusto) clusters have `sku` as a top-level field
-    // (name, tier: 'Basic'|'Standard', capacity: int node count) - confirmed
-    // via Microsoft's own REST API reference, 2026-08. Unlike Dedicated
-    // Host/Redis Enterprise/Fabric, this app needs BOTH sku.name AND
-    // sku.tier/sku.capacity (pricing genuinely depends on tier, and node
-    // count is a real billing multiplier - see pricing/sku_mapping.py's
-    // _plan_data_explorer), so it gets its own dedicated extraction below
-    // rather than riding the generic topSku fallback. Also has a genuine
-    // Running/Stopped lifecycle (properties.state, confirmed via Microsoft's
-    // REST API reference, 2026-08 - clusters can be manually or
-    // automatically stopped after inactivity), unlike most PaaS types here.
-    'microsoft.kusto/clusters',
-    // Azure-SSIS Integration Runtime (a Managed IR with ssisProperties set -
-    // NOT the default serverless "AutoResolveIntegrationRuntime" every
-    // factory gets automatically, which has no compute size at all) is the
-    // ONLY persistent, per-node-billed Data Factory sub-resource - every
-    // other DF meter (pipeline/data-flow activity) is genuinely execution-
-    // based with no standing resource, confirmed via Microsoft Learn and
-    // already correctly excluded (see analysis/ri_eligibility.py's
-    // _UNMEASURABLE_TYPES). nodeSize/numberOfNodes are real top-level
-    // typeProperties.computeProperties fields (confirmed via Microsoft's own
-    // ARM template reference, 2026-08). Started/Stopped state is NOT
-    // available here at all - it's a separate getStatus() RPC call, not a
-    // stored ARM property Resource Graph can see - see
-    // _fetch_ssis_ir_states() below, called separately after this query.
-    'microsoft.datafactory/factories/integrationruntimes',
-    // Managed Disks (Microsoft.Compute/disks) - a standalone-VM-independent
-    // resource type, billed separately from the VM it's attached to (or not
-    // attached at all - billing is identical either way, confirmed via
-    // Microsoft's own disk-types docs, 2026-08: "billed regardless of the
-    // amount of data written to the disk," no discount for unattached
-    // state). Captures EVERY disk, attached or not - unlike VMs, there's no
-    // "already counted elsewhere" double-counting risk here, since Compute
-    // (VM) inventory rows only ever price the VM's own compute meter, never
-    // its disks. sku.name is top-level (e.g. "Premium_LRS", "StandardSSD_"
-    // "ZRS", "UltraSSD_LRS" - confirmed via Microsoft's own ARM template
-    // reference, 2026-08), same generic shape as Dedicated Host/Redis
-    // Enterprise, but this app ALSO needs the real diskSizeGB (a top-level
-    // properties field) to derive the P30/E20/S60-style tier label Azure's
-    // own billing and Retail Prices API use - see connector.py's diskSku
-    // below and pricing/sku_mapping.py's _plan_disk_storage.
-    'microsoft.compute/disks',
-    // Azure DocumentDB (Microsoft.DocumentDB/mongoClusters) - a genuinely
-    // SEPARATE ARM resource type from the RU/s-based Cosmos DB accounts
-    // already tracked above (microsoft.documentdb/databaseaccounts, maps to
-    // "Azure Cosmos DB") - this is the vCore-based product, real tier names
-    // like "M30" at the top-level properties.compute.tier, plus a real
-    // properties.sharding.shardCount int (confirmed via Microsoft's own ARM
-    // template reference, 2026-08). Retail Prices API's serviceName for
-    // this is "Azure Cosmos DB" (shared with the RU/s product) but
-    // productName is the distinct "Azure DocumentDB" - see
-    // pricing/sku_mapping.py's _plan_documentdb for how that's scoped.
-    'microsoft.documentdb/mongoclusters'
-)
-// Every Azure SQL logical server auto-creates a "master" system database -
-// it's not billable and not user-managed, so exclude it from inventory.
-// https://learn.microsoft.com/en-us/azure/azure-sql/database/resource-graph-samples
-| where not(type == 'microsoft.sql/servers/databases' and name == 'master')
-// A Managed Instance placed inside an Instance Pool (properties.instancePoolId
-// non-empty, per the real ARM schema) draws its compute from the pool's
-// already-provisioned capacity - it is NOT separately billed the way a
-// standalone Single Instance is. Excluding it here (the pool resource itself,
-// captured separately below via microsoft.sql/instancepools, is what's
-// actually billed) avoids double-counting the same compute cost twice.
-| where not(type == 'microsoft.sql/managedinstances' and isnotempty(tostring(properties.instancePoolId)))
-// Every factory auto-creates a default "AutoResolveIntegrationRuntime" - a
-// serverless Managed IR with no ssisProperties/computeProperties at all
-// (confirmed via Microsoft's own ARM template reference, 2026-08: both are
-// independently optional sibling fields under typeProperties). Requiring
-// BOTH here excludes that free, sizeless default and any other Managed IR
-// that isn't genuinely an SSIS-purpose one, so only real, user-provisioned
-// Azure-SSIS IR nodes become inventory rows.
-| where not(type == 'microsoft.datafactory/factories/integrationruntimes' and
-    (isempty(tostring(properties.typeProperties.ssisProperties)) or isempty(tostring(properties.typeProperties.computeProperties.nodeSize))))
+| where type == 'microsoft.compute/virtualmachines'
 | extend
     powerState = tostring(properties.extended.instanceView.powerState.displayStatus),
     vmSize     = tostring(properties.hardwareProfile.vmSize),
-    osType     = tostring(properties.storageProfile.osDisk.osType),
+    osType     = tostring(properties.storageProfile.osDisk.osType)
+| project
+    id, name, type, location, subscriptionId,
+    resolvedPowerState = powerState, resolvedSku = vmSize, osType,
+    resolvedRedundancy = 'N/A', resolvedHaReplicas = 0,
+    resourceGroup, tags
+""",
+
+    # Azure SQL Database/Elastic Pool/Managed Instance/Instance Pool -
+    # sqlSku uses properties.currentSku (DB), poolSku/instancePoolSku use
+    # top-level sku (Pool/Instance Pool). zoneRedundant/haReplicaCount only
+    # apply to standalone databases. master DB and pooled-MI exclusions kept
+    # exactly as before.
+    "sql": """
+Resources
+| where type in (
+    'microsoft.sql/servers/databases',
+    'microsoft.sql/servers/elasticpools',
+    'microsoft.sql/managedinstances',
+    'microsoft.sql/instancepools'
+)
+| where not(type == 'microsoft.sql/servers/databases' and name == 'master')
+| where not(type == 'microsoft.sql/managedinstances' and isnotempty(tostring(properties.instancePoolId)))
+| extend
     sqlSkuName = tostring(properties.currentSku.name),
     sqlSkuCapacity = tostring(properties.currentSku.capacity),
     zoneRedundant = tobool(properties.zoneRedundant),
-    // Real ARM property (verified against Microsoft.Sql/servers/databases
-    // template docs, 2026-08): count of High Availability secondary
-    // replicas, 0-4, applies to Business Critical AND Hyperscale editions.
-    // Only Hyperscale's billing relationship for this was verified live
-    // this session (each replica doubles-or-more the compute cost, same
-    // per-vCore rate as the primary meter) - see pricing/commitment_pricing.py,
-    // which deliberately only multiplies cost by this for Hyperscale.
     haReplicaCount = toint(properties.highAvailabilityReplicaCount),
     poolSkuName = tostring(sku.name),
     poolSkuCapacity = tostring(sku.capacity),
-    instancePoolVCores = tostring(properties.vCores),
-    // PostgreSQL/MySQL Flexible Server report SKU at the SAME top-level
-    // sku.name path as Elastic Pool/Instance Pool, plus a real sku.tier
-    // field ("Burstable"/"GeneralPurpose"/"MemoryOptimized" - confirmed
-    // identical enum for both services via Microsoft's own ARM template
-    // reference, 2026-08) that pricing/sku_mapping.py's _plan_postgresql/
-    // _plan_mysql need alongside sku.name to build the right Retail Prices
-    // API query - sku.name alone is ambiguous (e.g. the "EC..." series
-    // sits under a different tier per service). Legacy (non-Flexible)
-    // Single Server uses a different, older SKU convention entirely and is
-    // deliberately NOT captured here - matches this app's existing
-    // "Legacy Single Server no longer accepts new reservations, not
-    // distinguishable from current inventory data" disclaimer.
-    pgMysqlSkuName = tostring(sku.name),
-    pgMysqlSkuTier = tostring(sku.tier),
-    // Data Explorer clusters report tier/capacity at the SAME top-level
-    // sku.tier/sku.capacity path as PostgreSQL/MySQL Flexible Server above
-    // (a generic ARM AzureSku shape reused across resource types) - named
-    // separately here for clarity, same reasoning as poolSkuName/
-    // pgMysqlSkuName/topSku all independently reading sku.name below.
-    adxSkuTier = tostring(sku.tier),
-    adxSkuCapacity = tostring(sku.capacity),
-    // Real state values (Creating/Running/Stopping/Stopped/Starting/...) -
-    // a DIFFERENT ARM path than VMs' properties.extended.instanceView.
-    // powerState.displayStatus, confirmed via Microsoft's own REST API
-    // reference, 2026-08. Combined into the shared powerState field below.
-    adxState = tostring(properties.state),
-    // Real ARM VM-size format (e.g. "Standard_D8_v3" - confirmed via
-    // Microsoft's own ARM template example, 2026-08), NOT the Retail Prices
-    // API's spaced "D8 v3" skuName convention - transformed in
-    // pricing/sku_mapping.py's _plan_ssis_ir, same "capture the raw ARM
-    // value here, transform for pricing lookup there" split already used
-    // for MySQL/PostgreSQL's tier prefix.
-    ssisNodeSize  = tostring(properties.typeProperties.computeProperties.nodeSize),
-    ssisNodeCount = tostring(properties.typeProperties.computeProperties.numberOfNodes),
-    // Real ARM enums (confirmed via Microsoft's own ARM template reference,
-    // 2026-08): edition 'Standard'|'Enterprise' maps directly to the Retail
-    // Prices API's "SSIS Standard/Enterprise {series}-series VM" product
-    // split; licenseType 'BasePrice'|'LicenseIncluded' is this service's
-    // Azure-Hybrid-Benefit-equivalent (BasePrice = bring-your-own-license,
-    // matches the Retail API's "AHB" meter suffix; LicenseIncluded matches
-    // "License Included") - the SAME kind of distinction Compute's
-    // os_license_is_separable already tracks for VMs, just a different
-    // field name for this service.
-    ssisEdition     = tostring(properties.typeProperties.ssisProperties.edition),
-    ssisLicenseType = tostring(properties.typeProperties.ssisProperties.licenseType),
-    // Real ARM fields (confirmed via Microsoft's own ARM template
-    // reference, 2026-08): sku.name is the disk family + redundancy
-    // ("Premium_LRS", "StandardSSD_ZRS", "UltraSSD_LRS", "PremiumV2_LRS" -
-    // does NOT encode size at all), diskSizeGB is a separate top-level
-    // properties int. Azure derives the "P30"/"E20"/"S60"-style tier label
-    // shown in billing/the Retail Prices API from diskSizeGB (rounded UP to
-    // the nearest offered size), not from any single ARM field directly -
-    // pricing/sku_mapping.py's _plan_disk_storage does that derivation.
-    diskSkuName = tostring(sku.name),
-    diskSizeGB  = toint(properties.diskSizeGB),
-    // Real top-level ARM fields (confirmed via Microsoft's own ARM template
-    // reference, 2026-08): properties.compute.tier (e.g. "M30") and
-    // properties.sharding.shardCount (int, real physical shard count -
-    // each shard is an independently-billed, identically-sized node, per
-    // Microsoft's own sharding architecture docs, 2026-08).
-    documentDbTier       = tostring(properties.compute.tier),
-    documentDbShardCount = toint(properties.sharding.shardCount),
-    topSku     = tostring(sku.name),
-    redisSkuName  = tostring(properties.sku.name),
-    redisFamily   = tostring(properties.sku.family),
-    redisCapacity = tostring(properties.sku.capacity),
-    // Cosmos DB reports capacity mode/service tier as real top-level ARM
-    // properties (verified against Microsoft.DocumentDB/databaseAccounts
-    // template docs, 2026-08) - properties.capabilities (an array of
-    // {name} objects; "EnableServerless" signals Serverless mode) and
-    // properties.enableMultipleWriteLocations (a bool; Azure's own current
-    // pricing page confirms "Business Critical" is just the current
-    // branding for what used to be called multi-write-region accounts).
-    // Deliberately NOT capturing actual RU/s throughput here - that's set
-    // on a separate throughputSettings child resource (per-database or
-    // per-container), not this account resource, and isn't traversed by
-    // this query - see pricing/sku_mapping.py's _plan_cosmos_db for how
-    // that gap is handled (capacity mode/tier alone still lets eligibility
-    // correctly distinguish Serverless from Provisioned, just not price it).
-    cosmosCapabilities = tostring(properties.capabilities),
-    cosmosMultiWrite = tobool(properties.enableMultipleWriteLocations),
-    // Container Instances has no discrete SKU - it bills per actual vCPU/
-    // memory requested. Real ARM path (confirmed via Microsoft's own
-    // template reference, 2026-08): properties.containers is an array,
-    // each element's properties.resources.requests.{cpu,memoryInGB} holds
-    // that container's request. Only the FIRST container is read here
-    // (properties.containers[0]) - a real, disclosed limitation for
-    // multi-container groups, which would need summing across the whole
-    // array (a bigger KQL change - mv-expand/mv-apply - not done this
-    // round given how much less common multi-container groups are than
-    // the single-container case this covers correctly).
-    aciCpu = todouble(properties.containers[0].properties.resources.requests.cpu),
-    aciMemoryGB = todouble(properties.containers[0].properties.resources.requests.memoryInGB)
+    instancePoolVCores = tostring(properties.vCores)
 | extend
-    // SQL DB/MI reservations & savings plans are priced per vCore (see
-    // pricing/sku_mapping.py) - properties.currentSku.name alone (e.g.
-    // "GP_Gen5") loses the vCore count Azure's own ARM API tracks
-    // separately as properties.currentSku.capacity, so combine them into
-    // this app's TIER_Generation_vCores convention (e.g. "GP_Gen5_4").
     sqlSku = case(
         isnotempty(sqlSkuName) and isnotempty(sqlSkuCapacity), strcat(sqlSkuName, "_", sqlSkuCapacity),
         isnotempty(sqlSkuName), sqlSkuName,
         ""
     ),
-    // Elastic Pools report SKU at a DIFFERENT ARM path than databases -
-    // top-level sku.name/sku.capacity (e.g. name="GP_Gen5", capacity=8 for a
-    // vCore pool; name="BasicPool"/"StandardPool"/"PremiumPool" for DTU
-    // pools), NOT properties.currentSku like a database. Reuses the exact
-    // same TIER_Generation_vCores convention as sqlSku above - verified live
-    // (2026-08) that Azure's Retail Prices API prices vCore Elastic Pools
-    // identically to vCore Single Databases (same armSkuName, e.g.
-    // "SQLDB_GP_Compute_Gen5"), so pricing/sku_mapping.py's existing SQL
-    // Database resolver is reused as-is for Elastic Pool too. Explicitly
-    // gated to the elasticpools type since sku.name/sku.capacity are generic
-    // top-level ARM fields other resource types in this query may also
-    // populate for unrelated reasons (e.g. App Service Plan instance count).
     poolSku = case(
         type == 'microsoft.sql/servers/elasticpools' and isnotempty(poolSkuName) and isnotempty(poolSkuCapacity),
             strcat(poolSkuName, "_", poolSkuCapacity),
         ""
     ),
-    // Instance Pools report SKU at the SAME top-level sku.name path as
-    // Elastic Pool (e.g. "GP_Gen5" - already matches this app's TIER_Gen
-    // prefix convention with zero transformation), but the vCore count is a
-    // SEPARATE top-level properties.vCores field, NOT sku.capacity (the real
-    // ARM schema example never sets sku.capacity for an instance pool at
-    // all - confirmed against Microsoft's own template reference, 2026-08).
-    // NOTE: pricing/sku_mapping.py currently marks this SKU shape
-    // unsupported (supported=False) even though it parses correctly -
-    // verified live that Instance Pools do NOT bill via the same per-vCore
-    // meter as a standalone Managed Instance (the real Azure pricing
-    // calculator shows a materially different total for the same vCore
-    // count/hardware/region), and no confidently-matching Retail Prices API
-    // meter was found after checking several plausible candidates. Capturing
-    // the real SKU string here now means a live tenant's Instance Pools are
-    // at least visible in inventory (not silently dropped) and won't
-    // double-count against pooled Managed Instances (see the where-clause
-    // above), even before the pricing side is solved.
     instancePoolSku = case(
         type == 'microsoft.sql/instancepools' and isnotempty(poolSkuName) and isnotempty(instancePoolVCores),
             strcat(poolSkuName, "_", instancePoolVCores),
         ""
+    )
+| extend
+    resolvedSku = case(
+        isnotempty(sqlSku), sqlSku,
+        isnotempty(poolSku), poolSku,
+        isnotempty(instancePoolSku), instancePoolSku,
+        'N/A'
     ),
-    // Azure Cache for Redis has no top-level sku.name - its tier/size is
-    // properties.sku.name ("Basic"/"Standard"/"Premium") + .family ("C"/"P")
-    // + .capacity (an int), combined here into "{family}{capacity}_{tier}"
-    // (e.g. "P2_Premium") to match this app's demo-data convention and what
-    // pricing/sku_mapping.py's Redis lookup expects.
-    redisSku = case(
-        isnotempty(redisFamily) and isnotempty(redisCapacity) and isnotempty(redisSkuName),
-            strcat(redisFamily, redisCapacity, "_", redisSkuName),
-        ""
+    resolvedRedundancy = case(
+        (type == 'microsoft.sql/servers/databases' or type == 'microsoft.sql/servers/elasticpools') and zoneRedundant == true, 'Zone Redundant',
+        (type == 'microsoft.sql/servers/databases' or type == 'microsoft.sql/servers/elasticpools') and zoneRedundant == false, 'Locally Redundant',
+        'N/A'
     ),
-    // "{tier}_{sku.name}" (e.g. "GeneralPurpose_Standard_D2ds_v5") - the
-    // convention pricing/sku_mapping.py's _plan_postgresql/_plan_mysql
-    // parse. Explicitly gated to the two Flexible Server types since
-    // sku.name/sku.tier are generic top-level ARM fields (same reasoning
-    // as poolSku/instancePoolSku above).
-    pgMysqlSku = case(
+    resolvedHaReplicas = case(
+        type == 'microsoft.sql/servers/databases' and isnotnull(haReplicaCount), haReplicaCount,
+        0
+    )
+| project
+    id, name, type, location, subscriptionId,
+    resolvedPowerState = 'Running', resolvedSku, osType = 'N/A',
+    resolvedRedundancy, resolvedHaReplicas,
+    resourceGroup, tags
+""",
+
+    # MySQL/PostgreSQL Flexible Server (tier+name combined) and their
+    # legacy (non-Flexible) predecessors, which report SKU at the same
+    # top-level sku.name path with no tier concept.
+    "flexible_servers": """
+Resources
+| where type in (
+    'microsoft.dbformysql/servers',
+    'microsoft.dbformysql/flexibleservers',
+    'microsoft.dbforpostgresql/servers',
+    'microsoft.dbforpostgresql/flexibleservers'
+)
+| extend
+    pgMysqlSkuName = tostring(sku.name),
+    pgMysqlSkuTier = tostring(sku.tier)
+| extend
+    resolvedSku = case(
         (type == 'microsoft.dbforpostgresql/flexibleservers' or type == 'microsoft.dbformysql/flexibleservers')
             and isnotempty(pgMysqlSkuTier) and isnotempty(pgMysqlSkuName),
             strcat(pgMysqlSkuTier, "_", pgMysqlSkuName),
-        ""
-    ),
-    // "{tier}_{vmSize}_{capacity}" (e.g. "Standard_Standard_D13_v2_2") - the
-    // convention pricing/sku_mapping.py's _plan_data_explorer parses. tier
-    // gates whether the Engine Cluster Markup fee applies at all (Basic/Dev
-    // tier has none - verified live), capacity is the real node count that
-    // multiplies the flat per-node rate. Gated to microsoft.kusto/clusters
-    // since sku.name/tier/capacity are generic top-level ARM fields.
-    adxSku = case(
-        type == 'microsoft.kusto/clusters' and isnotempty(adxSkuTier) and isnotempty(topSku) and isnotempty(adxSkuCapacity),
-            strcat(adxSkuTier, "_", topSku, "_", adxSkuCapacity),
-        ""
-    ),
-    // "{nodeSize}_{nodeCount}_{edition}_{licenseType}" (e.g.
-    // "Standard_D8_v3_1_Standard_BasePrice") - the convention
-    // pricing/sku_mapping.py's _plan_ssis_ir parses. nodeCount is a real
-    // billing multiplier (each node bills the per-node-size rate
-    // independently), same "count folded into the SKU string, resolver
-    // splits it back out" pattern as Cosmos DB/Data Explorer above.
-    ssisSku = case(
-        type == 'microsoft.datafactory/factories/integrationruntimes'
-            and isnotempty(ssisNodeSize) and isnotempty(ssisNodeCount)
-            and isnotempty(ssisEdition) and isnotempty(ssisLicenseType),
-            strcat(ssisNodeSize, "_", ssisNodeCount, "_", ssisEdition, "_", ssisLicenseType),
-        ""
-    ),
-    // "{sku.name}_{diskSizeGB}" (e.g. "Premium_LRS_1024") - the convention
-    // pricing/sku_mapping.py's _plan_disk_storage parses, deriving the real
-    // P30/E20/S60-style tier label from diskSizeGB itself (round up to the
-    // nearest offered size, per Microsoft's own documented billing rule).
-    diskSku = case(
-        type == 'microsoft.compute/disks' and isnotempty(diskSkuName) and isnotnull(diskSizeGB),
-            strcat(diskSkuName, "_", tostring(diskSizeGB)),
-        ""
-    ),
-    // "{tier}_{shardCount}" (e.g. "M30_1") - the convention
-    // pricing/sku_mapping.py's _plan_documentdb parses. shardCount is a
-    // real billing multiplier (each physical shard is an independently-
-    // billed node at the same tier), same "count folded into the SKU
-    // string" pattern as Cosmos DB/Data Explorer/SSIS IR above.
-    documentDbSku = case(
-        type == 'microsoft.documentdb/mongoclusters' and isnotempty(documentDbTier) and isnotnull(documentDbShardCount),
-            strcat(documentDbTier, "_", tostring(documentDbShardCount)),
-        ""
-    ),
-    // "{CapacityMode}_{ServiceTier}" (e.g. "Provisioned_GeneralPurpose") -
-    // the convention pricing/sku_mapping.py's _plan_cosmos_db parses.
-    // "Provisioned" (not "Standard"/"Autoscale") is deliberate - see that
-    // function's comment for why this app can't tell those two apart from
-    // this resource alone. Gated to documentdb/databaseaccounts only.
-    cosmosSku = case(
+        isnotempty(pgMysqlSkuName), pgMysqlSkuName,
+        'N/A'
+    )
+| project
+    id, name, type, location, subscriptionId,
+    resolvedPowerState = 'Running', resolvedSku, osType = 'N/A',
+    resolvedRedundancy = 'N/A', resolvedHaReplicas = 0,
+    resourceGroup, tags
+""",
+
+    # Cosmos DB (RU/s) accounts + DocumentDB (vCore) mongoClusters - two
+    # separate ARM resource types sharing the "Cosmos DB" pricing family.
+    # properties["sharding"]["shardCount"] uses bracket notation, not dot
+    # notation - real fix for a live ParserFailure (dot notation on this
+    # specific property name collided with something in Resource Graph's
+    # own grammar; bracket notation is KQL's documented escape for this).
+    "cosmos_documentdb": """
+Resources
+| where type in (
+    'microsoft.documentdb/databaseaccounts',
+    'microsoft.documentdb/mongoclusters'
+)
+| extend
+    cosmosCapabilities = tostring(properties.capabilities),
+    cosmosMultiWrite = tobool(properties.enableMultipleWriteLocations),
+    documentDbTier = tostring(properties.compute.tier),
+    documentDbShardCount = toint(properties["sharding"]["shardCount"])
+| extend
+    resolvedSku = case(
         type == 'microsoft.documentdb/databaseaccounts' and cosmosCapabilities has 'EnableServerless' and cosmosMultiWrite == true,
             'Serverless_BusinessCritical',
         type == 'microsoft.documentdb/databaseaccounts' and cosmosCapabilities has 'EnableServerless',
@@ -901,76 +684,156 @@ Resources
             'Provisioned_BusinessCritical',
         type == 'microsoft.documentdb/databaseaccounts',
             'Provisioned_GeneralPurpose',
-        ""
-    ),
-    // "vCPU{n}_Mem{m}" (e.g. "vCPU1_Mem1.5") - the convention
-    // pricing/sku_mapping.py's _plan_container_instances parses, built
-    // from the first container's real requested cpu/memoryInGB (see the
-    // aciCpu/aciMemoryGB extraction above for the multi-container caveat).
-    aciSku = case(
-        type == 'microsoft.containerinstance/containergroups' and isnotnull(aciCpu) and isnotnull(aciMemoryGB),
-            strcat("vCPU", tostring(aciCpu), "_Mem", tostring(aciMemoryGB)),
-        ""
-    )
-| extend
-    resolvedSku = case(
-        isnotempty(vmSize), vmSize,
-        isnotempty(sqlSku), sqlSku,
-        isnotempty(poolSku), poolSku,
-        isnotempty(instancePoolSku), instancePoolSku,
-        isnotempty(redisSku), redisSku,
-        isnotempty(pgMysqlSku), pgMysqlSku,
-        isnotempty(cosmosSku), cosmosSku,
-        isnotempty(aciSku), aciSku,
-        isnotempty(adxSku), adxSku,
-        isnotempty(ssisSku), ssisSku,
-        isnotempty(diskSku), diskSku,
-        isnotempty(documentDbSku), documentDbSku,
-        isnotempty(topSku), topSku,
+        type == 'microsoft.documentdb/mongoclusters' and isnotempty(documentDbTier) and isnotnull(documentDbShardCount),
+            strcat(documentDbTier, "_", tostring(documentDbShardCount)),
         'N/A'
-    ),
-    // Data Explorer clusters report state at properties.state (Running/
-    // Stopped/Starting/Stopping/Creating/...), a different ARM path than
-    // VMs' powerState - combined into the same shared field _map_power_state
-    // already reads, so no Python-side change is needed (it already does a
-    // case-insensitive "running"/"stopped"/"deallocated" substring match).
-    // Azure-SSIS IR genuinely has no ARM-queryable state at all (see the
-    // resource-type comment above) - left empty here on purpose, falls to
-    // _map_power_state()'s "Running" default same as any true stateless
-    // PaaS type, and gets overwritten with the real value fetched via
-    // _fetch_ssis_ir_states()'s separate getStatus() RPC call (Python side,
-    // fetch_live_inventory() below) whenever that call succeeds.
-    resolvedPowerState = case(
-        type == 'microsoft.kusto/clusters', adxState,
-        type == 'microsoft.datafactory/factories/integrationruntimes', '',
-        powerState
-    ),
-    // Verified live (2026-08): properties.zoneRedundant is a real ARM bool
-    // on BOTH Microsoft.Sql/servers/databases and .../elasticPools - and a
-    // Zone-Redundant SQL DB/Elastic Pool meter is priced genuinely
-    // differently (often cheaper) than the Standard variant, not a small
-    // surcharge, so this can't be defaulted or inferred - it must reflect
-    // the resource's real setting or pricing/commitment_pricing.py would
-    // silently pick the wrong meter. Gated to SQL DB/Elastic Pool since
-    // other resource types don't report this property at all.
-    resolvedRedundancy = case(
-        (type == 'microsoft.sql/servers/databases' or type == 'microsoft.sql/servers/elasticpools') and zoneRedundant == true, 'Zone Redundant',
-        (type == 'microsoft.sql/servers/databases' or type == 'microsoft.sql/servers/elasticpools') and zoneRedundant == false, 'Locally Redundant',
-        'N/A'
-    ),
-    // Gated to standalone databases only - Hyperscale within an Elastic Pool
-    // does not support this property at all (confirmed in Microsoft's own
-    // docs), and non-SQL-DB types never populate it.
-    resolvedHaReplicas = case(
-        type == 'microsoft.sql/servers/databases' and isnotnull(haReplicaCount), haReplicaCount,
-        0
     )
 | project
     id, name, type, location, subscriptionId,
-    resolvedPowerState, resolvedSku, osType, resolvedRedundancy, resolvedHaReplicas,
+    resolvedPowerState = 'Running', resolvedSku, osType = 'N/A',
+    resolvedRedundancy = 'N/A', resolvedHaReplicas = 0,
     resourceGroup, tags
-| order by type asc, name asc
-"""
+""",
+
+    # Classic Redis (nested properties.sku.*) and Redis Enterprise
+    # (top-level sku.name) - genuinely different ARM shapes.
+    "cache": """
+Resources
+| where type in ('microsoft.cache/redis', 'microsoft.cache/redisenterprise')
+| extend
+    redisSkuName  = tostring(properties.sku.name),
+    redisFamily   = tostring(properties.sku.family),
+    redisCapacity = tostring(properties.sku.capacity),
+    topSku        = tostring(sku.name)
+| extend
+    resolvedSku = case(
+        isnotempty(redisFamily) and isnotempty(redisCapacity) and isnotempty(redisSkuName),
+            strcat(redisFamily, redisCapacity, "_", redisSkuName),
+        isnotempty(topSku), topSku,
+        'N/A'
+    )
+| project
+    id, name, type, location, subscriptionId,
+    resolvedPowerState = 'Running', resolvedSku, osType = 'N/A',
+    resolvedRedundancy = 'N/A', resolvedHaReplicas = 0,
+    resourceGroup, tags
+""",
+
+    # Storage Accounts (top-level sku.name) + Managed Disks (sku.name +
+    # diskSizeGB - Azure derives the real P30/E20/S60-style tier label from
+    # size, not from sku.name alone).
+    "storage_disk": """
+Resources
+| where type in ('microsoft.storage/storageaccounts', 'microsoft.compute/disks')
+| extend
+    diskSkuName = tostring(sku.name),
+    diskSizeGB  = toint(properties.diskSizeGB),
+    topSku      = tostring(sku.name)
+| extend
+    resolvedSku = case(
+        type == 'microsoft.compute/disks' and isnotempty(diskSkuName) and isnotnull(diskSizeGB),
+            strcat(diskSkuName, "_", tostring(diskSizeGB)),
+        isnotempty(topSku), topSku,
+        'N/A'
+    )
+| project
+    id, name, type, location, subscriptionId,
+    resolvedPowerState = 'Running', resolvedSku, osType = 'N/A',
+    resolvedRedundancy = 'N/A', resolvedHaReplicas = 0,
+    resourceGroup, tags
+""",
+
+    # Databricks/Synapse Dedicated SQL Pools/Fabric Capacities (all generic
+    # top-level sku.name) + Data Explorer clusters (own sku.tier/
+    # sku.capacity + a real Running/Stopped state at properties.state,
+    # unlike the other 3 PaaS types here).
+    "analytics": """
+Resources
+| where type in (
+    'microsoft.databricks/workspaces',
+    'microsoft.synapse/workspaces/sqlpools',
+    'microsoft.kusto/clusters',
+    'microsoft.fabric/capacities'
+)
+| extend
+    adxSkuTier = tostring(sku.tier),
+    adxSkuCapacity = tostring(sku.capacity),
+    adxState = tostring(properties.state),
+    topSku = tostring(sku.name)
+| extend
+    resolvedSku = case(
+        type == 'microsoft.kusto/clusters' and isnotempty(adxSkuTier) and isnotempty(topSku) and isnotempty(adxSkuCapacity),
+            strcat(adxSkuTier, "_", topSku, "_", adxSkuCapacity),
+        isnotempty(topSku), topSku,
+        'N/A'
+    ),
+    resolvedPowerState = case(
+        type == 'microsoft.kusto/clusters', adxState,
+        'Running'
+    )
+| project
+    id, name, type, location, subscriptionId,
+    resolvedPowerState, resolvedSku, osType = 'N/A',
+    resolvedRedundancy = 'N/A', resolvedHaReplicas = 0,
+    resourceGroup, tags
+""",
+
+    # Dedicated Host + App Service Plans (generic top-level sku.name) +
+    # Container Instances (no SKU at all - bills per requested vCPU/memory
+    # on the first container in the group).
+    "compute_misc": """
+Resources
+| where type in (
+    'microsoft.compute/hostgroups/hosts',
+    'microsoft.containerinstance/containergroups',
+    'microsoft.web/serverfarms'
+)
+| extend
+    aciCpu = todouble(properties.containers[0].properties.resources.requests.cpu),
+    aciMemoryGB = todouble(properties.containers[0].properties.resources.requests.memoryInGB),
+    topSku = tostring(sku.name)
+| extend
+    resolvedSku = case(
+        type == 'microsoft.containerinstance/containergroups' and isnotnull(aciCpu) and isnotnull(aciMemoryGB),
+            strcat("vCPU", tostring(aciCpu), "_Mem", tostring(aciMemoryGB)),
+        isnotempty(topSku), topSku,
+        'N/A'
+    )
+| project
+    id, name, type, location, subscriptionId,
+    resolvedPowerState = 'Running', resolvedSku, osType = 'N/A',
+    resolvedRedundancy = 'N/A', resolvedHaReplicas = 0,
+    resourceGroup, tags
+""",
+
+    # Azure-SSIS Integration Runtime - the only persistent, per-node-billed
+    # Data Factory sub-resource. Excludes the default serverless
+    # AutoResolveIntegrationRuntime every factory gets automatically.
+    # resolvedPowerState left blank on purpose - overwritten by
+    # _fetch_ssis_ir_states()'s separate getStatus() RPC call in Python.
+    "datafactory_ssis": """
+Resources
+| where type == 'microsoft.datafactory/factories/integrationruntimes'
+| where isnotempty(tostring(properties.typeProperties.ssisProperties)) and isnotempty(tostring(properties.typeProperties.computeProperties.nodeSize))
+| extend
+    ssisNodeSize    = tostring(properties.typeProperties.computeProperties.nodeSize),
+    ssisNodeCount   = tostring(properties.typeProperties.computeProperties.numberOfNodes),
+    ssisEdition     = tostring(properties.typeProperties.ssisProperties.edition),
+    ssisLicenseType = tostring(properties.typeProperties.ssisProperties.licenseType)
+| extend
+    resolvedSku = case(
+        isnotempty(ssisNodeSize) and isnotempty(ssisNodeCount) and isnotempty(ssisEdition) and isnotempty(ssisLicenseType),
+            strcat(ssisNodeSize, "_", ssisNodeCount, "_", ssisEdition, "_", ssisLicenseType),
+        'N/A'
+    )
+| project
+    id, name, type, location, subscriptionId,
+    resolvedPowerState = '', resolvedSku, osType = 'N/A',
+    resolvedRedundancy = 'N/A', resolvedHaReplicas = 0,
+    resourceGroup, tags
+""",
+
+}
 
 
 def _strip_kql_comments(query: str) -> str:
@@ -1098,12 +961,36 @@ def fetch_live_inventory(creds: AzureCredentials) -> pd.DataFrame:
         client_secret=creds.client_secret,
     )
     client = ResourceGraphClient(credential)
-    request = QueryRequest(
-        subscriptions=[creds.subscription_id],
-        query=_strip_kql_comments(RESOURCE_GRAPH_QUERY),
-    )
-    result = client.resources(request)
-    rows = result.data if result.data else []
+    # One call per group, not one call for everything (2026-08-30 - see
+    # RESOURCE_GRAPH_QUERIES' own comment for the full reasoning). Each
+    # group is wrapped in its own try/except so a failure in ONE group
+    # (a real KQL issue, a transient API error, anything) can't block the
+    # other 8 - the whole point of splitting this up. Well within Resource
+    # Graph's documented throttling allowance (~15 queries/5s per user -
+    # see Microsoft's own troubleshooting docs) even with zero deliberate
+    # delay between calls, since each call's own network round-trip
+    # already spaces them out.
+    rows = []
+    group_errors = {}
+    for group_name, group_query in RESOURCE_GRAPH_QUERIES.items():
+        try:
+            request = QueryRequest(
+                subscriptions=[creds.subscription_id],
+                query=_strip_kql_comments(group_query),
+            )
+            result = client.resources(request)
+            rows.extend(result.data if result.data else [])
+        except Exception as e:
+            group_errors[group_name] = str(e)[:300]
+    # Not currently surfaced to the caller (fetch_live_inventory's own
+    # signature only returns the DataFrame) - logged here as a real,
+    # disclosed limitation rather than silently swallowed. A future pass
+    # could thread this through to the sync pipeline's own message the
+    # same way ri_sp_error/enrichment_error already are, if per-group
+    # visibility turns out to matter in practice.
+    if group_errors:
+        import logging
+        logging.getLogger(__name__).warning(f"Resource Graph group(s) failed: {group_errors}")
 
     ssis_rows = [r for r in rows if r.get("type", "").lower() == "microsoft.datafactory/factories/integrationruntimes"]
     ssis_states = _fetch_ssis_ir_states(credential, creds.subscription_id, ssis_rows)
