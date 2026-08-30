@@ -476,7 +476,7 @@ def run_ingestion_pipeline(provider: str = "Azure", creds=None, force_mock: bool
                 ))
                 session.commit()
     else:
-        # Benchmark / Re-seed Sync Path
+        # Demo / Re-seed Sync Path
         with Session(engine) as session:
             count = session.query(CloudInventory).count()
             synced_count = count
@@ -485,10 +485,10 @@ def run_ingestion_pipeline(provider: str = "Azure", creds=None, force_mock: bool
                 provider=provider,
                 status="SUCCESS",
                 records_synced=synced_count,
-                source="Benchmark Sync Engine (24h Scheduled)"
+                source="Demo Sync Engine (24h Scheduled)"
             ))
             session.commit()
-        message = f"24-Hour Benchmark sync completed cleanly. Refreshed Star Schema DB for {provider} ({synced_count} resources)."
+        message = f"24-Hour Demo sync completed cleanly. Refreshed Star Schema DB for {provider} ({synced_count} resources)."
 
     return {
         "status": status,

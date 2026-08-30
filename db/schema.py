@@ -42,6 +42,9 @@ _base_mssql_engines = {}
 # the shared base engine above. For sqlite, these are their own standalone
 # per-file engines (no sharing possible/needed).
 _mode_engines = {}
+# (PROVIDER, mode) pairs whose init_db() has already run THIS PROCESS - see
+# init_db()'s own early-return guard for why this matters a lot.
+_initialized_scopes = set()
 
 
 def _schema_name(provider_key: str, mode: str) -> str:
@@ -268,9 +271,31 @@ def _widen_column(engine, schema_name, table_name: str, column_name: str, min_le
 def init_db(provider: str = "Azure", mode: str = "demo"):
     """Create all tables for the specified (provider, mode) scope if they
     don't exist yet, and migrate any columns added after a table already
-    existed in the wild."""
+    existed in the wild.
+
+    Real performance bug found live 2026-08-30 (app confirmed slow on
+    localhost too, not just Azure's free tier - ruling out hosting as the
+    cause): this function was called fresh on EVERY read/write across the
+    app (35 call sites - db/tenants.py alone has 16), and every single call
+    ran through ~50 _ensure_column()/_widen_column() checks plus
+    Base.metadata.create_all()'s own reflection, each a REAL round trip to
+    the DB (SQLAlchemy's Inspector doesn't cache reflection results across
+    calls) - upwards of 100 network round trips PER call, repeated for
+    EVERY one of the ~9 sequential get_X() calls inside load_live_data()/
+    load_benchmark_data() alone, on every single page load whenever the
+    cache missed. This work is idempotent and only ever needs to actually
+    run ONCE per (provider, mode) per process - nothing else in this same
+    process changes the schema out from under itself mid-run - so repeat
+    calls for a scope already initialized THIS PROCESS now short-circuit
+    immediately. A fresh process (new deploy, local restart) still runs it
+    for real once, which is exactly the correct behavior for genuine schema
+    migrations - this isn't skipping the checks, just not repeating them
+    hundreds of times per page load."""
     engine = get_engine(provider, mode)
     schema_name = _schema_name(provider.upper(), mode)
+    scope_key = (provider.upper(), (mode or "").lower())
+    if scope_key in _initialized_scopes:
+        return engine
     _ensure_schema_exists(engine, schema_name)
     Base.metadata.create_all(engine)
     _ensure_column(engine, schema_name, "cloud_inventory", "tenant_id", "INTEGER")
@@ -353,6 +378,7 @@ def init_db(provider: str = "Azure", mode: str = "demo"):
     # Priority, locked to one size+AZ) and demo/pre-existing rows (None)
     # stay exact-match only, same as before this feature.
     _ensure_column(engine, schema_name, "commitments", "instance_flexibility", "VARCHAR(20)")
+    _initialized_scopes.add(scope_key)
     return engine
 
 

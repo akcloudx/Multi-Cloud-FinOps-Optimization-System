@@ -30,7 +30,7 @@ from db.users import (
 from db.sessions import create_session, get_session, delete_session
 from ui.styling import inject_global_css, sidebar_icon
 
-_ENV_MODE_BY_MODE = {"demo": "Demo / Benchmark Mode", "live": "Production"}
+_ENV_MODE_BY_MODE = {"demo": "Demo Mode", "live": "Production"}
 
 # Inline SVG sprite, ported verbatim from the approved design-canvas source
 # (Landing.dc.html) - one <symbol> per icon, referenced via <use href="#i-x">
@@ -220,14 +220,22 @@ def _render_landing_features():
     by hand, same as every other place in this app that names its own
     tabs; there's no single shared source of truth for the tab list to pull
     from without a larger refactor than this pass warrants."""
+    # Cost Analysis card removed, 2026-08-30 - that tab itself was removed
+    # from page_analyze() earlier this session (real user call, not this
+    # pass - see git history around 2026-08-30), so this landing page had
+    # drifted out of sync with the docstring's own "kept in sync by hand"
+    # promise, still advertising a tab that no longer exists. 6 real tabs
+    # left (verified directly against page_analyze()'s current st.tabs()
+    # list), rebalanced into two even rows of 3 (both using .fl-featuresrow2's
+    # centered, narrower grid) instead of the old uneven 4-then-2 that would
+    # have resulted from just deleting the card in place.
     row1 = [
         ("search", "#60A5FA", "Asset Inventory", "Real-time compute and database resource registry across both clouds, one unified, filterable table."),
         ("coins", "#34D399", "Savings Plan Analysis", "Coverage vs. commitment gaps for every eligible workload, with a recommended purchase amount."),
         ("tag", "#FBBF24", "RI Coverage", "Reserved Instance gap detection — what's covered, what's leaking to pay-as-you-go."),
-        ("target", "#A78BFA", "VM / EC2 Rightsizing", "Under- and over-provisioned resource detection with configurable, industry-grounded thresholds."),
     ]
     row2 = [
-        ("bars", "#60A5FA", "Cost Analysis", "Spend baseline and the bridge from PAYG down to net effective rate."),
+        ("target", "#A78BFA", "VM / EC2 Rightsizing", "Under- and over-provisioned resource detection with configurable, industry-grounded thresholds."),
         ("boltf", "#F87171", "Recommendations", "Prioritized, actionable savings opportunities — one clear next step per issue."),
         ("compass", "#38BDF8", "FinOps Maturity Assessment", "Scored against the real FinOps Foundation framework, not an in-house rubric."),
     ]
@@ -242,9 +250,9 @@ def _render_landing_features():
         '<section id="fl-features-anchor" class="fl-section" style="padding-top:20px;"><div class="fl-wrap">'
         '<div class="fl-sectionhead fl-center"><span class="fl-kicker">Platform Features</span>'
         "<h2>Everything a FinOps practice needs, in one place</h2>"
-        "<p>Seven views into the same portfolio — from raw inventory to a scored maturity assessment — "
+        "<p>Six views into the same portfolio — from raw inventory to a scored maturity assessment — "
         "covering both clouds the same way.</p></div>"
-        f'<div class="fl-featuresrow">{"".join(_card(*c) for c in row1)}</div>'
+        f'<div class="fl-featuresrow2">{"".join(_card(*c) for c in row1)}</div>'
         f'<div class="fl-featuresrow2">{"".join(_card(*c) for c in row2)}</div>'
         "</div></section>",
         unsafe_allow_html=True,
@@ -495,24 +503,20 @@ def render_switch_mode_control():
     Salesforce uses for sandbox vs production: separate logins, no toggle,
     because mixing them up silently is a real, recurring incident pattern
     elsewhere - not a hypothetical."""
-    env_mode = st.session_state.get("env_mode_widget", "Demo / Benchmark Mode")
-    other_mode = "Production" if env_mode == "Demo / Benchmark Mode" else "Demo / Benchmark Mode"
-    # Shortened to "Demo" for display only (2026-08-30, real feedback -
-    # "remove that benchmark") - env_mode/other_mode themselves keep their
-    # real, full values ("Demo / Benchmark Mode"/"Production") since
-    # env_mode is still the function's return value (real logic elsewhere
-    # keys off the exact string). Applied to BOTH places "Demo / Benchmark
-    # Mode" could render - the Environment caption AND the Switch button
-    # label - real gap caught live on the production deployment 2026-08-30:
-    # the first pass only shortened the caption, so "Switch to Demo /
-    # Benchmark Mode" still showed the untrimmed text on the button
-    # whenever the current mode was Production (not visible while testing
-    # from Demo mode, where the button reads "Switch to Production" -
-    # already short either way).
-    _short = lambda m: "Demo" if m == "Demo / Benchmark Mode" else m
-    env_mode_short = _short(env_mode)
-    other_mode_short = _short(other_mode)
-    st.markdown(f'<div class="fl-rail-env-line"><b>Environment:</b> {env_mode_short}</div>', unsafe_allow_html=True)
+    # "Demo / Benchmark Mode" renamed to plain "Demo Mode" everywhere,
+    # 2026-08-30 (real feedback - "replace benchmark with Demo everywhere"),
+    # superseding an earlier, narrower fix that only shortened this value
+    # for DISPLAY in this one function while _ENV_MODE_BY_MODE's real,
+    # stored value stayed the long "Demo / Benchmark Mode" (see git history
+    # around 2026-08-30 for that version) - env_mode is still this
+    # function's return value, consumed as real logic elsewhere
+    # (app.py's tenant_mode/is_live_mode), but there's no longer a mismatch
+    # to work around now that the canonical value is already short and
+    # "Demo"-only, so the separate _short()-for-display-only helper this
+    # used to need is gone too.
+    env_mode = st.session_state.get("env_mode_widget", _ENV_MODE_BY_MODE["demo"])
+    other_mode = "Production" if env_mode == _ENV_MODE_BY_MODE["demo"] else _ENV_MODE_BY_MODE["demo"]
+    st.markdown(f'<div class="fl-rail-env-line"><b>Environment:</b> {env_mode}</div>', unsafe_allow_html=True)
     # Same real-link fix as the Log out button (render_logout_control()
     # above) - this button signs out exactly the same way, so it needs the
     # identical treatment: a plain <a href target="_self">, not
@@ -526,7 +530,7 @@ def render_switch_mode_control():
         f'<a class="fl-sidebar-linkbtn" href="/?logout=1" target="_self" '
         f'title="Switching signs you out - sign back in for the other mode. '
         f'Demo and Live are fully separate accounts and data now, not just a '
-        f'view toggle.">{sidebar_icon("swap")}Switch to {other_mode_short}</a>',
+        f'view toggle.">{sidebar_icon("swap")}Switch to {other_mode}</a>',
         unsafe_allow_html=True,
     )
     return env_mode

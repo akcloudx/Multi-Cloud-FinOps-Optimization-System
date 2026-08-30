@@ -472,7 +472,7 @@ def _render_top_header():
         st.warning(
             f"**Production Mode Active — No Connection Configured for {selected_provider}:** "
             f"Please go to the **:material/home: Home** page to configure your {selected_provider} credentials, "
-            "or switch to **Demo / Benchmark Mode** in the sidebar to view sample data.",
+            "or switch to **Demo Mode** in the sidebar to view sample data.",
             icon=":material/warning:",
         )
     elif is_live_mode and is_live_configured:
@@ -5094,7 +5094,7 @@ active_tenant = get_active_tenant(selected_provider, tenant_mode)
 is_live_configured = active_tenant is not None
 is_live_mode = (env_mode == "Production")
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner="Loading Demo data...")
 def load_benchmark_data(days: int, buffer: float, provider: str, sp_eligible_types: tuple, currency: str, inr_rate: float):
     inv_raw          = get_compute_inventory(provider=provider, mode="demo")
     sp_df            = get_existing_savings_plans(provider=provider, mode="demo")
@@ -5133,7 +5133,7 @@ def load_benchmark_data(days: int, buffer: float, provider: str, sp_eligible_typ
     recs          = generate_recommendations(sp_res, ri_res, wf, safety_buffer=buffer, currency=currency, inr_rate=inr_rate)
     return inv_raw, sp_df, compute_sp_df, db_sp_df, sagemaker_sp_df, ri_df, sp_res, ri_res, recs
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner="Loading your live tenant data...")
 def load_live_data(provider: str, tenant_id: int, days: int, buffer: float, sp_eligible_types: tuple, currency: str, inr_rate: float):
     """Same shape as load_benchmark_data, but reads ONLY the given tenant's
     live-ingested rows (tenant_id FK) from SQL DB - never demo/seed rows, and
