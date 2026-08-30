@@ -623,27 +623,34 @@ section[data-testid="stSidebar"] nav span {
 
 /* Footer sticks to the bottom of the viewport on short pages (User
    Management, Home) instead of hugging wherever the page's own content
-   happened to end, while still scrolling normally on long pages - real
-   feedback, 2026-08-30, second round: an earlier pass only made the
-   footer LOOK like proper fine print, deliberately not attempting true
-   bottom-pinning since it needs Streamlit's own page container restyled,
-   a real risk without live verification. Now verified directly against
-   the installed Streamlit build's own compiled JS bundle (grepped its
-   data-testid strings, not guessed) - confirms the real nesting is
-   [data-testid="stAppViewContainer"] > [data-testid="stMain"] >
-   [data-testid="stMainBlockContainer"], and that container's own existing
-   children already stack vertically by default, so making it a flex
-   column preserves the same visual order - only the LAST child (this
-   footer, marked with .fl-page-footer) gets pushed down via margin-top:auto.
-   :has() targets the specific stElementContainer wrapping the footer's own
-   st.markdown() call (the ACTUAL flex item - margin-top:auto has to apply
-   to a direct flex child, not a nested descendant) rather than needing to
-   touch every other element on the page. Supported in all current
-   evergreen browsers (Chrome/Edge/Safari/Firefox), fine for a real app. */
+   happened to end, while still scrolling normally on long pages.
+
+   Third round, 2026-08-30 - the first pass only restyled the footer as
+   fine print (declined true pinning as too risky to guess); the SECOND
+   pass attempted pinning but targeted the wrong nesting level, verified
+   live via the Browser tool against a real running instance (not
+   guessed): [data-testid="stMainBlockContainer"] has exactly ONE direct
+   child, [data-testid="stVerticalBlock"] - it wraps the ENTIRE page's
+   content (everything pg.run() renders, plus this footer) as a single
+   flex item, so putting margin-top:auto on THAT (the second pass's
+   mistake) had nothing to push against - Streamlit's own native CSS
+   already gives that single vertical block flex-grow:1 once its parent
+   is a flex column (confirmed live too - not something this app needs to
+   set itself), which fills all the available space via GROWTH before any
+   auto margin is resolved, leaving zero free space left for a margin to
+   consume. The real separation needs to happen one level deeper: that one
+   stVerticalBlock's own 8 real children (each a stElementContainer, one
+   per top-level st.* call) are the actual flex siblings - margin-top:auto
+   belongs on the LAST one specifically, the one wrapping the footer's own
+   st.markdown() call (matched via :has(.fl-page-footer), since that's the
+   only element on the page carrying that class). Confirmed correct by
+   live screenshot on both a short page (pinned to the real bottom) and a
+   long, scrolling page (normal spacing, no clipping, no overlap) before
+   writing this. :has() is supported in all current evergreen browsers. */
 div[data-testid="stMainBlockContainer"] {
     min-height: 100vh; display: flex; flex-direction: column;
 }
-div[data-testid="stMainBlockContainer"] > div:has(.fl-page-footer) {
+div[data-testid="stMainBlockContainer"] > div[data-testid="stVerticalBlock"] > div[data-testid="stElementContainer"]:has(.fl-page-footer) {
     margin-top: auto;
 }
 </style>
