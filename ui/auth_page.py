@@ -498,10 +498,20 @@ def render_switch_mode_control():
     env_mode = st.session_state.get("env_mode_widget", "Demo / Benchmark Mode")
     other_mode = "Production" if env_mode == "Demo / Benchmark Mode" else "Demo / Benchmark Mode"
     # Shortened to "Demo" for display only (2026-08-30, real feedback -
-    # "remove that benchmark") - env_mode itself keeps its real, full value
-    # ("Demo / Benchmark Mode"/"Production") since it's still the function's
-    # return value; this only trims the caption text shown right here.
-    env_mode_short = "Demo" if env_mode == "Demo / Benchmark Mode" else env_mode
+    # "remove that benchmark") - env_mode/other_mode themselves keep their
+    # real, full values ("Demo / Benchmark Mode"/"Production") since
+    # env_mode is still the function's return value (real logic elsewhere
+    # keys off the exact string). Applied to BOTH places "Demo / Benchmark
+    # Mode" could render - the Environment caption AND the Switch button
+    # label - real gap caught live on the production deployment 2026-08-30:
+    # the first pass only shortened the caption, so "Switch to Demo /
+    # Benchmark Mode" still showed the untrimmed text on the button
+    # whenever the current mode was Production (not visible while testing
+    # from Demo mode, where the button reads "Switch to Production" -
+    # already short either way).
+    _short = lambda m: "Demo" if m == "Demo / Benchmark Mode" else m
+    env_mode_short = _short(env_mode)
+    other_mode_short = _short(other_mode)
     st.markdown(f'<div class="fl-rail-env-line"><b>Environment:</b> {env_mode_short}</div>', unsafe_allow_html=True)
     # Same real-link fix as the Log out button (render_logout_control()
     # above) - this button signs out exactly the same way, so it needs the
@@ -516,7 +526,7 @@ def render_switch_mode_control():
         f'<a class="fl-sidebar-linkbtn" href="/?logout=1" target="_self" '
         f'title="Switching signs you out - sign back in for the other mode. '
         f'Demo and Live are fully separate accounts and data now, not just a '
-        f'view toggle.">{sidebar_icon("swap")}Switch to {other_mode}</a>',
+        f'view toggle.">{sidebar_icon("swap")}Switch to {other_mode_short}</a>',
         unsafe_allow_html=True,
     )
     return env_mode
