@@ -1285,10 +1285,23 @@ def page_tenant_management():
         st.markdown(f"#### {selected_provider} Tenants")
     with hdr_r:
         add_disabled = (tenant_mode == "demo")
-        if st.button("Add a new tenant", icon=":material/add:", use_container_width=True, type="primary",
-                     disabled=add_disabled,
-                     help="Only available in Production Mode." if add_disabled else None):
-            st.session_state["_show_add_tenant_form"] = not st.session_state.get("_show_add_tenant_form", False)
+        # Real gap the user caught, 2026-08-30: this button already TOGGLES
+        # _show_add_tenant_form (clicking it again while the form is open
+        # closes it, no refresh needed) - but the label never changed to
+        # say so, so nothing on screen suggested that was possible. Unlike
+        # the Add User form (a real st.expander, whose header IS the
+        # familiar click-to-collapse affordance), this section is a plain
+        # button revealing a st.container() below it, with no built-in
+        # "close" gesture of its own - the button itself has to say it.
+        _form_open = st.session_state.get("_show_add_tenant_form", False)
+        if st.button(
+            "Cancel" if _form_open else "Add a new tenant",
+            icon=":material/close:" if _form_open else ":material/add:",
+            use_container_width=True, type="secondary" if _form_open else "primary",
+            disabled=add_disabled,
+            help="Only available in Production Mode." if add_disabled else None,
+        ):
+            st.session_state["_show_add_tenant_form"] = not _form_open
 
     if st.session_state.get("_show_add_tenant_form") and tenant_mode == "live":
         with st.container(border=True):
