@@ -177,14 +177,14 @@ from analysis.rightsizing import (
     estimate_resize_monthly_impact, PRESETS, SETTINGS_FIELDS,
 )
 from azure_conn.connector import (
-    AzureCredentials, load_credentials_from_env, save_credentials_to_env_file,
+    AzureCredentials, save_credentials_to_env_file,
     test_connection, check_role_assignments, check_tenant_role_assignments,
     list_accessible_subscriptions, status_from_role_check,
     REQUIRED_ROLES, REQUIRED_SUBSCRIPTION_ROLES, REQUIRED_TENANT_ROLES,
     HAS_AZURE_IDENTITY,
 )
 from aws.connector import (
-    AWSCredentials, load_aws_credentials_from_env, save_aws_credentials_to_env_file,
+    AWSCredentials, save_aws_credentials_to_env_file,
     test_aws_connection, check_aws_permissions, REQUIRED_AWS_POLICIES, HAS_BOTO3,
 )
 
@@ -202,22 +202,130 @@ except ImportError:
 # here instead of duplicated, since both need the exact same "enter Service
 # Principal creds -> test/connect -> ingest" flow.
 # ─────────────────────────────────────────────────────────────────────────────
+def _render_azure_sp_setup_guide(expanded: bool = False):
+    """Shared with _manage_tenant_dialog()'s Credentials tab - extracted
+    2026-08-30, real onboarding gap the user caught live: this guidance
+    (how to create a Service Principal, minimum roles to get Inventory/Cost
+    data working, tenant-wide roles as an optional add-later step) used to
+    exist ONLY inside Manage Tenant's Credentials tab - reachable only for a
+    tenant that's already connected. A brand-new user in a fresh environment
+    has no tenant yet, so no way to ever reach that guidance from the Add a
+    new tenant form where they actually need it first."""
+    with st.expander("How to set up a Service Principal", icon=":material/menu_book:", expanded=expanded):
+        st.markdown('<span class="fl-setup-num">1</span><span class="fl-setup-head">Create the Service Principal</span>', unsafe_allow_html=True)
+        st.markdown('<div class="fl-setup-desc">Run this once - it creates the identity this app authenticates as.</div>', unsafe_allow_html=True)
+        st.code('az ad sp create-for-rbac --name "finops-optimizer-sp" --role "Reader" --scopes /subscriptions/<SUBSCRIPTION_ID> --output json', language="bash")
+
+        st.markdown('<span class="fl-setup-num">2</span><span class="fl-setup-head">Assign subscription-level roles</span>', unsafe_allow_html=True)
+        st.markdown('<div class="fl-setup-desc"><b>Reader</b> + <b>Cost Management Reader</b> for each subscription this tenant should cover - this is the minimum needed for Inventory and Cost data.</div>', unsafe_allow_html=True)
+        st.code(
+            'az role assignment create --assignee <CLIENT_ID> --role "Reader" --scope /subscriptions/<SUB_ID>\n'
+            'az role assignment create --assignee <CLIENT_ID> --role "Cost Management Reader" --scope /subscriptions/<SUB_ID>',
+            language="bash",
+        )
+        st.markdown('<div class="fl-setup-desc">To cover every subscription in the tenant at once instead of one at a time:</div>', unsafe_allow_html=True)
+        st.code(
+            'for sub in $(az account list --query "[].id" -o tsv); do\n'
+            '  az role assignment create --assignee <CLIENT_ID> --role "Reader" --scope "/subscriptions/$sub"\n'
+            '  az role assignment create --assignee <CLIENT_ID> --role "Cost Management Reader" --scope "/subscriptions/$sub"\n'
+            'done',
+            language="bash",
+        )
+
+        st.markdown(
+            '<span class="fl-setup-num">3</span><span class="fl-setup-head">Assign tenant-level roles'
+            '<span class="fl-badge-optional">Optional - add later</span></span>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            '<div class="fl-setup-desc">For Reservations and Savings Plans - a separate permission system from step 2, '
+            'since neither is a subscription resource. Needs <b>User Access Administrator</b> at the tenant level, a '
+            "materially higher bar many student/trial accounts can't get. <b>Not required to get started</b> - "
+            'inventory and cost data sync independently of this; add it any time from Manage &gt; Tenant-wide permissions.</div>',
+            unsafe_allow_html=True,
+        )
+        st.code(
+            'az role assignment create --assignee <CLIENT_ID> --role "Reservations Reader" --scope "/providers/Microsoft.Capacity"\n'
+            'az role assignment create --assignee <CLIENT_ID> --role "Savings Plan Reader" --scope "/providers/Microsoft.BillingBenefits"',
+            language="bash",
+        )
+        st.markdown(
+            '<div class="fl-setup-callout">✅ <div>Missing step 3 is <b>not fatal</b> - a sync will report which parts succeeded.</div></div>',
+            unsafe_allow_html=True,
+        )
+
+
+def _render_help_page_link(label: str):
+    """Links to Help & Support in a NEW browser tab, not st.page_link's
+    normal same-tab in-app navigation - real feedback, 2026-08-30: Azure and
+    AWS's own consoles open their help/docs links in a new tab specifically
+    so you don't lose your place (a half-filled Add tenant form). st.page_link
+    has no target="_blank" option (confirmed against its real signature) -
+    it always navigates the current tab, since it's Streamlit's own in-app
+    routing, not a plain hyperlink. Built as a real <a target="_blank"> to
+    this app's own URL instead. Preserves the session token
+    (st.query_params["s"], see ui/auth_page.py's _start_session/
+    require_login) in that URL so the NEW tab is already signed in rather
+    than landing back on the login screen - confirmed that token is exactly
+    what a fresh page load/tab already uses to restore a session, so this
+    is the same mechanism, just reused deliberately.
+    help_page is a module-level global (st.Page(page_help, ...), NAVIGATION
+    section further down) - safe to reference here via the same late-binding
+    closure pattern this whole file already relies on, since this only runs
+    once pg.run() reaches a page body, well after that assignment executes."""
+    _token = st.query_params.get("s")
+    _url = f"/{help_page.url_path}" + (f"?s={_token}" if _token else "")
+    st.markdown(
+        f'<a href="{_url}" target="_blank" rel="noopener noreferrer">'
+        f'{label} ↗</a>',
+        unsafe_allow_html=True,
+    )
+
+
 def _render_azure_connect_form(key_prefix: str, mode: str = "live"):
     """Renders the credential form + Test/Connect buttons and handles both
     actions. Returns True if a connect just succeeded (caller may want to
     st.rerun() immediately rather than wait for the natural rerun)."""
-    env_azure = load_credentials_from_env()
+    # Real bugs caught live, 2026-08-30, both about this form pre-filling
+    # itself with a PREVIOUS real tenant's data instead of starting blank:
+    # (1) az_name had a hardcoded value="Prod Azure Tenant" (a leftover
+    #     example value passed as `value=` instead of `placeholder=` -
+    #     confirmed live, it showed up verbatim on a fresh Add form for the
+    #     user's own real tenant name); (2) the other 4 fields read
+    #     load_credentials_from_env(), which reflects whatever tenant was
+    #     LAST connected (save_credentials_to_env_file() writes it on every
+    #     successful connect, data/sync_pipeline.py's own fallback path is
+    #     the only real remaining consumer) - fine as a single-tenant dev
+    #     convenience, wrong for "Add a NEW tenant" in a real multi-tenant
+    #     flow, where it silently pre-filled a second tenant's form with
+    #     the first tenant's real Tenant/Client/Subscription IDs. This form
+    #     now always starts genuinely blank - simplest fix, and correct: a
+    #     brand-new tenant's real values were never going to happen to
+    #     match whatever was last connected anyway.
+    #
+    # Second real gap in the same round: the placeholder examples for
+    # Tenant ID/Client ID/Subscription ID were the user's own REAL GUIDs
+    # (confirmed against their actual "Prod Azure Tenant" values) hardcoded
+    # into source as if they were generic examples - replaced with clearly
+    # fabricated example GUIDs instead.
+    # Real feedback, 2026-08-30: this form used to show BOTH the full
+    # inline "How to set up a Service Principal" guide AND a link to the
+    # same guide on the Help & Support page right next to each other - two
+    # things doing the same job. The full guide now lives in one place
+    # only (Help & Support, plus the Manage Tenant dialog's own Credentials
+    # tab for an already-connected tenant); this form just links out to it.
+    _render_help_page_link("New here? See the Getting Started guide")
 
     with st.form(f"{key_prefix}_azure_form"):
         col1, col2 = st.columns(2)
         with col1:
-            az_name   = st.text_input("Tenant / Subscription Name", value="Prod Azure Tenant", placeholder="e.g. Main Production Azure", key=f"{key_prefix}_az_name")
-            az_tenant = st.text_input("Tenant ID", value=env_azure.tenant_id if env_azure else "", placeholder="f946c54c-e759-4985-bbe0-3e166cef8fa0", key=f"{key_prefix}_az_tenant")
-            az_client = st.text_input("Client ID (Application ID)", value=env_azure.client_id if env_azure else "", placeholder="84644394-8136-4625-9d36-564fc9c0b5e7", key=f"{key_prefix}_az_client")
+            az_name   = st.text_input("Tenant / Subscription Name", value="", placeholder="e.g. Main Production Azure", key=f"{key_prefix}_az_name")
+            az_tenant = st.text_input("Tenant ID", value="", placeholder="a1b2c3d4-5e6f-4a1b-9c2d-3e4f5a6b7c8d", key=f"{key_prefix}_az_tenant")
+            az_client = st.text_input("Client ID (Application ID)", value="", placeholder="b2c3d4e5-6f7a-4b2c-8d3e-4f5a6b7c8d9e", key=f"{key_prefix}_az_client")
             az_domain = st.text_input("Domain (optional)", value="", placeholder="contoso.onmicrosoft.com", key=f"{key_prefix}_az_domain")
         with col2:
-            az_sub = st.text_input("Subscription ID", value=env_azure.subscription_id if env_azure else "", placeholder="e0b96fd6-b891-4a5f-80db-6cfed14e62ab", key=f"{key_prefix}_az_sub")
-            az_sec = st.text_input("Client Secret", value=env_azure.client_secret if env_azure else "", type="password", key=f"{key_prefix}_az_sec")
+            az_sub = st.text_input("Subscription ID", value="", placeholder="c3d4e5f6-7a8b-4c3d-9e4f-5a6b7c8d9e0f", key=f"{key_prefix}_az_sub")
+            az_sec = st.text_input("Client Secret", value="", type="password", key=f"{key_prefix}_az_sec")
 
         c_btn1, c_btn2 = st.columns(2)
         with c_btn1:
@@ -381,53 +489,129 @@ def _render_top_header():
 # page; per-tenant editing/credentials/sync/permissions now live in the
 # Manage Tenant dialog below instead of a flat connect-and-list page).
 # ═══════════════════════════════════════════════════════════════════════════════
+def _render_aws_iam_setup_guide(expanded: bool = False):
+    """Shared with page_help()'s Getting Started guide - extracted 2026-08-30
+    alongside the same fix for Azure (_render_azure_sp_setup_guide), for the
+    same reason: this guidance previously only existed on the Add tenant
+    form itself, with no way to see it before landing there."""
+    # Real feedback, 2026-08-30: this rendered all of REQUIRED_AWS_POLICIES
+    # (18 actions and counting, as more AWS services got inventory support
+    # over time) as one long bulleted list, each line carrying a full
+    # sentence of "Purpose" prose - "difficult to read", especially here.
+    # What you actually DO is attach a much shorter list of distinct
+    # managed policies (12 today) - leads with that as scannable chips,
+    # calls out the handful of actions with no dedicated policy separately,
+    # and pushes the full action-by-action justification into a collapsed
+    # reference table below. Policy names/counts are all still computed
+    # FROM REQUIRED_AWS_POLICIES, not hand-typed - the stale caption this
+    # replaced had hardcoded "9 policies... 13 actions" from an earlier,
+    # smaller version of that list and had quietly drifted wrong (real
+    # count by now: 12 policies / 18 actions) - computing it live means it
+    # can't drift out of sync again as the list keeps growing.
+    _distinct_policies = list(dict.fromkeys(
+        p["AWS Managed Policy"] for p in REQUIRED_AWS_POLICIES if not p["AWS Managed Policy"].startswith("(")
+    ))
+    _custom_actions = [p["Policy / Action"] for p in REQUIRED_AWS_POLICIES if p["AWS Managed Policy"].startswith("(")]
+
+    with st.expander("📖 Instructions: How to obtain AWS IAM Access Keys", expanded=expanded):
+        st.markdown(
+            '<div class="fl-setup-steps">'
+            '<div class="fl-setup-step-row"><span class="num">1</span><span>Sign in to the <b>AWS Management Console</b> and open the <b>IAM Console</b>.</span></div>'
+            '<div class="fl-setup-step-row"><span class="num">2</span><span>Under <b>Users</b>, select your user or create a dedicated <code>FinOpsOptimizerUser</code>.</span></div>'
+            '<div class="fl-setup-step-row"><span class="num">3</span><span>Open the <b>Security credentials</b> tab, then <b>Create access key</b>.</span></div>'
+            '<div class="fl-setup-step-row"><span class="num">4</span><span>Select <b>Command Line Interface (CLI)</b> and copy the <b>Access Key ID</b> + <b>Secret Access Key</b>.</span></div>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+
+        st.markdown(f'<span class="fl-setup-num">5</span><span class="fl-setup-head">Attach these {len(_distinct_policies)} managed policies</span>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="fl-setup-desc">One per AWS service this app reads from. Each is a stock, read-only '
+            'AWS-managed policy - attach exactly these, nothing broader is needed.</div>',
+            unsafe_allow_html=True,
+        )
+        _chip_html = "".join(f'<div class="fl-policy-chip"><span class="dot"></span>{p}</div>' for p in _distinct_policies)
+        st.markdown(f'<div class="fl-policy-grid">{_chip_html}</div>', unsafe_allow_html=True)
+
+        if _custom_actions:
+            st.markdown(
+                f'<div class="fl-custom-note">⚠️ <div><b>{len(_custom_actions)} actions have no dedicated AWS-managed policy</b> '
+                f'({", ".join(f"<code>{a.split(" ")[0]}</code>" for a in _custom_actions)}) - cover them with a small '
+                'custom inline policy below, or the broad <code>ReadOnlyAccess</code> policy.</div></div>',
+                unsafe_allow_html=True,
+            )
+            # Real gap the user caught, 2026-08-30: the callout above told
+            # you to "attach a small custom inline policy" but never showed
+            # HOW - no console steps, no actual policy document. Individual
+            # actions flattened from _custom_actions ("dms:Describe... /
+            # dms:Describe... / dms:Describe...") into one real JSON policy
+            # document, generated FROM REQUIRED_AWS_POLICIES (not
+            # hand-typed) so it can't silently drift from the actions listed
+            # above it as more services are added later.
+            _custom_flat_actions = sorted({
+                action.strip() for group in _custom_actions for action in group.split(" / ")
+            })
+            _policy_json = json.dumps(
+                {
+                    "Version": "2012-10-17",
+                    "Statement": [{
+                        "Sid": "FinOpsOptimizerCustomActions",
+                        "Effect": "Allow",
+                        "Action": _custom_flat_actions,
+                        "Resource": "*",
+                    }],
+                },
+                indent=2,
+            )
+            st.markdown(
+                f'<span class="fl-setup-num">6</span><span class="fl-setup-head">Add one custom inline policy for the remaining {len(_custom_flat_actions)} actions</span>',
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                '<div class="fl-setup-desc">In the IAM Console: open your user &gt; <b>Permissions</b> tab &gt; '
+                '<b>Add permissions</b> &gt; <b>Create inline policy</b> &gt; <b>JSON</b> tab - paste this, then '
+                'name it (e.g. <code>FinOpsOptimizerCustomActions</code>) and create it:</div>',
+                unsafe_allow_html=True,
+            )
+            st.code(_policy_json, language="json")
+
+        st.caption("🧪 Use **Test Access Permissions** on the Add tenant form to check all of this for real - it reports these exact same policy names.")
+
+        # Generated FROM REQUIRED_AWS_POLICIES (aws/connector.py), not
+        # hand-typed a second time here - keeps this table and the live Test
+        # checklist saying the exact same managed-policy name for the exact
+        # same action, permanently, instead of the two silently drifting out
+        # of sync the way they had before (real gap the user caught live).
+        with st.expander(f"See exactly which action needs which policy ({len(REQUIRED_AWS_POLICIES)} actions)", icon=":material/list_alt:", expanded=False):
+            st.dataframe(
+                pd.DataFrame(REQUIRED_AWS_POLICIES)[["Policy / Action", "AWS Managed Policy", "Required", "Purpose"]],
+                hide_index=True, width="stretch",
+                column_config={
+                    "Policy / Action": st.column_config.TextColumn("Action", width=280),
+                    "AWS Managed Policy": st.column_config.TextColumn("Policy", width=220),
+                    "Required": st.column_config.TextColumn(width=170),
+                    "Purpose": st.column_config.TextColumn(width=380),
+                },
+            )
+
+
 def _render_aws_connect_form(key_prefix: str, mode: str = "live"):
     """AWS's equivalent of _render_azure_connect_form - simpler, since AWS
     live ingestion (EC2/RDS via boto3) isn't built yet; this only registers
     the account in the tenant registry."""
-    with st.expander("📖 Instructions: How to obtain AWS IAM Access Keys", expanded=False):
-        st.markdown("""
-1. Sign in to the **AWS Management Console** and open the **IAM Console**.
-2. In the navigation pane, choose **Users**, then select your user or create a dedicated `FinOpsOptimizerUser`.
-3. Choose the **Security credentials** tab.
-4. Under **Access keys**, click **Create access key**.
-5. Select **Command Line Interface (CLI)** and copy the generated credentials:
-   - **Access Key ID**
-   - **Secret Access Key**
-6. Attach these AWS managed policies (verified against AWS's own policy reference pages, not guessed - use **🧪 Test Access Permissions** below to check for real, and it'll report these exact same policy names):
-""")
-        # Generated FROM REQUIRED_AWS_POLICIES (aws/connector.py), not
-        # hand-typed a second time here - keeps this list and the live Test
-        # checklist saying the exact same managed-policy name for the exact
-        # same action, permanently, instead of the two silently drifting out
-        # of sync the way they had before (real gap the user caught live).
-        for policy in REQUIRED_AWS_POLICIES:
-            action = policy["Policy / Action"]
-            managed_policy = policy["AWS Managed Policy"]
-            if managed_policy.startswith("("):
-                st.markdown(f"   - `{action}` — {managed_policy}")
-            else:
-                st.markdown(f"   - `{action}` → attach **`{managed_policy}`**")
-        st.caption(
-            "Only 9 managed policies to attach in total, despite 13 actions above - EC2 and RDS "
-            "each cover both the inventory scan and the Reserved Instances read (`Describe*` "
-            "family), so nothing extra is needed for RI data beyond what's already required for "
-            "inventory. `AWSPriceListServiceFullAccess` is safe despite the name - the Pricing "
-            "service has no mutating actions at all, so \"full access\" just means every "
-            "read-only pricing action. DocumentDB and Neptune inventory need no extra policy "
-            "either - both are authorized via plain `rds:DescribeDBInstances`, already required "
-            "above. DMS and Fargate genuinely have no dedicated AWS-managed read-only policy at "
-            "all (confirmed against AWS's own docs) - attach a small custom inline policy for "
-            "those two actions, or the broad `ReadOnlyAccess` policy."
-        )
-    env_aws = load_aws_credentials_from_env()
+    # Same fix as _render_azure_connect_form above, same real bug: this form
+    # used to pre-fill from load_aws_credentials_from_env(), which reflects
+    # whatever tenant was LAST connected - wrong for "Add a NEW tenant".
+    # Starts genuinely blank now (region keeps a plain, non-identifying
+    # "us-east-1" default - not tied to any previously-connected tenant).
+    _render_help_page_link("New here? See the Getting Started guide")
     with st.form(f"{key_prefix}_aws_form"):
         col1, col2 = st.columns(2)
         with col1:
-            aws_key = st.text_input("AWS Access Key ID", value=env_aws.access_key_id if env_aws else "", placeholder="AKIAXXXXXXXXXXXXXXXX")
-            aws_reg = st.text_input("Default AWS Region", value=env_aws.region if env_aws else "us-east-1", placeholder="us-east-1")
+            aws_key = st.text_input("AWS Access Key ID", value="", placeholder="AKIAXXXXXXXXXXXXXXXX")
+            aws_reg = st.text_input("Default AWS Region", value="us-east-1", placeholder="us-east-1")
         with col2:
-            aws_sec = st.text_input("AWS Secret Access Key", value=env_aws.secret_access_key if env_aws else "", type="password")
+            aws_sec = st.text_input("AWS Secret Access Key", value="", type="password")
 
         c_btn1, c_btn2 = st.columns(2)
         with c_btn1:
@@ -668,6 +852,11 @@ def _manage_tenant_dialog(t, mode: str):
                         )
                         st.session_state["_tenant_mgmt_toast"] = "Credentials updated."
                         st.rerun()
+
+            # Added 2026-08-30 for parity with the Azure branch's Credentials
+            # tab, which already links out to Help & Support - AWS's own
+            # Manage dialog never had a guidance link of any kind before.
+            _render_help_page_link("Need the setup guide? Open Help & Support")
         elif active_aws_section == "Permissions":
             if is_demo:
                 st.caption("Not applicable - a demo tenant has no real AWS credentials behind it.")
@@ -800,33 +989,12 @@ def _manage_tenant_dialog(t, mode: str):
                 st.session_state["_tenant_mgmt_toast"] = "Credentials updated."
                 st.rerun()
 
-        with st.expander("How to set up this Service Principal", icon=":material/menu_book:", expanded=False):
-            st.markdown("""
-**1. Create the Service Principal:**
-```bash
-az ad sp create-for-rbac --name "finops-optimizer-sp" --role "Reader" --scopes /subscriptions/<SUBSCRIPTION_ID> --output json
-```
-
-**2. Assign subscription-level roles** (Reader + Cost Management Reader) for each subscription this tenant should cover:
-```bash
-az role assignment create --assignee <CLIENT_ID> --role "Reader" --scope /subscriptions/<SUB_ID>
-az role assignment create --assignee <CLIENT_ID> --role "Cost Management Reader" --scope /subscriptions/<SUB_ID>
-```
-To cover every subscription in the tenant at once instead of one at a time:
-```bash
-for sub in $(az account list --query "[].id" -o tsv); do
-  az role assignment create --assignee <CLIENT_ID> --role "Reader" --scope "/subscriptions/$sub"
-  az role assignment create --assignee <CLIENT_ID> --role "Cost Management Reader" --scope "/subscriptions/$sub"
-done
-```
-
-**3. Assign tenant-level roles** for Reservations and Savings Plans - a separate permission system, not subscription-scoped, since neither is a subscription resource. This step needs **User Access Administrator** rights at the tenant level - a materially higher bar than step 2, and many accounts (e.g. student/trial subscriptions) genuinely can't get it:
-```bash
-az role assignment create --assignee <CLIENT_ID> --role "Reservations Reader" --scope "/providers/Microsoft.Capacity"
-az role assignment create --assignee <CLIENT_ID> --role "Savings Plan Reader" --scope "/providers/Microsoft.BillingBenefits"
-```
-Missing this step is **not fatal** - Resource inventory and cost data (step 2) sync independently of Reservations/Savings Plan data (step 3); a sync will report which parts succeeded.
-""")
+        # Simplified to the same new-tab link used on the Add tenant form,
+        # 2026-08-30 - the original objection to doing this here (a same-tab
+        # st.page_link would close this modal dialog entirely) doesn't apply
+        # to _render_help_page_link's real <a target="_blank">, which opens
+        # a separate tab and leaves this dialog untouched.
+        _render_help_page_link("Need the setup guide? Open Help & Support")
 
     # ── Subscriptions ─────────────────────────────────────────────────────
     elif active_section == "Subscriptions":
@@ -1321,6 +1489,31 @@ def page_users():
     _toast_user = st.session_state.pop("_user_added_toast", None)
     if _toast_user:
         st.success(f"User '{_toast_user}' added.")
+
+
+def page_help():
+    """Help & Support - scoped deliberately, 2026-08-30, per the user's own
+    call: Azure/AWS's own Help & Support is a full enterprise system (live
+    chat, ticketing, docs search, community forums) with real backend
+    infrastructure behind it that this app has no equivalent of. Matching
+    that literally isn't the goal - what's actually missing, and what this
+    page actually fixes, is a real onboarding gap: the Service
+    Principal/IAM setup guidance already built for the Add tenant forms
+    only appeared AFTER landing on that form, with no way for a first-time
+    user in a fresh environment to see it beforehand. This page surfaces
+    the exact same guidance (same helpers, not a rewritten copy) up front,
+    reachable from the sidebar before a tenant even exists."""
+    st.subheader(":material/help: Help & Support")
+    st.caption("Getting started with your first Azure or AWS tenant connection.")
+    _finops_tag("Manage the FinOps Practice", "FinOps Practice Operations & Automation, Tools & Services")
+
+    st.markdown("#### Getting Started")
+    st.caption("Same setup guidance shown on the Add a new tenant form - available here too, before you've connected anything.")
+    az_tab, aws_tab = st.tabs(["☁️ Azure", "🟧 AWS"])
+    with az_tab:
+        _render_azure_sp_setup_guide(expanded=True)
+    with aws_tab:
+        _render_aws_iam_setup_guide(expanded=True)
 
 
 def _split_sp_eligible(df_24x7: pd.DataFrame, azure_provider: bool):
@@ -4676,9 +4869,12 @@ def page_analyze():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# NAVIGATION — flat 3-item sidebar (Home / Tenant Management / User
-# Management), per approved sketch 2026-08 - no section headers, no separate
-# "Workspace" entry. Analyze is still a real registered page (needed for
+# NAVIGATION — flat sidebar (Home / Tenant Management / User Management /
+# Help & Support), per approved sketch 2026-08 - no section headers, no
+# separate "Workspace" entry. Help & Support added 2026-08-30 - real
+# onboarding gap the user caught: setup guidance for a first tenant
+# connection previously had no home before a tenant existed to Manage.
+# Analyze is still a real registered page (needed for
 # st.switch_page to work at all) but visibility="hidden" keeps it out of the
 # sidebar - it's reached only via a tenant's own "Dashboard" button in
 # Tenant Management, never browsed to directly, since analyzing data only
@@ -4687,9 +4883,10 @@ def page_analyze():
 home_page        = st.Page(page_home,              title="Home",              icon=":material/home:", default=True)
 tenant_mgmt_page = st.Page(page_tenant_management,  title="Tenant Management", icon=":material/domain:")
 users_page       = st.Page(page_users,              title="User Management",   icon=":material/group:")
+help_page        = st.Page(page_help,               title="Help & Support",    icon=":material/help:")
 analyze_page     = st.Page(page_analyze,            title="Analyze",           icon=":material/insights:", visibility="hidden")
 
-pg = st.navigation([home_page, tenant_mgmt_page, users_page, analyze_page], position="sidebar")
+pg = st.navigation([home_page, tenant_mgmt_page, users_page, help_page, analyze_page], position="sidebar")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SIDEBAR CONTROLS — rendered below the nav menu above. Only cross-cutting

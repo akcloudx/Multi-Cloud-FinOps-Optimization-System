@@ -544,6 +544,82 @@ section[data-testid="stSidebar"] nav span {
 .fl-rail-title { font-size: 13.5px; font-weight: 700; color: #F1F5F9; padding-top: 6px; margin-bottom: 4px; }
 .fl-rail-env-line { font-size: 12px; color: #94A3B8; margin: 10px 0 12px; line-height: 1.5; }
 .fl-rail-env-line b { color: #F1F5F9; font-weight: 600; }
+
+/* Getting Started guide (page_help() / Add tenant / Manage Credentials),
+   2026-08-30 - real feedback: the guide was "difficult to read", AWS's
+   especially (18 permission actions as one bulleted essay, each with a
+   paragraph-length Purpose). Mocked up via Artifact and approved before
+   porting - see that mockup's own note for the full before/after reasoning.
+
+   One disclosed simplification vs. the mockup: the mockup's numbered steps
+   used one continuous border-left line with an absolutely-positioned circle
+   badge floating on top, built as a single HTML blob per step (including
+   the CLI command). Ported as a small self-contained numbered-badge HEADER
+   (.fl-setup-num) followed by a REAL st.code() block instead - this file's
+   own established lesson (see .fl-closing's history above) is that an
+   opened <div> can't be closed in a LATER, separate st.markdown() call in
+   this Streamlit build; splitting the header out this way keeps every HTML
+   snippet self-contained while keeping st.code()'s real syntax
+   highlighting + copy button, which a raw HTML <pre> block doesn't get.
+   Loses the mockup's literal connecting line between steps - not
+   reproducible without that same fragile split-div pattern. */
+.fl-setup-num {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 22px; height: 22px; border-radius: 50%; margin-right: 8px;
+    background: rgba(96,165,250,.14); border: 1.5px solid #60A5FA; color: #60A5FA;
+    font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 800;
+    vertical-align: middle;
+}
+.fl-setup-head { font-size: 14px; font-weight: 700; color: #F1F5F9; margin: 4px 0 2px; }
+.fl-setup-desc { font-size: 12.5px; color: #94A3B8; line-height: 1.55; margin: 0 0 8px 30px; }
+.fl-badge-optional {
+    display: inline-block; font-size: 10px; font-weight: 700; letter-spacing: .03em;
+    text-transform: uppercase; color: #FBBF24; background: rgba(251,191,36,.1);
+    border-radius: 5px; padding: 2px 6px; margin-left: 6px; vertical-align: middle;
+}
+.fl-setup-callout {
+    display: flex; gap: 10px; align-items: flex-start; background: rgba(52,211,153,.12);
+    border: 1px solid rgba(52,211,153,.25); border-radius: 8px; padding: 10px 12px;
+    font-size: 12px; color: #B7F0DA; line-height: 1.5; margin-top: 8px;
+}
+
+/* AWS's compact console-step rows (no code block needed per step, so all
+   4 rows are safe to render as one self-contained HTML block). */
+.fl-setup-steps {
+    display: flex; flex-direction: column; gap: 10px; margin: 0 0 18px;
+    padding: 14px 16px; background: #0F1A2E; border: 1px solid #1E293B; border-radius: 10px;
+}
+.fl-setup-step-row { display: flex; gap: 12px; align-items: flex-start; font-size: 13px; line-height: 1.5; color: #F1F5F9; }
+.fl-setup-step-row .num {
+    flex-shrink: 0; width: 20px; height: 20px; border-radius: 50%; background: #263349;
+    color: #94A3B8; font-family: 'JetBrains Mono', monospace; font-size: 10.5px; font-weight: 700;
+    display: flex; align-items: center; justify-content: center; margin-top: 1px;
+}
+
+/* Policy chips - the core AWS fix: N scannable chips instead of one long
+   bulleted list of every individual IAM action. */
+.fl-policy-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 4px 0 12px; }
+.fl-policy-chip {
+    display: flex; align-items: center; gap: 8px; background: #0F1A2E;
+    border: 1px solid #1E293B; border-radius: 8px; padding: 8px 12px;
+    font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 11.5px; color: #F1F5F9;
+}
+.fl-policy-chip .dot { width: 6px; height: 6px; border-radius: 50%; background: #34D399; flex-shrink: 0; }
+.fl-custom-note {
+    display: flex; gap: 10px; align-items: flex-start; background: rgba(251,191,36,.1);
+    border: 1px solid rgba(251,191,36,.25); border-radius: 8px; padding: 10px 12px;
+    font-size: 12.5px; color: #FCD9A0; line-height: 1.6; margin-bottom: 4px;
+}
+/* Streamlit's own default <code> size (inherited here since these blocks
+   are raw HTML via unsafe_allow_html, not st.markdown's normal code
+   styling) renders noticeably smaller than surrounding text - real
+   feedback, 2026-08-30: action/policy names inside this callout and the
+   setup-desc paragraphs were hard to read. Sized to match the body text
+   around it instead, with a bit of background so it still reads as code. */
+.fl-custom-note code, .fl-setup-desc code {
+    font-size: 12px; background: rgba(255,255,255,.08); padding: 1px 5px;
+    border-radius: 4px; color: #FCD34D;
+}
 </style>
 """
 
