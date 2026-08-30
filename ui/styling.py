@@ -620,6 +620,32 @@ section[data-testid="stSidebar"] nav span {
     font-size: 12px; background: rgba(255,255,255,.08); padding: 1px 5px;
     border-radius: 4px; color: #FCD34D;
 }
+
+/* Footer sticks to the bottom of the viewport on short pages (User
+   Management, Home) instead of hugging wherever the page's own content
+   happened to end, while still scrolling normally on long pages - real
+   feedback, 2026-08-30, second round: an earlier pass only made the
+   footer LOOK like proper fine print, deliberately not attempting true
+   bottom-pinning since it needs Streamlit's own page container restyled,
+   a real risk without live verification. Now verified directly against
+   the installed Streamlit build's own compiled JS bundle (grepped its
+   data-testid strings, not guessed) - confirms the real nesting is
+   [data-testid="stAppViewContainer"] > [data-testid="stMain"] >
+   [data-testid="stMainBlockContainer"], and that container's own existing
+   children already stack vertically by default, so making it a flex
+   column preserves the same visual order - only the LAST child (this
+   footer, marked with .fl-page-footer) gets pushed down via margin-top:auto.
+   :has() targets the specific stElementContainer wrapping the footer's own
+   st.markdown() call (the ACTUAL flex item - margin-top:auto has to apply
+   to a direct flex child, not a nested descendant) rather than needing to
+   touch every other element on the page. Supported in all current
+   evergreen browsers (Chrome/Edge/Safari/Firefox), fine for a real app. */
+div[data-testid="stMainBlockContainer"] {
+    min-height: 100vh; display: flex; flex-direction: column;
+}
+div[data-testid="stMainBlockContainer"] > div:has(.fl-page-footer) {
+    margin-top: auto;
+}
 </style>
 """
 

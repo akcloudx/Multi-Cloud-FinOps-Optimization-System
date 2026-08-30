@@ -105,11 +105,19 @@ def create_user(username: str, password: str, display_name: str = "", mode: str 
 
 
 def verify_login(username: str, password: str, mode: str) -> Optional[dict]:
-    """Returns {"id", "username", "display_name"} on success, None on failure.
-    Never raises on bad credentials - only on unexpected DB errors. mode is
-    required (not defaulted) - the demo login form must check the "demo"
-    scope and the production login form must check "live"; a wrong default
-    here would mean a login form silently checking the wrong account list."""
+    """Returns {"id", "username", "display_name", "must_change_password"} on
+    success, None on failure. Never raises on bad credentials - only on
+    unexpected DB errors. mode is required (not defaulted) - the demo login
+    form must check the "demo" scope and the production login form must
+    check "live"; a wrong default here would mean a login form silently
+    checking the wrong account list.
+
+    must_change_password (2026-08-30) - True right after this account was
+    reactivated (see set_user_active()'s own comment). Deliberately still
+    returns the full user dict here rather than treating this like a
+    failure - credentials WERE correct, this is the caller's cue to gate
+    real sign-in behind a mandatory password-change step, not a reason to
+    reject the login outright."""
     username = (username or "").strip()
     if not username or not password:
         return None
@@ -124,8 +132,37 @@ def verify_login(username: str, password: str, mode: str) -> Optional[dict]:
         if not bcrypt.checkpw(password.encode("utf-8"), user.password_hash.encode("utf-8")):
             return None
         user.last_login_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+        must_change = bool(user.must_change_password)
         session.commit()
-        return {"id": user.id, "username": user.username, "display_name": user.display_name}
+        return {"id": user.id, "username": user.username, "display_name": user.display_name, "must_change_password": must_change}
+
+
+def check_deactivated(username: str, password: str, mode: str) -> bool:
+    """Returns True only when username AND password are BOTH correct for an
+    existing but deactivated account - added 2026-08-30, real feedback: a
+    deactivated user just saw the generic "Invalid username or password" on
+    the login form, indistinguishable from a wrong password, with no hint
+    they'd need to ask an admin instead of retyping their password forever.
+
+    Deliberately requires the correct password, not just a matching
+    username with is_active=False, to stay safe: verify_login() above never
+    reveals whether a deactivated account exists to someone who's only
+    guessing usernames (that's real username-enumeration protection, not
+    incidental) - checking the password HERE too means this new function
+    only ever tells someone something they've already proven they're
+    entitled to know by getting the password right. Someone still guessing
+    blind sees the same generic message as always, from verify_login()."""
+    username = (username or "").strip()
+    if not username or not password:
+        return False
+    init_db(_ENGINE_PROVIDER, mode)
+    with Session(get_engine(_ENGINE_PROVIDER, mode)) as session:
+        user = session.query(AppUser).filter(
+            AppUser.username == username, AppUser.is_active == False  # noqa: E712
+        ).first()
+        if not user:
+            return False
+        return bcrypt.checkpw(password.encode("utf-8"), user.password_hash.encode("utf-8"))
 
 
 def list_users(mode: str = "live") -> list:
@@ -168,7 +205,11 @@ def update_user(user_id: int, mode: str, username: str = None, display_name: str
 def update_user_password(user_id: int, new_password: str, mode: str) -> None:
     """Sets a new password for an existing user - same bcrypt hashing as
     create_user(). Raises ValueError if the password is too short, matching
-    the same 8-char minimum already enforced on the Add User form."""
+    the same 8-char minimum already enforced on the Add User form. Clears
+    must_change_password unconditionally - whoever set this new password
+    (an admin via the Manage dialog, the user themselves via self-service
+    change, or the forced post-reactivation flow) has by definition just
+    satisfied whatever required the change."""
     if len(new_password or "") < 8:
         raise ValueError("Use at least 8 characters for the password.")
     init_db(_ENGINE_PROVIDER, mode)
@@ -177,6 +218,7 @@ def update_user_password(user_id: int, new_password: str, mode: str) -> None:
         if not user:
             raise ValueError("User not found.")
         user.password_hash = bcrypt.hashpw(new_password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+        user.must_change_password = False
         session.commit()
 
 
@@ -198,7 +240,15 @@ def set_user_active(user_id: int, is_active: bool, mode: str) -> None:
     since that checks a plain row COUNT, not is_active), rows still exist
     here - production_user_count() > 0 - so the bootstrap screen never
     reappears either. A real, unrecoverable-without-direct-DB-access
-    lockout, not a hypothetical."""
+    lockout, not a hypothetical.
+
+    Real feedback, 2026-08-30: a False->True transition (reactivation) now
+    also sets must_change_password=True - same reasoning Azure Entra ID
+    uses for a re-enabled account: force a fresh password at next sign-in
+    rather than trust whatever was set before the account went inactive.
+    ui/auth_page.py's login flow checks this flag and gates full sign-in
+    behind a mandatory password-change step; update_user_password() above
+    clears it once that's done."""
     init_db(_ENGINE_PROVIDER, mode)
     with Session(get_engine(_ENGINE_PROVIDER, mode)) as session:
         user = session.query(AppUser).filter(AppUser.id == user_id).first()
@@ -210,6 +260,8 @@ def set_user_active(user_id: int, is_active: bool, mode: str) -> None:
             ).count()
             if other_active == 0:
                 raise ValueError("Can't deactivate the last active account - you'd be locked out.")
+        if is_active and not user.is_active:
+            user.must_change_password = True
         user.is_active = is_active
         session.commit()
 

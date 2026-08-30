@@ -378,6 +378,7 @@ def init_db(provider: str = "Azure", mode: str = "demo"):
     # Priority, locked to one size+AZ) and demo/pre-existing rows (None)
     # stay exact-match only, same as before this feature.
     _ensure_column(engine, schema_name, "commitments", "instance_flexibility", "VARCHAR(20)")
+    _ensure_column(engine, schema_name, "app_users", "must_change_password", "BOOLEAN")
     _initialized_scopes.add(scope_key)
     return engine
 
@@ -1016,6 +1017,15 @@ class AppUser(Base):
     is_active      = Column(Boolean, default=True)
     created_at     = Column(String(255), nullable=False)
     last_login_at  = Column(String(255), nullable=True)
+    # Set True whenever set_user_active() flips is_active False->True (a
+    # reactivation) - same reasoning Azure Entra ID uses for a re-enabled
+    # account: force a fresh password at next sign-in rather than trust
+    # whatever was set before the account went inactive, since that old
+    # password may have been forgotten, shared, or compromised during the
+    # gap. Cleared by update_user_password() on any successful change,
+    # admin-triggered or self-service. Not set on plain account creation -
+    # only reactivation, matching what was actually asked for.
+    must_change_password = Column(Boolean, default=False)
 
 
 class AppSession(Base):

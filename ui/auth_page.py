@@ -26,6 +26,7 @@ import streamlit as st
 from db.users import (
     user_count, production_user_count, create_user, verify_login,
     ensure_demo_user, DEMO_USERNAME, DEMO_PASSWORD, update_user_password,
+    check_deactivated,
 )
 from db.sessions import create_session, get_session, delete_session
 from ui.styling import inject_global_css, sidebar_icon
@@ -389,6 +390,8 @@ def _render_demo_login():
                 st.info("Signing you in...")
             _start_session(user, "demo")
             st.rerun()
+        elif check_deactivated(username, password, mode="demo"):
+            st.error("This account has been deactivated. Contact an admin to reactivate it.")
         else:
             st.error("Invalid username or password.")
 
@@ -435,6 +438,37 @@ def _render_bootstrap_form():
 
 
 def _render_production_login_form():
+    # Forced password-change gate, added 2026-08-30 (real feedback - match
+    # how Azure Entra ID handles a re-enabled account): checked FIRST, as an
+    # early return, so a pending forced change replaces the normal sign-in
+    # fields entirely rather than showing both at once. _pending_pw_change_user
+    # is a plain, non-widget session_state key set by the success branch
+    # below the moment credentials check out but must_change_password is
+    # True - deliberately NOT calling _start_session() at that point yet,
+    # since real sign-in only completes once a new password is actually set.
+    pending = st.session_state.get("_pending_pw_change_user")
+    if pending:
+        st.warning(
+            "This account was reactivated - set a new password to continue.",
+            icon=":material/lock_reset:",
+        )
+        with st.form("forced_pw_change_form"):
+            new_pw1 = st.text_input("New password", type="password")
+            new_pw2 = st.text_input("Confirm new password", type="password")
+            pw_submitted = st.form_submit_button("Set Password & Continue", type="primary", use_container_width=True)
+        if pw_submitted:
+            if new_pw1 != new_pw2:
+                st.error("Passwords don't match.")
+            else:
+                try:
+                    update_user_password(pending["id"], new_pw1, "live")
+                    st.session_state.pop("_pending_pw_change_user", None)
+                    _start_session(pending, "live")
+                    st.rerun()
+                except ValueError as e:
+                    st.error(str(e))
+        return
+
     # No mode heading here either (see _render_demo_login's comment) - both
     # the "Production Mode" button above and the card's own "Sign in" title
     # already say this.
@@ -450,12 +484,19 @@ def _render_production_login_form():
     if submitted:
         user = verify_login(username, password, mode="live")
         if user:
-            with _signin_ph.container():
-                st.info("Signing you in...")
-            # Lands directly on Home (tenant connection happens there now,
-            # via its own "Add a new tenant" - no separate gate screen).
-            _start_session(user, "live")
-            st.rerun()
+            if user.get("must_change_password"):
+                st.session_state["_pending_pw_change_user"] = user
+                st.rerun()
+            else:
+                with _signin_ph.container():
+                    st.info("Signing you in...")
+                # Lands directly on Home (tenant connection happens there
+                # now, via its own "Add a new tenant" - no separate gate
+                # screen).
+                _start_session(user, "live")
+                st.rerun()
+        elif check_deactivated(username, password, mode="live"):
+            st.error("This account has been deactivated. Contact an admin to reactivate it.")
         else:
             st.error("Invalid username or password.")
 

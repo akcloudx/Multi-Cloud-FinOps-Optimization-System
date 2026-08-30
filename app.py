@@ -1501,9 +1501,24 @@ def _manage_user_dialog(u, mode: str):
             except ValueError as e:
                 st.error(str(e))
 
+    # Real gap the user caught live, 2026-08-30: the last-active-account
+    # guard in db/users.py only blocks dropping to ZERO active accounts -
+    # it correctly allowed deactivating this account when a SECOND active
+    # account still existed, but that's not the only real risk. Deactivating
+    # your own currently-signed-in account is a separate, session-level
+    # risk this dialog can see and that one can't: your session stays live
+    # for now (session_state/the URL token don't get invalidated by this),
+    # but the next time you needed to sign back in, you'd be locked out
+    # with no one else's action required to trigger it. current_user is a
+    # module-level global (set once near the top of this file via
+    # require_login()) - reachable here via the same late-binding pattern
+    # already used for every other module-level global this file relies on.
+    is_self = (u.id == current_user["id"])
+    _self_help = "You're signed in as this account - sign in as someone else first." if is_self else None
+
     st.divider()
     if u.is_active:
-        if st.button("Deactivate account", icon=":material/block:", key=f"mgmt_user_deactivate_{u.id}"):
+        if st.button("Deactivate account", icon=":material/block:", key=f"mgmt_user_deactivate_{u.id}", disabled=is_self, help=_self_help):
             # Both wrapped in try/except now, 2026-08-30 - set_user_active()/
             # delete_user() can both raise ValueError (the last-active-
             # account lockout guard added the same day); calling either
@@ -1522,7 +1537,7 @@ def _manage_user_dialog(u, mode: str):
             st.rerun()
 
     st.divider()
-    if st.button("Delete user", icon=":material/delete:", key=f"mgmt_user_delete_{u.id}"):
+    if st.button("Delete user", icon=":material/delete:", key=f"mgmt_user_delete_{u.id}", disabled=is_self, help=_self_help):
         # No toast on success, matching Manage Tenant's own "Delete tenant"
         # (no confirmation message there either) - a toast set here would
         # never actually render anyway, since it closes the dialog that
@@ -5397,15 +5412,18 @@ pg.run()
 # tighter margins) matching how mature financial apps present this kind of
 # notice - de-emphasized, not a featured block.
 #
-# Deliberately NOT attempting true viewport-bottom pinning (a CSS sticky
-# footer) here - that needs the page's own container to become a flex
-# column with this footer's margin pushed to auto, which means restyling
-# Streamlit's own internal block-container across every page, a real risk
-# of side effects on unrelated layouts this session can't verify without
-# live testing. Flagged as a separate, bigger follow-up if still wanted
-# after seeing this smaller/quieter version in place.
+# True viewport-bottom pinning added 2026-08-30, second round - real
+# feedback that the first pass still hugged short pages' own content
+# (User Management screenshot showed it right under the user list). The
+# .fl-page-footer class is the hook ui/styling.py's CSS targets (via
+# :has()) to push this footer's real flex-item wrapper to the bottom of
+# the page - see that CSS rule's own comment for the full mechanism
+# (confirmed against the installed Streamlit build's own compiled JS
+# bundle, not guessed). The 56px margin-top here still applies underneath
+# that on a LONG page, where the flex auto-margin has no leftover space to
+# use - keeps real breathing room above the footer either way.
 st.markdown("""
-<div style="background-color: transparent; border-top: 1px solid rgba(255,255,255,0.08); padding: 24px 0px 20px 0px; margin-top: 56px;">
+<div class="fl-page-footer" style="background-color: transparent; border-top: 1px solid rgba(255,255,255,0.08); padding: 24px 0px 20px 0px; margin-top: 56px;">
     <div style="max-width: 1200px; margin: 0 auto;">
         <p style="font-size: 11px; color: #64748b; line-height: 1.6; margin: 0 0 6px;">
             <span style="text-transform: uppercase; letter-spacing: .05em; font-weight: 600; color: #94a3b8; font-size: 10px;">Legal &amp; Financial Notice</span>
