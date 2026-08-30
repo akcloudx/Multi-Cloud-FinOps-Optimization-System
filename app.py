@@ -1248,12 +1248,37 @@ def page_users():
         st.info("Switch to **Production** mode to add or manage real user accounts - the demo account is fixed.", icon=":material/info:")
         return
 
-    with st.expander("Add a new user", icon=":material/person_add:", expanded=False):
+    # key=/on_change="rerun" added, 2026-08-30 - real bug caught live in
+    # production, THREE rounds on the same fix:
+    # Round 1: plain expanded=False - only a first-render default, not a
+    #   live binding, so the expander stayed open after a successful add.
+    # Round 2: key="add_user_expander" alone - st.expander's own docstring
+    #   is explicit a key only binds to st.session_state "When on_change is
+    #   set to 'rerun' or a callable" (confirmed against the installed
+    #   Streamlit build's source); without it the expander is stateless and
+    #   a session_state assignment is silently a no-op.
+    # Round 3 (this one): on_change="rerun" added, but assigning
+    #   st.session_state["add_user_expander"]/the field keys DIRECTLY inside
+    #   the success branch still raised a real StreamlitAPIException -
+    #   "cannot be modified after the widget... is instantiated". The
+    #   success branch runs AFTER these widgets are already created earlier
+    #   in the SAME script run, and Streamlit forbids writing to a keyed
+    #   widget's state that late even though a rerun follows immediately.
+    #   Fixed with the standard two-phase pattern: the success branch only
+    #   sets a plain, non-widget flag; a check at the top of THIS block (so
+    #   it runs before any of these widgets are instantiated in the next
+    #   run) consumes that flag and does the actual resets there instead.
+    if st.session_state.pop("_reset_add_user_form", False):
+        st.session_state["add_user_expander"] = False
+        for _k in ("add_user_username", "add_user_display", "add_user_pw1", "add_user_pw2"):
+            st.session_state.pop(_k, None)
+
+    with st.expander("Add a new user", icon=":material/person_add:", key="add_user_expander", on_change="rerun"):
         with st.form("add_user_form"):
-            nu_username = st.text_input("Username")
-            nu_display = st.text_input("Display name (optional)")
-            nu_pw1 = st.text_input("Password", type="password")
-            nu_pw2 = st.text_input("Confirm password", type="password")
+            nu_username = st.text_input("Username", key="add_user_username")
+            nu_display = st.text_input("Display name (optional)", key="add_user_display")
+            nu_pw1 = st.text_input("Password", type="password", key="add_user_pw1")
+            nu_pw2 = st.text_input("Confirm password", type="password", key="add_user_pw2")
             nu_submit = st.form_submit_button("Add User", icon=":material/person_add:", type="primary")
         if nu_submit:
             if not nu_username or not nu_pw1:
@@ -1265,10 +1290,15 @@ def page_users():
             else:
                 try:
                     _create_user(nu_username, nu_pw1, nu_display, mode="live")
-                    st.success(f"User '{nu_username}' added.")
+                    st.session_state["_reset_add_user_form"] = True
+                    st.session_state["_user_added_toast"] = nu_username
                     st.rerun()
                 except ValueError as e:
                     st.error(str(e))
+
+    _toast_user = st.session_state.pop("_user_added_toast", None)
+    if _toast_user:
+        st.success(f"User '{_toast_user}' added.")
 
 
 def _split_sp_eligible(df_24x7: pd.DataFrame, azure_provider: bool):
@@ -2178,7 +2208,16 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
             "Availability Zone":      st.column_config.TextColumn(width=120),
             "OS":                     st.column_config.TextColumn(width=90),
             "SKU":                    st.column_config.TextColumn(width=140),
-            "Est. Monthly PAYG Cost": st.column_config.TextColumn("Est. Monthly Cost", width=140),
+            # Widened 140 -> 480, 2026-08-30 - real bug seen live on a
+            # production tenant: this column isn't always a short $ figure.
+            # A "Running, no cached price" row shows a full explanatory
+            # sentence instead (_payg_blank_reason() above, capped at 90
+            # chars) - e.g. "Not eligible for RI and Savings Plan - Storage
+            # is sold in 100TB+ blocks...". 140px was sized for the $ case
+            # only and clipped the real longest value mid-sentence. Sized to
+            # that 90-char cap using this table's own established ratio
+            # (~5.4px/char, from "Resource Type" 220px/41-char real value).
+            "Est. Monthly PAYG Cost": st.column_config.TextColumn("Est. Monthly Cost", width=480),
         },
     )
     with dl_col:
@@ -3052,8 +3091,29 @@ def _render_ri_coverage_tab():
     plural = "s" if needs_more != 1 else ""
     is_warning = False
     sub = ""
-    if needs_more == 0:
+    # Split what used to be one unconditional "needs_more == 0 -> well
+    # covered" branch, 2026-08-30 - real bug caught live on a production
+    # tenant: `needs_more`/`fully_covered` are BOTH computed only from
+    # `instance_cov` (elig[elig["coverage_model"] == "instance"]) above, so
+    # "needs_more == 0" is also true whenever there's simply nothing in that
+    # bucket at all - e.g. every tracked resource is genuinely not
+    # RI-eligible (not_eligible catches that) or only eligible under the
+    # capacity/unmeasurable coverage models (Savings-Plan-only services,
+    # Storage sold in 100TB+ blocks - excluded from instance_cov by
+    # definition, see capacity_cov/unmeasurable_cov above). The user's own
+    # real case: Fully Covered 0, Need More RI 0, Idle 0, Not RI-Eligible 3
+    # - the old code still printed "You're already well covered", which
+    # reads as an assessment that passed when there was really nothing here
+    # TO assess. "Well covered" now requires fully_covered > 0 to actually
+    # be true.
+    if needs_more == 0 and fully_covered > 0:
         sentence = "<b>You're already well covered</b> — no additional Reserved Instance purchases recommended right now."
+    elif needs_more == 0 and idle > 0:
+        is_warning = True
+        sentence = f"<b>{idle} Reservation{'s' if idle != 1 else ''} sitting idle</b> — nothing currently needs more coverage, but the unused capacity is worth exchanging."
+    elif needs_more == 0:
+        sentence = "<b>Nothing to measure Reserved Instance coverage against yet</b> — none of your tracked resources currently support per-instance RI coverage."
+        sub = "Check the Not RI-Eligible card below for why."
     else:
         total_gap_savings = fully_priced[savings_col].dropna().sum() if has_pricing_cols and savings_col in fully_priced.columns else 0.0
         if total_gap_savings > 0:
