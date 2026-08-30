@@ -497,6 +497,7 @@ def _clear_manage_tenant_dialog_state():
     a button's True state only lasts one rerun, so every action *inside* the
     dialog (which all end in st.rerun()) used to close it immediately."""
     st.session_state["_manage_tenant_id"] = None
+    st.session_state.pop("_tenant_mgmt_toast", None)
 
 
 # _status_from_role_check moved to azure_conn.connector.status_from_role_check
@@ -598,6 +599,21 @@ def _manage_tenant_dialog(t, mode: str):
     is_demo = (mode == "demo")
     st.caption(f"{selected_provider} · {'Demo' if is_demo else 'Production'}")
 
+    # Real bug confirmed live in production, 2026-08-30 (user drove a real
+    # browser session against this exact dialog): every "Saved" confirmation
+    # below (Tenant name/Credentials/Sync schedule, both AWS and Azure
+    # branches) called st.success(...) immediately followed by st.rerun() -
+    # the rerun aborts the script right there, so the message never actually
+    # reaches the frontend. Confirmed by reproducing it twice live (Tenant
+    # name Save, Sync schedule Save) - neither ever showed a confirmation.
+    # Same toast-relay fix already used for the Add User form's identical
+    # shape: every st.success() below is replaced with setting this flag,
+    # displayed here at the very top (before name_row/segmented_control) so
+    # it's visible regardless of which tab triggered it.
+    _toast_msg = st.session_state.pop("_tenant_mgmt_toast", None)
+    if _toast_msg:
+        st.success(_toast_msg)
+
     # Reserved now, filled in further down (after segmented_control has run) -
     # a Streamlit container's screen position is fixed at creation, not at
     # the point its content is written, so this stays visually first. Needed
@@ -631,7 +647,7 @@ def _manage_tenant_dialog(t, mode: str):
             new_name = name_col.text_input("Tenant name", value=t.tenant_name, key=f"mgmt_name_{t.id}")
             if save_col.button("Save", key=f"mgmt_save_name_{t.id}", width="stretch"):
                 update_tenant_name(selected_provider, mode, t.id, new_name)
-                st.success("Tenant name updated.")
+                st.session_state["_tenant_mgmt_toast"] = "Tenant name updated."
                 st.rerun()
 
         if active_aws_section == "Credentials":
@@ -650,7 +666,7 @@ def _manage_tenant_dialog(t, mode: str):
                             tenant_id=aws_reg_edit, subscription_id=aws_reg_edit,
                             client_id=aws_key_edit, client_secret=secret_to_save,
                         )
-                        st.success("Credentials updated.")
+                        st.session_state["_tenant_mgmt_toast"] = "Credentials updated."
                         st.rerun()
         elif active_aws_section == "Permissions":
             if is_demo:
@@ -690,7 +706,7 @@ def _manage_tenant_dialog(t, mode: str):
             i2.caption("")
             if i2.button("Save schedule", disabled=is_demo, key=f"mgmt_aws_save_interval_{t.id}", width="stretch"):
                 update_sync_interval(selected_provider, mode, t.id, new_interval)
-                st.success("Sync schedule updated.")
+                st.session_state["_tenant_mgmt_toast"] = "Sync schedule updated."
                 st.rerun()
 
             st.caption(f"Last synced: {t.last_synced_at[:16] if t.last_synced_at else 'Never'}")
@@ -756,7 +772,7 @@ def _manage_tenant_dialog(t, mode: str):
         new_name = name_col.text_input("Tenant name", value=t.tenant_name, key=f"mgmt_name_{t.id}")
         if save_col.button("Save", key=f"mgmt_save_name_{t.id}", width="stretch"):
             update_tenant_name(selected_provider, mode, t.id, new_name)
-            st.success("Tenant name updated.")
+            st.session_state["_tenant_mgmt_toast"] = "Tenant name updated."
             st.rerun()
 
     # ── Credentials ───────────────────────────────────────────────────────
@@ -781,7 +797,7 @@ def _manage_tenant_dialog(t, mode: str):
                     tenant_id=new_tenant_id, subscription_id=t.subscription_id,
                     client_id=new_client_id, client_secret=secret_to_save, domain=new_domain or None,
                 )
-                st.success("Credentials updated.")
+                st.session_state["_tenant_mgmt_toast"] = "Credentials updated."
                 st.rerun()
 
         with st.expander("How to set up this Service Principal", icon=":material/menu_book:", expanded=False):
@@ -894,7 +910,7 @@ Missing this step is **not fatal** - Resource inventory and cost data (step 2) s
         i2.caption("")
         if i2.button("Save schedule", disabled=is_demo, key=f"mgmt_save_interval_{t.id}", width="stretch"):
             update_sync_interval(selected_provider, mode, t.id, new_interval)
-            st.success("Sync schedule updated.")
+            st.session_state["_tenant_mgmt_toast"] = "Sync schedule updated."
             st.rerun()
 
         st.caption(f"Last synced: {t.last_synced_at[:16] if t.last_synced_at else 'Never'}")
