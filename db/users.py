@@ -136,3 +136,103 @@ def list_users(mode: str = "live") -> list:
         rows = session.query(AppUser).order_by(AppUser.id).all()
         session.expunge_all()
         return rows
+
+
+def update_user(user_id: int, mode: str, username: str = None, display_name: str = None) -> None:
+    """Renames a user and/or changes their display name - added 2026-08-30,
+    real gap the user caught: User Management could list accounts and add
+    new ones, but never edit an existing one at all. username is optional
+    (None leaves it unchanged) since the Manage dialog's Save button always
+    submits both fields together, matching Manage Tenant's own "leave a
+    field as-is by not touching it" convention elsewhere in this app.
+    Raises ValueError on a blank/duplicate username, same rule as
+    create_user()."""
+    init_db(_ENGINE_PROVIDER, mode)
+    with Session(get_engine(_ENGINE_PROVIDER, mode)) as session:
+        user = session.query(AppUser).filter(AppUser.id == user_id).first()
+        if not user:
+            raise ValueError("User not found.")
+        if username is not None:
+            username = username.strip()
+            if not username:
+                raise ValueError("Username can't be blank.")
+            existing = session.query(AppUser).filter(AppUser.username == username, AppUser.id != user_id).first()
+            if existing:
+                raise ValueError(f"Username '{username}' is already taken.")
+            user.username = username
+        if display_name is not None:
+            user.display_name = display_name.strip() or user.username
+        session.commit()
+
+
+def update_user_password(user_id: int, new_password: str, mode: str) -> None:
+    """Sets a new password for an existing user - same bcrypt hashing as
+    create_user(). Raises ValueError if the password is too short, matching
+    the same 8-char minimum already enforced on the Add User form."""
+    if len(new_password or "") < 8:
+        raise ValueError("Use at least 8 characters for the password.")
+    init_db(_ENGINE_PROVIDER, mode)
+    with Session(get_engine(_ENGINE_PROVIDER, mode)) as session:
+        user = session.query(AppUser).filter(AppUser.id == user_id).first()
+        if not user:
+            raise ValueError("User not found.")
+        user.password_hash = bcrypt.hashpw(new_password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+        session.commit()
+
+
+def set_user_active(user_id: int, is_active: bool, mode: str) -> None:
+    """Activates/deactivates a user - added alongside update_user() above:
+    the Active/Inactive badge already existed on User Management's own list
+    (list_users() above), but nothing ever actually SET is_active to False
+    anywhere in the codebase before this, a real pre-existing gap found
+    while wiring up the new Manage dialog. A deactivated user's is_active
+    check in verify_login() above already correctly blocks their login -
+    that logic was always correct, it just had no way to ever be reached.
+
+    Real safety gap closed 2026-08-30: raises ValueError rather than
+    deactivating the LAST active account. Without this, deactivating your
+    own (or the only other) account left every row in the table with
+    is_active=False - verify_login() correctly refuses all of them, but
+    unlike deleting every account down to zero rows (which correctly falls
+    back to _render_bootstrap_form()'s "create the first account" screen,
+    since that checks a plain row COUNT, not is_active), rows still exist
+    here - production_user_count() > 0 - so the bootstrap screen never
+    reappears either. A real, unrecoverable-without-direct-DB-access
+    lockout, not a hypothetical."""
+    init_db(_ENGINE_PROVIDER, mode)
+    with Session(get_engine(_ENGINE_PROVIDER, mode)) as session:
+        user = session.query(AppUser).filter(AppUser.id == user_id).first()
+        if not user:
+            raise ValueError("User not found.")
+        if not is_active and user.is_active:
+            other_active = session.query(AppUser).filter(
+                AppUser.is_active == True, AppUser.id != user_id  # noqa: E712
+            ).count()
+            if other_active == 0:
+                raise ValueError("Can't deactivate the last active account - you'd be locked out.")
+        user.is_active = is_active
+        session.commit()
+
+
+def delete_user(user_id: int, mode: str) -> None:
+    """Permanently removes a user - added 2026-08-30 alongside the
+    deactivate-lockout guard above, same underlying risk: deleting the last
+    ACTIVE account while other (inactive) rows still exist produces the
+    identical lockout set_user_active() now blocks - production_user_count()
+    stays > 0, so the bootstrap "create the first account" screen never
+    reappears. Deleting the truly LAST row overall (0 remaining) is fine and
+    deliberately still allowed - that genuinely does fall back to bootstrap."""
+    init_db(_ENGINE_PROVIDER, mode)
+    with Session(get_engine(_ENGINE_PROVIDER, mode)) as session:
+        user = session.query(AppUser).filter(AppUser.id == user_id).first()
+        if not user:
+            raise ValueError("User not found.")
+        if user.is_active:
+            other_active = session.query(AppUser).filter(
+                AppUser.is_active == True, AppUser.id != user_id  # noqa: E712
+            ).count()
+            other_total = session.query(AppUser).filter(AppUser.id != user_id).count()
+            if other_active == 0 and other_total > 0:
+                raise ValueError("Can't delete the last active account while other accounts still exist - you'd be locked out.")
+        session.delete(user)
+        session.commit()

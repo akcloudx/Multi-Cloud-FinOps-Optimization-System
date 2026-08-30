@@ -25,7 +25,7 @@ import streamlit as st
 
 from db.users import (
     user_count, production_user_count, create_user, verify_login,
-    ensure_demo_user, DEMO_USERNAME, DEMO_PASSWORD,
+    ensure_demo_user, DEMO_USERNAME, DEMO_PASSWORD, update_user_password,
 )
 from db.sessions import create_session, get_session, delete_session
 from ui.styling import inject_global_css, sidebar_icon
@@ -508,6 +508,47 @@ def render_logout_control():
         f'<a class="fl-sidebar-linkbtn" href="/?logout=1" target="_self">{sidebar_icon("logout")}Log out</a>',
         unsafe_allow_html=True,
     )
+
+
+def render_change_password_control():
+    """Self-service password change for the currently signed-in user -
+    added 2026-08-30, real gap identified: only an admin could change
+    anyone's password (via User Management's Manage dialog), with no way
+    for someone to change their OWN without asking another admin.
+
+    Demo Mode excluded on purpose - "demo"/"Demo@2026" is a single SHARED,
+    publicly-known account (shown right on the login screen itself);
+    letting one person change it would break sign-in for everyone else
+    relying on those same published credentials, not just themselves.
+
+    Confirms the CURRENT password first via verify_login() (the same real
+    check a fresh sign-in uses) before allowing a change - without that,
+    anyone at an already-signed-in, unlocked browser tab could hijack the
+    account by setting a new password with no verification at all. No
+    st.rerun() after a successful change (unlike most other forms in this
+    app), so st.success() here renders normally on its own - nothing here
+    needs the toast-relay pattern that a rerun would otherwise require."""
+    user = st.session_state.get("auth_user")
+    env_mode = st.session_state.get("env_mode_widget", _ENV_MODE_BY_MODE["demo"])
+    if not user or env_mode != "Production":
+        return
+    with st.expander("Change password", icon=":material/key:"):
+        with st.form("change_password_form"):
+            current_pw = st.text_input("Current password", type="password")
+            new_pw1 = st.text_input("New password", type="password")
+            new_pw2 = st.text_input("Confirm new password", type="password")
+            submitted = st.form_submit_button("Update password", type="primary", use_container_width=True)
+        if submitted:
+            if not verify_login(user["username"], current_pw, mode="live"):
+                st.error("Current password is incorrect.")
+            elif new_pw1 != new_pw2:
+                st.error("New passwords don't match.")
+            else:
+                try:
+                    update_user_password(user["id"], new_pw1, "live")
+                    st.success("Password updated.")
+                except ValueError as e:
+                    st.error(str(e))
 
 
 def render_switch_mode_control():

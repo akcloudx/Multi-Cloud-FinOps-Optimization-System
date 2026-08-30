@@ -125,7 +125,7 @@ except Exception as _db_err:
 # Auth gate — must run before anything else renders. Halts here (st.stop())
 # until someone is logged in; see ui/auth_page.py for why this is deliberately
 # minimal (placeholder ahead of real Entra ID / OIDC login).
-from ui.auth_page import require_login, render_logout_control, render_switch_mode_control
+from ui.auth_page import require_login, render_logout_control, render_switch_mode_control, render_change_password_control
 current_user = require_login()
 
 # require_login() only injects CSS on the pre-auth screens (it returns early
@@ -172,6 +172,13 @@ from db.tenants import (
     update_tenant_permission_status, record_sync_result, update_sync_interval,
     update_aws_account_id, update_rightsizing_settings,
 )
+# Moved to module level, 2026-08-30 - list_users/create_user were previously
+# imported locally inside page_users() only; update_user/update_user_password/
+# set_user_active need to be reachable from _manage_user_dialog() too (a
+# separate top-level function, not nested inside page_users()), same as
+# every db.tenants function above is already reachable from both
+# page_tenant_management() and _manage_tenant_dialog().
+from db.users import list_users, create_user, update_user, update_user_password, set_user_active, delete_user
 from analysis.rightsizing import (
     classify_vm_utilization, get_rightsizing_settings, suggest_target_instance_type,
     estimate_resize_monthly_impact, PRESETS, SETTINGS_FIELDS,
@@ -1434,12 +1441,126 @@ def page_tenant_management():
 # ═══════════════════════════════════════════════════════════════════════════════
 # MANAGE — USER MANAGEMENT
 # ═══════════════════════════════════════════════════════════════════════════════
+def _clear_manage_user_dialog_state():
+    """on_dismiss callback (user closed the dialog via the X, Escape, or
+    clicking outside) - same reason and shape as Tenant Management's
+    _clear_manage_tenant_dialog_state: page_users() calls this dialog every
+    rerun while _manage_user_id is set, not gated on a button's return
+    value (a button's clicked state only lasts one rerun, and every action
+    inside the dialog ends in st.rerun()) - without this callback the
+    dialog would immediately reopen itself on the very next script run."""
+    st.session_state["_manage_user_id"] = None
+    st.session_state.pop("_user_mgmt_toast", None)
+
+
+@st.dialog("Manage user", on_dismiss=_clear_manage_user_dialog_state)
+def _manage_user_dialog(u, mode: str):
+    """Added 2026-08-30 - real gap the user caught: User Management could
+    list accounts and add new ones, but never edit an existing one at all
+    (username, display name, password). Mirrors Manage Tenant's own dialog
+    shape: separate forms for identity vs. credentials (a single form with
+    two submit buttons would submit BOTH together, forcing a password
+    change any time you just wanted to fix a typo'd display name), a
+    toast-relay for post-save confirmations (st.success() immediately
+    followed by st.rerun() never actually renders - see this file's own
+    Manage Tenant fix for the same bug), and an Active/Inactive toggle -
+    that badge already existed on the list below with no way to ever set
+    it, a second pre-existing gap found while building this."""
+    st.caption("Production" if mode == "live" else "Demo")
+
+    _toast = st.session_state.pop("_user_mgmt_toast", None)
+    if _toast:
+        st.success(_toast)
+
+    with st.form(f"mgmt_user_identity_{u.id}"):
+        new_username = st.text_input("Username", value=u.username)
+        new_display = st.text_input("Display name", value=u.display_name or u.username)
+        identity_submitted = st.form_submit_button("Save", type="primary")
+    if identity_submitted:
+        try:
+            update_user(u.id, mode, username=new_username, display_name=new_display)
+            st.session_state["_user_mgmt_toast"] = "User details updated."
+            st.rerun()
+        except ValueError as e:
+            st.error(str(e))
+
+    st.divider()
+    st.markdown("**Change password**")
+    with st.form(f"mgmt_user_pw_{u.id}"):
+        pw1 = st.text_input("New password", type="password")
+        pw2 = st.text_input("Confirm new password", type="password")
+        pw_submitted = st.form_submit_button("Update password", type="primary")
+    if pw_submitted:
+        if pw1 != pw2:
+            st.error("Passwords don't match.")
+        else:
+            try:
+                update_user_password(u.id, pw1, mode)
+                st.session_state["_user_mgmt_toast"] = "Password updated."
+                st.rerun()
+            except ValueError as e:
+                st.error(str(e))
+
+    st.divider()
+    if u.is_active:
+        if st.button("Deactivate account", icon=":material/block:", key=f"mgmt_user_deactivate_{u.id}"):
+            # Both wrapped in try/except now, 2026-08-30 - set_user_active()/
+            # delete_user() can both raise ValueError (the last-active-
+            # account lockout guard added the same day); calling either
+            # unhandled would crash the whole page instead of showing the
+            # real reason as a normal, recoverable st.error().
+            try:
+                set_user_active(u.id, False, mode)
+                st.session_state["_user_mgmt_toast"] = "Account deactivated."
+                st.rerun()
+            except ValueError as e:
+                st.error(str(e))
+    else:
+        if st.button("Reactivate account", icon=":material/check_circle:", type="primary", key=f"mgmt_user_reactivate_{u.id}"):
+            set_user_active(u.id, True, mode)
+            st.session_state["_user_mgmt_toast"] = "Account reactivated."
+            st.rerun()
+
+    st.divider()
+    if st.button("Delete user", icon=":material/delete:", key=f"mgmt_user_delete_{u.id}"):
+        # No toast on success, matching Manage Tenant's own "Delete tenant"
+        # (no confirmation message there either) - a toast set here would
+        # never actually render anyway, since it closes the dialog that
+        # displays it (_manage_user_id below) on this same rerun. The row
+        # disappearing from the list is confirmation enough, same as
+        # tenant deletion already relies on.
+        try:
+            delete_user(u.id, mode)
+            st.session_state["_manage_user_id"] = None
+            st.rerun()
+        except ValueError as e:
+            st.error(str(e))
+
+
 def page_users():
-    st.subheader(":material/group: Dashboard User Accounts")
+    hdr_l, hdr_r = st.columns([4, 1])
+    with hdr_l:
+        st.subheader(":material/group: Dashboard User Accounts")
+    with hdr_r:
+        # Same top-right toggle-button pattern as Tenant Management's own
+        # "Add a new tenant", 2026-08-30 (real feedback - match that exact
+        # placement/behavior) - the st.rerun() here matters for the same
+        # reason it did there: _form_open is read at the top of this run,
+        # before this click's effect is known, so without forcing an
+        # immediate fresh run the button's own label lags one click behind.
+        add_disabled = not is_live_mode
+        _form_open = st.session_state.get("_show_add_user_form", False)
+        if st.button(
+            "Cancel" if _form_open else "Add a new user",
+            icon=":material/close:" if _form_open else ":material/person_add:",
+            use_container_width=True, type="secondary" if _form_open else "primary",
+            disabled=add_disabled,
+            help="Only available in Production Mode." if add_disabled else None,
+        ):
+            st.session_state["_show_add_user_form"] = not _form_open
+            st.rerun()
     st.caption("Accounts that can sign in to this dashboard. Shared across everyone - not tied to a cloud tenant.")
     _finops_tag("Manage the FinOps Practice", "FinOps Practice Operations & Automation, Tools & Services")
-
-    from db.users import list_users, create_user as _create_user
 
     # Demo and live accounts are separate scopes now (db/schema.py) - this
     # page always reflects whichever scope the current session is in, same
@@ -1448,9 +1569,14 @@ def page_users():
     # abuse - real account management only makes sense in Production mode.
     users_mode = "live" if is_live_mode else "demo"
 
+    _toast_user = st.session_state.pop("_user_added_toast", None)
+    if _toast_user:
+        st.success(f"User '{_toast_user}' added.")
+
+    users = list_users(mode=users_mode)
     with st.container(border=True):
-        for u in list_users(mode=users_mode):
-            ucols = st.columns([3, 3, 2])
+        for u in users:
+            ucols = st.columns([3, 3, 1.4, 1.2])
             ucols[0].markdown(f"**{u.display_name or u.username}** (`{u.username}`)")
             ucols[1].caption(f"Added {u.created_at[:10]} · Last login: {u.last_login_at[:10] if u.last_login_at else 'never'}")
             with ucols[2]:
@@ -1458,62 +1584,56 @@ def page_users():
                     st.badge("Active", icon=":material/check_circle:", color="green")
                 else:
                     st.badge("Inactive", icon=":material/radio_button_unchecked:", color="gray")
+            with ucols[3]:
+                if is_live_mode and st.button("Manage", icon=":material/settings:", key=f"user_manage_{u.id}", width="stretch"):
+                    st.session_state["_manage_user_id"] = u.id
+
+    # Kept OUTSIDE the button's if-block and OUTSIDE the loop above, gated
+    # on session_state instead of the button's return value - same reason
+    # as Manage Tenant's identical structure (see _manage_tenant_dialog's
+    # caller for the full explanation): a button's clicked state only
+    # lasts the one rerun immediately after the click, but every action
+    # inside _manage_user_dialog() ends in st.rerun().
+    manage_uid = st.session_state.get("_manage_user_id")
+    if manage_uid is not None:
+        active_u = next((uu for uu in users if uu.id == manage_uid), None)
+        if active_u is not None:
+            _manage_user_dialog(active_u, users_mode)
+        else:
+            st.session_state["_manage_user_id"] = None
 
     if not is_live_mode:
         st.info("Switch to **Production** mode to add or manage real user accounts - the demo account is fixed.", icon=":material/info:")
         return
 
-    # key=/on_change="rerun" added, 2026-08-30 - real bug caught live in
-    # production, THREE rounds on the same fix:
-    # Round 1: plain expanded=False - only a first-render default, not a
-    #   live binding, so the expander stayed open after a successful add.
-    # Round 2: key="add_user_expander" alone - st.expander's own docstring
-    #   is explicit a key only binds to st.session_state "When on_change is
-    #   set to 'rerun' or a callable" (confirmed against the installed
-    #   Streamlit build's source); without it the expander is stateless and
-    #   a session_state assignment is silently a no-op.
-    # Round 3 (this one): on_change="rerun" added, but assigning
-    #   st.session_state["add_user_expander"]/the field keys DIRECTLY inside
-    #   the success branch still raised a real StreamlitAPIException -
-    #   "cannot be modified after the widget... is instantiated". The
-    #   success branch runs AFTER these widgets are already created earlier
-    #   in the SAME script run, and Streamlit forbids writing to a keyed
-    #   widget's state that late even though a rerun follows immediately.
-    #   Fixed with the standard two-phase pattern: the success branch only
-    #   sets a plain, non-widget flag; a check at the top of THIS block (so
-    #   it runs before any of these widgets are instantiated in the next
-    #   run) consumes that flag and does the actual resets there instead.
     if st.session_state.pop("_reset_add_user_form", False):
-        st.session_state["add_user_expander"] = False
+        st.session_state["_show_add_user_form"] = False
         for _k in ("add_user_username", "add_user_display", "add_user_pw1", "add_user_pw2"):
             st.session_state.pop(_k, None)
 
-    with st.expander("Add a new user", icon=":material/person_add:", key="add_user_expander", on_change="rerun"):
-        with st.form("add_user_form"):
-            nu_username = st.text_input("Username", key="add_user_username")
-            nu_display = st.text_input("Display name (optional)", key="add_user_display")
-            nu_pw1 = st.text_input("Password", type="password", key="add_user_pw1")
-            nu_pw2 = st.text_input("Confirm password", type="password", key="add_user_pw2")
-            nu_submit = st.form_submit_button("Add User", icon=":material/person_add:", type="primary")
-        if nu_submit:
-            if not nu_username or not nu_pw1:
-                st.error("Username and password are both required.")
-            elif nu_pw1 != nu_pw2:
-                st.error("Passwords don't match.")
-            elif len(nu_pw1) < 8:
-                st.error("Use at least 8 characters for the password.")
-            else:
-                try:
-                    _create_user(nu_username, nu_pw1, nu_display, mode="live")
-                    st.session_state["_reset_add_user_form"] = True
-                    st.session_state["_user_added_toast"] = nu_username
-                    st.rerun()
-                except ValueError as e:
-                    st.error(str(e))
-
-    _toast_user = st.session_state.pop("_user_added_toast", None)
-    if _toast_user:
-        st.success(f"User '{_toast_user}' added.")
+    if st.session_state.get("_show_add_user_form"):
+        with st.container(border=True):
+            with st.form("add_user_form"):
+                nu_username = st.text_input("Username", key="add_user_username")
+                nu_display = st.text_input("Display name (optional)", key="add_user_display")
+                nu_pw1 = st.text_input("Password", type="password", key="add_user_pw1")
+                nu_pw2 = st.text_input("Confirm password", type="password", key="add_user_pw2")
+                nu_submit = st.form_submit_button("Add User", icon=":material/person_add:", type="primary")
+            if nu_submit:
+                if not nu_username or not nu_pw1:
+                    st.error("Username and password are both required.")
+                elif nu_pw1 != nu_pw2:
+                    st.error("Passwords don't match.")
+                elif len(nu_pw1) < 8:
+                    st.error("Use at least 8 characters for the password.")
+                else:
+                    try:
+                        create_user(nu_username, nu_pw1, nu_display, mode="live")
+                        st.session_state["_reset_add_user_form"] = True
+                        st.session_state["_user_added_toast"] = nu_username
+                        st.rerun()
+                    except ValueError as e:
+                        st.error(str(e))
 
 
 def page_help():
@@ -5033,6 +5153,7 @@ with st.sidebar:
     with _acct_ct:
         st.markdown('<div class="fl-rail-title">Account</div>', unsafe_allow_html=True)
         render_logout_control()
+        render_change_password_control()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CURRENCY — Live exchange rate & fmt() helper
