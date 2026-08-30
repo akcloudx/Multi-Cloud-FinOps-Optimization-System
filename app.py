@@ -103,7 +103,7 @@ from db.schema import init_db, get_engine
 from db.seed import seed_if_empty, COMPUTE_SP_ELIGIBLE_TYPES, DATABASE_SP_ELIGIBLE_TYPES
 from db.aws_seed import seed_aws_if_empty, AWS_COMPUTE_SP_TYPES, AWS_DATABASE_SP_TYPES, AWS_SAGEMAKER_SP_TYPES
 
-@st.cache_resource
+@st.cache_resource(show_spinner="Preparing your workspace...")
 def init_all_databases():
     # Only the demo scope is eagerly seeded here - the live scope for each
     # provider initializes lazily on first real use (tenant registration,
