@@ -310,7 +310,7 @@ def init_db(provider: str = "Azure", mode: str = "demo"):
     _ensure_column(engine, schema_name, "cloud_tenants", "last_synced_at", "VARCHAR(255)")
     _ensure_column(engine, schema_name, "cloud_tenants", "tenant_permission_status", "VARCHAR(50)")
     _ensure_column(engine, schema_name, "cloud_tenants", "tenant_missing_roles", "VARCHAR(255)")
-    _ensure_column(engine, schema_name, "commitments", "is_inferred_mapping", "BOOLEAN")
+    _ensure_column(engine, schema_name, "commitments", "is_inferred_mapping", "BIT")
     _ensure_column(engine, schema_name, "commitments", "mapping_note", "VARCHAR(500)")
     _ensure_column(engine, schema_name, "cloud_tenants", "sync_interval_hours", "INTEGER")
     _ensure_column(engine, schema_name, "cloud_tenants", "last_sync_status", "VARCHAR(20)")
@@ -378,7 +378,16 @@ def init_db(provider: str = "Azure", mode: str = "demo"):
     # Priority, locked to one size+AZ) and demo/pre-existing rows (None)
     # stay exact-match only, same as before this feature.
     _ensure_column(engine, schema_name, "commitments", "instance_flexibility", "VARCHAR(20)")
-    _ensure_column(engine, schema_name, "app_users", "must_change_password", "BOOLEAN")
+    # BIT, not BOOLEAN - real bug caught live on both Demo and Production,
+    # 2026-08-30: "BOOLEAN" is a plain string inserted verbatim into a raw
+    # ALTER TABLE ... ADD statement here (unlike Column(Boolean) in the ORM
+    # model above, which SQLAlchemy correctly translates for whichever
+    # dialect creates the table fresh) - SQL Server has no "BOOLEAN" type
+    # at all, only BIT. Also fixed is_inferred_mapping just above, which
+    # had the exact same latent bug - it just never actually reached this
+    # ALTER before now (that column already existed in every deployed DB
+    # this session touched), so it never got the chance to fail the same way.
+    _ensure_column(engine, schema_name, "app_users", "must_change_password", "BIT")
     _initialized_scopes.add(scope_key)
     return engine
 
