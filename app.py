@@ -5387,13 +5387,31 @@ sagemaker_24x7, sagemaker_sp_excluded = _split_sp_eligible(sagemaker_24x7_candid
 # ─────────────────────────────────────────────────────────────────────────────
 pg.run()
 
+# Refreshed 2026-08-30, real feedback: read as too prominent for fine print
+# (bold "Legal & Financial Notice:" lead-in at the same visual weight as
+# body text, wide centered paragraph) and sat awkwardly far from the page
+# bottom on short pages like Home, with a fixed 100px margin-top compounding
+# whatever empty space the page's own short content already left above it.
+# Restyled as genuine fine print (small-caps muted label instead of a bold
+# phrase, smaller explicit px size, left-aligned instead of centered,
+# tighter margins) matching how mature financial apps present this kind of
+# notice - de-emphasized, not a featured block.
+#
+# Deliberately NOT attempting true viewport-bottom pinning (a CSS sticky
+# footer) here - that needs the page's own container to become a flex
+# column with this footer's margin pushed to auto, which means restyling
+# Streamlit's own internal block-container across every page, a real risk
+# of side effects on unrelated layouts this session can't verify without
+# live testing. Flagged as a separate, bigger follow-up if still wanted
+# after seeing this smaller/quieter version in place.
 st.markdown("""
-<div style="background-color: transparent; border-top: 1px solid rgba(255,255,255,0.08); padding: 48px 0px 40px 0px; margin-top: 100px;">
-    <div style="max-width: 1200px; margin: 0 auto; text-align: center;">
-        <p style="font-size: 0.8rem; color: #94a3b8; line-height: 1.6; margin-bottom: 16px;">
-            <strong style="color: #cbd5e1;">Legal & Financial Notice:</strong> Multi-Cloud FinOps Optimization System is an independent cloud financial decision support platform. Cost calculations, projected savings, and commitment recommendations are provided for analytical modeling purposes. Official billing figures must be verified in Microsoft Azure Cost Management or AWS Cost Explorer prior to purchasing commitment contracts. Microsoft Azure and Amazon Web Services (AWS) are registered trademarks of their respective owners.
+<div style="background-color: transparent; border-top: 1px solid rgba(255,255,255,0.08); padding: 24px 0px 20px 0px; margin-top: 56px;">
+    <div style="max-width: 1200px; margin: 0 auto;">
+        <p style="font-size: 11px; color: #64748b; line-height: 1.6; margin: 0 0 6px;">
+            <span style="text-transform: uppercase; letter-spacing: .05em; font-weight: 600; color: #94a3b8; font-size: 10px;">Legal &amp; Financial Notice</span>
+            &nbsp;·&nbsp; Multi-Cloud FinOps Optimization System is an independent cloud financial decision support platform. Cost calculations, projected savings, and commitment recommendations are provided for analytical modeling purposes. Official billing figures must be verified in Microsoft Azure Cost Management or AWS Cost Explorer prior to purchasing commitment contracts. Microsoft Azure and Amazon Web Services (AWS) are registered trademarks of their respective owners.
         </p>
-        <div style="font-size: 0.8rem; color: #64748b; padding-top: 8px;">
+        <div style="font-size: 10.5px; color: #475569;">
             © 2026 Multi-Cloud FinOps Optimization System. All rights reserved.
         </div>
     </div>
