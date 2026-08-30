@@ -896,7 +896,7 @@ class CloudTenant(Base):
     # run_ingestion_pipeline() for a tenant once now - last_synced_at >=
     # this many hours, so different tenants can run on different cadences
     # without needing a separate Function/Durable orchestration per tenant.
-    sync_interval_hours      = Column(Integer, default=24)
+    sync_interval_hours      = Column(Integer, default=1)
     # Persisted result of the most recent sync attempt for this tenant - the
     # Manage Tenant dialog's "Sync" card reads this directly so the result
     # (including a real failure/partial message) survives a dialog reopen or

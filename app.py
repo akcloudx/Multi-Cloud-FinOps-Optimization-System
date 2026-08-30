@@ -694,13 +694,13 @@ def _manage_tenant_dialog(t, mode: str):
             else:
                 st.caption("No sync attempted yet.")
 
-            current_interval = t.sync_interval_hours if t.sync_interval_hours in _SYNC_INTERVAL_LABELS else 24
+            current_interval = t.sync_interval_hours if t.sync_interval_hours in _SYNC_INTERVAL_LABELS else 1
             i1, i2 = st.columns([3, 2])
             new_interval = i1.selectbox(
                 "Automated sync interval", options=list(_SYNC_INTERVAL_LABELS.keys()),
                 format_func=lambda h: _SYNC_INTERVAL_LABELS[h],
                 index=list(_SYNC_INTERVAL_LABELS.keys()).index(current_interval),
-                key=f"mgmt_aws_interval_{t.id}", disabled=is_demo,
+                key=f"mgmt_aws_interval_{t.id}", disabled=is_demo, width=260,
                 help="A single hourly cron checks every tenant and only re-syncs the ones due, based on this setting.",
             )
             i2.caption("")
@@ -864,9 +864,18 @@ Missing this step is **not fatal** - Resource inventory and cost data (step 2) s
         else:
             st.caption("No subscriptions recorded yet - click **Sync subscriptions** above.")
 
+        # Moved here from the Tenant-wide permissions tab, 2026-08-30 - real
+        # UX gap the user caught live: this reference table is about
+        # subscription-scoped roles, which is what THIS tab checks (the
+        # per-subscription checklist above) - it was previously duplicated
+        # into the Tenant-wide permissions tab as well, where it didn't
+        # match that tab's own scope at all.
+        with st.expander("Required Azure RBAC roles (subscription-scoped)", icon=":material/checklist:", expanded=False):
+            st.dataframe(pd.DataFrame(REQUIRED_SUBSCRIPTION_ROLES)[["Role Name", "Scope", "Purpose"]], hide_index=True, width="stretch")
+
     # ── Tenant-wide permissions (Reservations / Savings Plans) ──────────
     elif active_section == "Tenant-wide permissions":
-        st.caption("Reservations and Savings Plans are tenant-wide resources with their own separate permission system, not covered by the subscription-level roles above.")
+        st.caption("Reservations and Savings Plans are tenant-wide resources with their own separate permission system, not covered by the subscription-level roles checked in the Subscriptions tab.")
         if t.tenant_permission_status in ("ready", "missing_role"):
             _render_role_checklist(REQUIRED_TENANT_ROLES, t.tenant_permission_status, t.tenant_assigned_roles)
             if t.tenant_permission_status == "missing_role":
@@ -881,10 +890,7 @@ Missing this step is **not fatal** - Resource inventory and cost data (step 2) s
                 _run_tenant_permission_check(t, mode)
             st.rerun()
 
-        with st.expander("Required Azure RBAC roles", icon=":material/checklist:", expanded=False):
-            st.markdown("**Subscription-scoped**")
-            st.dataframe(pd.DataFrame(REQUIRED_SUBSCRIPTION_ROLES)[["Role Name", "Scope", "Purpose"]], hide_index=True, width="stretch")
-            st.markdown("**Tenant-scoped**")
+        with st.expander("Required Azure RBAC roles (tenant-scoped)", icon=":material/checklist:", expanded=False):
             st.dataframe(pd.DataFrame(REQUIRED_TENANT_ROLES)[["Role Name", "Scope", "Purpose"]], hide_index=True, width="stretch")
 
     # ── Sync ───────────────────────────────────────────────────────────
@@ -898,13 +904,13 @@ Missing this step is **not fatal** - Resource inventory and cost data (step 2) s
         else:
             st.caption("No sync attempted yet.")
 
-        current_interval = t.sync_interval_hours if t.sync_interval_hours in _SYNC_INTERVAL_LABELS else 24
+        current_interval = t.sync_interval_hours if t.sync_interval_hours in _SYNC_INTERVAL_LABELS else 1
         i1, i2 = st.columns([3, 2])
         new_interval = i1.selectbox(
             "Automated sync interval", options=list(_SYNC_INTERVAL_LABELS.keys()),
             format_func=lambda h: _SYNC_INTERVAL_LABELS[h],
             index=list(_SYNC_INTERVAL_LABELS.keys()).index(current_interval),
-            key=f"mgmt_interval_{t.id}", disabled=is_demo,
+            key=f"mgmt_interval_{t.id}", disabled=is_demo, width=260,
             help="A single hourly cron checks every tenant and only re-syncs the ones due, based on this setting.",
         )
         i2.caption("")

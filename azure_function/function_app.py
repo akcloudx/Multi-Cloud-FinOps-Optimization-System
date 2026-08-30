@@ -36,7 +36,7 @@ from aws.connector import AWSCredentials
 
 app = func.FunctionApp()
 
-_DEFAULT_INTERVAL_HOURS = 24
+_DEFAULT_INTERVAL_HOURS = 1
 
 
 def _is_due(t) -> bool:
