@@ -131,7 +131,7 @@ current_user = require_login()
 # require_login() only injects CSS on the pre-auth screens (it returns early
 # once already authenticated) - apply it here too so the setup gate and main
 # dashboard get the same card/button polish.
-from ui.styling import inject_global_css
+from ui.styling import inject_global_css, sidebar_icon
 inject_global_css()
 
 # Imports
@@ -564,7 +564,7 @@ def _manage_tenant_dialog(t, mode: str):
         # button's st.rerun() (or it gets pruned and resets), and the
         # name row's screen position is reserved via a placeholder so it
         # still renders first visually.
-        aws_sync_icon = {"SUCCESS": "✅", "FAILED": "❌", "PARTIAL": "⚠️"}.get(t.last_sync_status, "")
+        aws_sync_icon = {"SUCCESS": ":material/check_circle:", "FAILED": ":material/cancel:", "PARTIAL": ":material/warning:"}.get(t.last_sync_status, "")
         _AWS_SECTIONS = ["Credentials", "Permissions", "Sync"]
         _aws_section_icons = {"Sync": aws_sync_icon}
         aws_section_key = f"mgmt_aws_section_{t.id}"
@@ -606,7 +606,7 @@ def _manage_tenant_dialog(t, mode: str):
                 st.caption("Not applicable - a demo tenant has no real AWS credentials behind it.")
             else:
                 st.caption("Checked live against AWS each time - not persisted, same as the Add a new tenant form's test.")
-                if st.button("🔁 Check permissions", disabled=is_demo, key=f"mgmt_aws_check_{t.id}"):
+                if st.button("Check permissions", icon=":material/sync:", disabled=is_demo, key=f"mgmt_aws_check_{t.id}"):
                     creds = AWSCredentials(t.client_id, get_tenant_credentials(t), t.tenant_id)
                     with st.spinner("Checking IAM permissions..."):
                         check = check_aws_permissions(creds)
@@ -616,14 +616,14 @@ def _manage_tenant_dialog(t, mode: str):
                     if check["checked"]:
                         _render_aws_permission_checklist(check["results"])
                     else:
-                        st.error(f"❌ Could not check permissions: {check['error']}")
+                        st.error(f"Could not check permissions: {check['error']}", icon=":material/cancel:")
         elif active_aws_section == "Sync":
             if t.last_sync_status == "SUCCESS":
-                st.success(t.last_sync_message or "Last sync succeeded.", icon="✅")
+                st.success(t.last_sync_message or "Last sync succeeded.", icon=":material/check_circle:")
             elif t.last_sync_status == "PARTIAL":
-                st.warning(t.last_sync_message or "Last sync partially completed.", icon="⚠️")
+                st.warning(t.last_sync_message or "Last sync partially completed.", icon=":material/warning:")
             elif t.last_sync_status == "FAILED":
-                st.error(t.last_sync_message or "Last sync failed.", icon="❌")
+                st.error(t.last_sync_message or "Last sync failed.", icon=":material/cancel:")
             else:
                 st.caption("No sync attempted yet.")
 
@@ -644,7 +644,7 @@ def _manage_tenant_dialog(t, mode: str):
 
             st.caption(f"Last synced: {t.last_synced_at[:16] if t.last_synced_at else 'Never'}")
 
-            if st.button("⚡ Run sync now", disabled=is_demo, key=f"mgmt_aws_run_sync_{t.id}", type="primary",
+            if st.button("Run sync now", icon=":material/bolt:", disabled=is_demo, key=f"mgmt_aws_run_sync_{t.id}", type="primary",
                          help="Only available for Production tenants." if is_demo else "Fetches live EC2/RDS inventory from this tenant right now."):
                 with st.spinner(f"Running ingestion for '{t.tenant_name}'..."):
                     sync_creds = AWSCredentials(t.client_id, get_tenant_credentials(t), t.tenant_id)
@@ -654,7 +654,7 @@ def _manage_tenant_dialog(t, mode: str):
                 st.rerun()
 
         st.divider()
-        if st.button("🗑️ Delete tenant", disabled=is_demo, key=f"mgmt_delete_{t.id}"):
+        if st.button("Delete tenant", icon=":material/delete:", disabled=is_demo, key=f"mgmt_delete_{t.id}"):
             delete_tenant(selected_provider, mode, t.id)
             st.session_state["_manage_tenant_id"] = None
             st.rerun()
@@ -664,9 +664,9 @@ def _manage_tenant_dialog(t, mode: str):
     sub_ready = bool(subs) and all(s.permission_status == "ready" for s in subs)
     sub_missing = any(s.permission_status == "missing_role" for s in subs)
     sub_error = any(s.permission_status == "error" for s in subs)
-    sub_icon = "✅" if sub_ready else "❌" if sub_error else "⚠️" if sub_missing else ""
-    tenant_icon = {"ready": "✅", "error": "❌", "missing_role": "⚠️"}.get(t.tenant_permission_status, "")
-    sync_icon = {"SUCCESS": "✅", "FAILED": "❌", "PARTIAL": "⚠️"}.get(t.last_sync_status, "")
+    sub_icon = ":material/check_circle:" if sub_ready else ":material/cancel:" if sub_error else ":material/warning:" if sub_missing else ""
+    tenant_icon = {"ready": ":material/check_circle:", "error": ":material/cancel:", "missing_role": ":material/warning:"}.get(t.tenant_permission_status, "")
+    sync_icon = {"SUCCESS": ":material/check_circle:", "FAILED": ":material/cancel:", "PARTIAL": ":material/warning:"}.get(t.last_sync_status, "")
 
     # st.tabs() has no session-state-backed selection - every st.rerun() call
     # below (Verify, Sync, Save, Run sync now...) remounts it fresh and it
@@ -733,7 +733,7 @@ def _manage_tenant_dialog(t, mode: str):
                 st.success("Credentials updated.")
                 st.rerun()
 
-        with st.expander("📖 How to set up this Service Principal", expanded=False):
+        with st.expander("How to set up this Service Principal", icon=":material/menu_book:", expanded=False):
             st.markdown("""
 **1. Create the Service Principal:**
 ```bash
@@ -763,7 +763,7 @@ Missing this step is **not fatal** - Resource inventory and cost data (step 2) s
 
     # ── Subscriptions ─────────────────────────────────────────────────────
     elif active_section == "Subscriptions":
-        if st.button("🔁 Sync subscriptions", disabled=is_demo, key=f"mgmt_sync_subs_{t.id}",
+        if st.button("Sync subscriptions", icon=":material/sync:", disabled=is_demo, key=f"mgmt_sync_subs_{t.id}",
                       help="Only available for Production tenants." if is_demo else "Discovers subscriptions and checks Reader/Cost Management Reader on each."):
             with st.spinner("Enumerating subscriptions and checking permissions..."):
                 live_subs = _run_subscription_sync(t, mode)
@@ -778,7 +778,7 @@ Missing this step is **not fatal** - Resource inventory and cost data (step 2) s
                 if s.permission_status in ("ready", "missing_role"):
                     _render_role_checklist(REQUIRED_SUBSCRIPTION_ROLES, s.permission_status, s.assigned_roles)
                 elif s.permission_status == "error":
-                    st.error(s.missing_role or "Could not check", icon="❌")
+                    st.error(s.missing_role or "Could not check", icon=":material/cancel:")
                 else:
                     st.caption("Not checked yet.")
                 if st.button("Verify", key=f"mgmt_verify_sub_{s.id}", disabled=is_demo,
@@ -805,16 +805,16 @@ Missing this step is **not fatal** - Resource inventory and cost data (step 2) s
             if t.tenant_permission_status == "missing_role":
                 st.caption("Needs User Access Administrator at the tenant level - often unavailable on student/trial accounts. Inventory and cost data are unaffected; only Reservations/Savings Plan data needs this.")
         elif t.tenant_permission_status == "error":
-            st.error(t.tenant_missing_roles or "Could not check", icon="❌")
+            st.error(t.tenant_missing_roles or "Could not check", icon=":material/cancel:")
         else:
             st.caption("Not checked yet.")
-        if st.button("🔁 Check tenant permissions", disabled=is_demo, key=f"mgmt_tenant_check_{t.id}",
+        if st.button("Check tenant permissions", icon=":material/sync:", disabled=is_demo, key=f"mgmt_tenant_check_{t.id}",
                       help="Only available for Production tenants." if is_demo else None):
             with st.spinner("Checking tenant-level permissions..."):
                 _run_tenant_permission_check(t, mode)
             st.rerun()
 
-        with st.expander("📋 Required Azure RBAC roles", expanded=False):
+        with st.expander("Required Azure RBAC roles", icon=":material/checklist:", expanded=False):
             st.markdown("**Subscription-scoped**")
             st.dataframe(pd.DataFrame(REQUIRED_SUBSCRIPTION_ROLES)[["Role Name", "Scope", "Purpose"]], hide_index=True, width="stretch")
             st.markdown("**Tenant-scoped**")
@@ -823,11 +823,11 @@ Missing this step is **not fatal** - Resource inventory and cost data (step 2) s
     # ── Sync ───────────────────────────────────────────────────────────
     elif active_section == "Sync":
         if t.last_sync_status == "SUCCESS":
-            st.success(t.last_sync_message or "Last sync succeeded.", icon="✅")
+            st.success(t.last_sync_message or "Last sync succeeded.", icon=":material/check_circle:")
         elif t.last_sync_status == "PARTIAL":
-            st.warning(t.last_sync_message or "Last sync partially completed.", icon="⚠️")
+            st.warning(t.last_sync_message or "Last sync partially completed.", icon=":material/warning:")
         elif t.last_sync_status == "FAILED":
-            st.error(t.last_sync_message or "Last sync failed.", icon="❌")
+            st.error(t.last_sync_message or "Last sync failed.", icon=":material/cancel:")
         else:
             st.caption("No sync attempted yet.")
 
@@ -848,7 +848,7 @@ Missing this step is **not fatal** - Resource inventory and cost data (step 2) s
 
         st.caption(f"Last synced: {t.last_synced_at[:16] if t.last_synced_at else 'Never'}")
 
-        if st.button("⚡ Run sync now", disabled=is_demo, key=f"mgmt_run_sync_{t.id}", type="primary",
+        if st.button("Run sync now", icon=":material/bolt:", disabled=is_demo, key=f"mgmt_run_sync_{t.id}", type="primary",
                      help="Only available for Production tenants." if is_demo else "Fetches live inventory, reservations, and savings plans from this tenant right now."):
             with st.spinner(f"Running ingestion for '{t.tenant_name}'..."):
                 sync_creds = AzureCredentials(t.tenant_id, t.subscription_id, t.client_id, get_tenant_credentials(t))
@@ -862,7 +862,7 @@ Missing this step is **not fatal** - Resource inventory and cost data (step 2) s
         st.caption("Nothing here yet - reserved for upcoming tenant-level features.")
 
     st.divider()
-    if st.button("🗑️ Delete tenant", disabled=is_demo, key=f"mgmt_delete_prod_{t.id}",
+    if st.button("Delete tenant", icon=":material/delete:", disabled=is_demo, key=f"mgmt_delete_prod_{t.id}",
                  help="Only available for Production tenants." if is_demo else None):
         delete_tenant(selected_provider, mode, t.id)
         st.session_state["_manage_tenant_id"] = None
@@ -907,7 +907,14 @@ def _compute_portfolio_kpis():
             total_tenants += 1
             inv = get_compute_inventory(provider=provider, mode=tenant_mode, tenant_id=tenant_id)
             total_resources += len(inv)
-            total_payg_hr += float(inv["PAYG Hourly Cost USD"].sum()) if not inv.empty else 0.0
+            # Filtered to Running only (2026-08-30, real known bug fixed -
+            # tracked as an open follow-up since the Cost Analysis tab was
+            # removed for this identical issue: a Stopped resource's own
+            # PAYG rate is stored at its full on-demand rate regardless of
+            # state, so summing unconditionally silently inflated this KPI
+            # by every stopped resource's rate too. Same filter pattern
+            # already used for the Recommendations tab's own baseline calc.
+            total_payg_hr += float(inv.loc[inv["Resource State"] == "Running", "PAYG Hourly Cost USD"].sum()) if not inv.empty else 0.0
 
             sp_df = get_existing_savings_plans(provider=provider, mode=tenant_mode, tenant_id=tenant_id)
             ri_df = get_existing_reservations(provider=provider, mode=tenant_mode, tenant_id=tenant_id)
@@ -980,32 +987,36 @@ def page_home():
         # .st-key-fl_home_kpis rule below lets it wrap onto a second line
         # instead of ellipsis-clipping, so a long INR value has somewhere
         # to go without needing extra column width at all.
+        # Gradient .rec-metric-card cards, not st.metric (2026-08-30, real
+        # feedback - same "bring it in line with the KPI-card treatment"
+        # pass already applied to RI Coverage/SP Analysis/Recommendations/
+        # Rightsizing/Maturity). Critical Recommendations keeps the same
+        # tone logic st.metric's delta_color used (red when actionable,
+        # green when optimal), just as a card tone instead of a delta pill.
+        _crit_tone = "over" if kpis["critical"] > 0 else "savings"
+        _crit_note = "Action Required" if kpis["critical"] > 0 else "Optimal"
         with st.container(key="fl_home_kpis"):
-            c1, c2, c3, c4, c5 = st.columns(5)
-            c1.metric("Tenants Connected", kpis["tenants"])
-            c2.metric("Resources Tracked", kpis["resources"])
-            c3.metric("Total PAYG Rate", fmt(kpis["payg_hr"], 2) + "/hr")
-            c4.metric("Total Committed", fmt(kpis["committed_hr"], 2) + "/hr")
-            # "Critical Recommendations" (2026-08-29, real feedback) -
-            # matches this app's own established label for this exact
-            # metric (the count of HIGH-severity
-            # generate_recommendations() items), used before it was
-            # dropped from the Analyze top header's own 6-metric grid
-            # (see _render_top_header()'s docstring above) - this Home
-            # page reintroduced the same count under a different,
-            # inconsistent name ("Critical Alerts") when it was rebuilt
-            # the next day.
-            c5.metric(
-                "Critical Recommendations",
-                f"{kpis['critical']} items" if kpis["critical"] > 0 else "0 items",
-                delta="Action Required" if kpis["critical"] > 0 else "Optimal",
-                delta_color="inverse" if kpis["critical"] > 0 else "off",
-            )
+            for col, (label, val, tone, note) in zip(st.columns(5), [
+                ("Tenants Connected", kpis["tenants"], "savings", ""),
+                ("Resources Tracked", kpis["resources"], "combined", ""),
+                ("Total PAYG Rate", fmt(kpis["payg_hr"], 2) + "/hr", "under", ""),
+                ("Total Committed", fmt(kpis["committed_hr"], 2) + "/hr", "combined", ""),
+                ("Critical Recommendations", f"{kpis['critical']} items" if kpis["critical"] > 0 else "0 items", _crit_tone, _crit_note),
+            ]):
+                with col:
+                    st.markdown(
+                        f'<div class="rec-metric-card {tone}">'
+                        f'<div class="lbl">{label}</div>'
+                        f'<div class="val fl-mono">{val}</div>'
+                        + (f'<div class="sub">{note}</div>' if note else "")
+                        + "</div>",
+                        unsafe_allow_html=True,
+                    )
 
         if kpis["stale"]:
             names = ", ".join(kpis["stale"])
             plural = "s" if len(kpis["stale"]) > 1 else ""
-            st.warning(f"⚠️ {len(kpis['stale'])} tenant{plural} hasn't synced in over a week: **{names}**.", icon="⚠️")
+            st.warning(f"⚠️ {len(kpis['stale'])} tenant{plural} hasn't synced in over a week: **{names}**.", icon=":material/warning:")
 
     st.write("")
     st.markdown("Connect a cloud tenant, review its sync status, or jump into its dashboard - all from Tenant Management.")
@@ -4004,6 +4015,14 @@ _STAGE_STYLE = {
     "Not Yet Measurable": ("⚪", "Not Yet Measurable", "Not tracked yet"),
 }
 
+# .rec-metric-card tone modifiers (ui/styling.py) already cover exactly
+# these 5 semantic colors - green/blue/amber/red/gray - so this reuses the
+# existing classes verbatim rather than adding new CSS.
+_STAGE_TONE = {
+    "Run": "savings", "Walk": "combined", "Crawl": "under",
+    "Below Crawl": "over", "Not Yet Measurable": "neutral",
+}
+
 _CAPABILITY_LINKS = {
     "Rate Optimization": "the Savings Plan Analysis and RI Coverage tabs",
     "Usage Optimization": "the Inventory tab's orphaned-resource flags",
@@ -4057,17 +4076,42 @@ def _render_maturity_tab():
     stage_counts = {}
     for a in assessments:
         stage_counts[a.stage] = stage_counts.get(a.stage, 0) + 1
+    # Gradient .rec-metric-card cards, not st.metric (2026-08-30, real
+    # feedback: "bring it in line with the same KPI-card treatment" already
+    # used on RI Coverage/Savings Plan Analysis/Recommendations/Rightsizing
+    # - this was the one tab still on native st.metric). Same card markup,
+    # same tone-class mechanism, just a 5-wide row instead of 4.
     for col, stage_key in zip(st.columns(5), _STAGE_STYLE.keys()):
         icon, label, plain = _STAGE_STYLE[stage_key]
         with col:
-            st.metric(f"{icon} {label}", stage_counts.get(stage_key, 0))
-            st.caption(plain)
+            st.markdown(
+                f'<div class="rec-metric-card {_STAGE_TONE[stage_key]}">'
+                f'<div class="lbl">{icon} {label}</div>'
+                f'<div class="val fl-mono">{stage_counts.get(stage_key, 0)}</div>'
+                f'<div class="sub">{plain}</div>'
+                "</div>",
+                unsafe_allow_html=True,
+            )
 
-    st.info(
-        "The Maturity Model's own guidance: *\"focus less on maturing each Capability to 'Run' "
-        "for everything\"* - prioritize whichever capabilities deliver the highest business value "
-        "for your organization next, rather than treating this as a checklist to max out."
-    )
+    # Nudged up with a small negative margin, not a container-gap override
+    # (2026-08-30, real feedback + screenshot: the first attempt at this,
+    # wrapping both the card row and this box in one shared st.container
+    # with a CSS `gap` rule, collapsed the space to near-zero instead of
+    # tightening it - overrode more of Streamlit's own spacing behavior
+    # than intended). This instead nudges JUST this element up by a small,
+    # known amount relative to wherever it'd normally sit, an incremental
+    # adjustment rather than a wholesale replacement of the block-spacing
+    # mechanism - much lower risk of snapping to 0/overlapping.
+    with st.container(key="fl_maturity_guidance_box"):
+        st.markdown(
+            '<style>div.st-key-fl_maturity_guidance_box { margin-top: -4px; }</style>',
+            unsafe_allow_html=True,
+        )
+        st.info(
+            "The Maturity Model's own guidance: *\"focus less on maturing each Capability to 'Run' "
+            "for everything\"* - prioritize whichever capabilities deliver the highest business value "
+            "for your organization next, rather than treating this as a checklist to max out."
+        )
 
     st.divider()
 
@@ -4526,93 +4570,114 @@ with st.sidebar:
     def reset_app_cache():
         st.cache_data.clear()
 
-    # ── ☁️ Cloud & Data Source ──────────────────────────────────────────────
-    st.markdown("#### ☁️ Cloud & Data Source")
+    # Icon column + content column per section (2026-08-30, "rail" redesign
+    # round 2, real feedback: "some new visuals" for the bordered-box
+    # version, which read as repetitive stacked boxes) - a colored icon
+    # badge per section (Cloud=blue, Display=green, Account=violet) using
+    # real st.columns(), not the mockup's absolute-positioned icon-on-a-
+    # line technique (see ui/styling.py's own note above .fl-rail-node for
+    # why that got simplified rather than guessed blind). No borders, no
+    # dividers - generous margin-bottom on each section instead.
+    _cloud_ic, _cloud_ct = st.columns([1, 8])
+    with _cloud_ic:
+        st.markdown(f'<div class="fl-rail-node cloud">{sidebar_icon("cloud")}</div>', unsafe_allow_html=True)
+    with _cloud_ct:
+        st.markdown('<div class="fl-rail-title">Cloud &amp; Data Source</div>', unsafe_allow_html=True)
 
-    selected_provider = st.segmented_control(
-        "Cloud Platform",
-        options=["Azure", "AWS"],
-        default=initial_provider,
-        key="provider_selector_widget",
-        on_change=reset_app_cache,
-        help="Select cloud environment to optimize.",
-    )
-    if not selected_provider:
-        selected_provider = initial_provider
+        selected_provider = st.segmented_control(
+            "Cloud Platform",
+            options=["Azure", "AWS"],
+            default=initial_provider,
+            key="provider_selector_widget",
+            on_change=reset_app_cache,
+            help="Select cloud environment to optimize.",
+        )
+        if not selected_provider:
+            selected_provider = initial_provider
 
-    # Re-asserted on every rerun (not just written once) - same reasoning as
-    # currency/the login token just below: Streamlit's sidebar nav links
-    # don't reliably carry a query param forward unless it's freshly
-    # rewritten on every single script run, not just at the moment it was
-    # first set.
-    st.query_params["provider"] = selected_provider
+        # Re-asserted on every rerun (not just written once) - same reasoning
+        # as currency/the login token just below: Streamlit's sidebar nav
+        # links don't reliably carry a query param forward unless it's
+        # freshly rewritten on every single script run, not just at the
+        # moment it was first set.
+        st.query_params["provider"] = selected_provider
 
-    # Deliberately NOT a free-switching widget - see
-    # ui.auth_page.render_switch_mode_control's docstring for why: demo and
-    # live are separate login accounts and separate data now, so switching
-    # means signing out and back in, not flipping a toggle mid-session.
-    env_mode = render_switch_mode_control()
+        # Deliberately NOT a free-switching widget - see
+        # ui.auth_page.render_switch_mode_control's docstring for why: demo
+        # and live are separate login accounts and separate data now, so
+        # switching means signing out and back in, not flipping a toggle
+        # mid-session.
+        env_mode = render_switch_mode_control()
 
-    st.divider()
+    st.markdown('<div style="height:26px;"></div>', unsafe_allow_html=True)
 
-    # ── 💱 Display ───────────────────────────────────────────────────────────
-    st.markdown("#### 💱 Display")
+    _disp_ic, _disp_ct = st.columns([1, 8])
+    with _disp_ic:
+        st.markdown(f'<div class="fl-rail-node display">{sidebar_icon("card")}</div>', unsafe_allow_html=True)
+    with _disp_ct:
+        st.markdown('<div class="fl-rail-title">Display</div>', unsafe_allow_html=True)
 
-    selected_currency = st.segmented_control(
-        "Display Currency",
-        options=["USD", "INR"],
-        default=initial_currency,
-        key="currency_selector_widget",
-        help="Toggle between US Dollar and Indian Rupee (live exchange rate).",
-    )
-    # Real bug reported 2026-08-29 (screenshot: sidebar caption showed
-    # "Currency USD" and the whole Analyze page priced in USD, right after
-    # clicking a sidebar nav link with INR selected, even though the
-    # toggle widget ITSELF still visually showed INR highlighted). Root
-    # cause: st.segmented_control can transiently return None for one
-    # rerun right after a sidebar nav-link navigation (before the
-    # frontend fully resyncs component state) - the old fallback then
-    # read `initial_currency`, which comes from st.query_params, and
-    # that URL can be stale after a nav-link click (same "sidebar nav
-    # links don't reliably carry query params forward" limitation this
-    # file's own comments already document for the login session token
-    # just below - never fully closed for currency specifically). The
-    # widget's OWN session_state entry stays correct the whole time
-    # (proven by the toggle's own correct visual state in that exact
-    # screenshot) - preferred first, before falling back to the
-    # URL-derived value, which is only reliable on a genuinely fresh
-    # page load (no prior selection to fall back to at all).
-    if not selected_currency:
-        selected_currency = st.session_state.get("currency_selector_widget") or initial_currency
+        # format_func only changes the DISPLAYED label ("$ USD"/"₹ INR") -
+        # the widget's real return value stays the bare "USD"/"INR" string
+        # every downstream fmt_currency()/selected_currency == "INR" check
+        # throughout this app already expects, so this is display-only,
+        # zero behavior change.
+        selected_currency = st.segmented_control(
+            "Display Currency",
+            options=["USD", "INR"],
+            format_func=lambda v: {"USD": "$ USD", "INR": "₹ INR"}[v],
+            default=initial_currency,
+            key="currency_selector_widget",
+            help="Toggle between US Dollar and Indian Rupee (live exchange rate).",
+        )
+        # Real bug reported 2026-08-29 (screenshot: sidebar caption showed
+        # "Currency USD" and the whole Analyze page priced in USD, right after
+        # clicking a sidebar nav link with INR selected, even though the
+        # toggle widget ITSELF still visually showed INR highlighted). Root
+        # cause: st.segmented_control can transiently return None for one
+        # rerun right after a sidebar nav-link navigation (before the
+        # frontend fully resyncs component state) - the old fallback then
+        # read `initial_currency`, which comes from st.query_params, and
+        # that URL can be stale after a nav-link click (same "sidebar nav
+        # links don't reliably carry query params forward" limitation this
+        # file's own comments already document for the login session token
+        # just below - never fully closed for currency specifically). The
+        # widget's OWN session_state entry stays correct the whole time
+        # (proven by the toggle's own correct visual state in that exact
+        # screenshot) - preferred first, before falling back to the
+        # URL-derived value, which is only reliable on a genuinely fresh
+        # page load (no prior selection to fall back to at all).
+        if not selected_currency:
+            selected_currency = st.session_state.get("currency_selector_widget") or initial_currency
 
-    # Update query parameters to persist selection across page refreshes
-    st.query_params["currency"] = selected_currency
+        # Update query parameters to persist selection across page refreshes
+        st.query_params["currency"] = selected_currency
 
-    # Same reasoning, same fix pattern - the login session token (?s=...,
-    # see ui/auth_page.py) needs this exact same "re-set on every rerun"
-    # treatment. Real bug caught on video 2026-08-20: Streamlit's sidebar
-    # multi-page nav links (Home/Tenant Management/User Management) do NOT
-    # reliably carry a query param forward into their href when it was only
-    # ever set once (at login) - one click on a nav link and it's silently
-    # gone from the address bar, so the next ordinary refresh (now on a URL
-    # with no token) correctly but unhelpfully bounces back to login.
-    # "currency" survives the identical navigation only because it's
-    # unconditionally re-set on every single rerun, right here - mirroring
-    # that pattern (and this exact location, not require_login()'s early
-    # fast path - that placement broke sidebar rendering entirely when
-    # tried) is what actually fixes it.
-    _session_token = st.session_state.get("_session_token")
-    if _session_token:
-        st.query_params["s"] = _session_token
+        # Same reasoning, same fix pattern - the login session token (?s=...,
+        # see ui/auth_page.py) needs this exact same "re-set on every rerun"
+        # treatment. Real bug caught on video 2026-08-20: Streamlit's sidebar
+        # multi-page nav links (Home/Tenant Management/User Management) do NOT
+        # reliably carry a query param forward into their href when it was only
+        # ever set once (at login) - one click on a nav link and it's silently
+        # gone from the address bar, so the next ordinary refresh (now on a URL
+        # with no token) correctly but unhelpfully bounces back to login.
+        # "currency" survives the identical navigation only because it's
+        # unconditionally re-set on every single rerun, right here - mirroring
+        # that pattern (and this exact location, not require_login()'s early
+        # fast path - that placement broke sidebar rendering entirely when
+        # tried) is what actually fixes it.
+        _session_token = st.session_state.get("_session_token")
+        if _session_token:
+            st.query_params["s"] = _session_token
 
-    st.caption(f"Platform `{selected_provider}` · Mode `{env_mode}` · Currency `{selected_currency}`")
+    st.markdown('<div style="height:26px;"></div>', unsafe_allow_html=True)
 
-    st.divider()
-
-    # ── 🔒 Account ───────────────────────────────────────────────────────────
-    st.markdown("#### 🔒 Account")
-    render_logout_control()
-    st.caption("Manage user accounts under 👥 User Management.")
+    _acct_ic, _acct_ct = st.columns([1, 8])
+    with _acct_ic:
+        st.markdown(f'<div class="fl-rail-node account">{sidebar_icon("lock")}</div>', unsafe_allow_html=True)
+    with _acct_ct:
+        st.markdown('<div class="fl-rail-title">Account</div>', unsafe_allow_html=True)
+        render_logout_control()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CURRENCY — Live exchange rate & fmt() helper

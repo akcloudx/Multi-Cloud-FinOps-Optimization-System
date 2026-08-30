@@ -28,7 +28,7 @@ from db.users import (
     ensure_demo_user, DEMO_USERNAME, DEMO_PASSWORD,
 )
 from db.sessions import create_session, get_session, delete_session
-from ui.styling import inject_global_css
+from ui.styling import inject_global_css, sidebar_icon
 
 _ENV_MODE_BY_MODE = {"demo": "Demo / Benchmark Mode", "live": "Production"}
 
@@ -476,7 +476,7 @@ def render_logout_control():
     # over that default, since a real (truthy) target on the source tag is
     # exactly what that check looks for.
     st.markdown(
-        '<a class="fl-sidebar-linkbtn" href="/?logout=1" target="_self">Log out</a>',
+        f'<a class="fl-sidebar-linkbtn" href="/?logout=1" target="_self">{sidebar_icon("logout")}Log out</a>',
         unsafe_allow_html=True,
     )
 
@@ -497,7 +497,12 @@ def render_switch_mode_control():
     elsewhere - not a hypothetical."""
     env_mode = st.session_state.get("env_mode_widget", "Demo / Benchmark Mode")
     other_mode = "Production" if env_mode == "Demo / Benchmark Mode" else "Demo / Benchmark Mode"
-    st.caption(f"**Data Source Environment:** {env_mode}")
+    # Shortened to "Demo" for display only (2026-08-30, real feedback -
+    # "remove that benchmark") - env_mode itself keeps its real, full value
+    # ("Demo / Benchmark Mode"/"Production") since it's still the function's
+    # return value; this only trims the caption text shown right here.
+    env_mode_short = "Demo" if env_mode == "Demo / Benchmark Mode" else env_mode
+    st.markdown(f'<div class="fl-rail-env-line"><b>Environment:</b> {env_mode_short}</div>', unsafe_allow_html=True)
     # Same real-link fix as the Log out button (render_logout_control()
     # above) - this button signs out exactly the same way, so it needs the
     # identical treatment: a plain <a href target="_self">, not
@@ -511,7 +516,7 @@ def render_switch_mode_control():
         f'<a class="fl-sidebar-linkbtn" href="/?logout=1" target="_self" '
         f'title="Switching signs you out - sign back in for the other mode. '
         f'Demo and Live are fully separate accounts and data now, not just a '
-        f'view toggle.">🔁 Switch to {other_mode}</a>',
+        f'view toggle.">{sidebar_icon("swap")}Switch to {other_mode}</a>',
         unsafe_allow_html=True,
     )
     return env_mode

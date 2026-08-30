@@ -101,6 +101,13 @@ section[data-testid="stSidebar"] nav span {
     font-weight: 700 !important;
     text-transform: none !important;
 }
+/* More breathing room between Home/Tenant Management/User Management
+   (2026-08-30, real feedback: "very close tightened to each other") -
+   the individual nav links themselves, not the outer nav container, so
+   this only adds gaps BETWEEN items, not around the whole nav block. */
+[data-testid="stSidebarNavLink"] {
+    margin-bottom: 6px !important;
+}
 
 /* Login / setup gate hero heading - a bit more presence than a plain ## */
 .finops-hero-badge {
@@ -501,8 +508,64 @@ section[data-testid="stSidebar"] nav span {
 }
 .fl-sidebar-linkbtn:hover { background: #26364D; border-color: #45566E; }
 .fl-sidebar-linkbtn:visited { color: #F1F5F9 !important; }
+.fl-sidebar-linkbtn svg { flex-shrink: 0; opacity: .85; }
+
+/* Sidebar "rail" layout (2026-08-30, real feedback pass: "some new
+   visuals" for the 3 config sections, which had read as repetitive
+   stacked boxes in the prior bordered-card round). No boxes at all now -
+   a thin vertical gradient spine connects a colored icon node per
+   section, content sits indented to its right. Each section keeps its
+   own accent color (Cloud=blue, Display=green, Account=violet) so the
+   3 read as distinct without needing a border. Mocked up via Artifact
+   and approved before porting - inline SVG icons (Feather, MIT licensed),
+   see sidebar_icon() below.
+
+   Known limitations, disclosed rather than faked/left for the user to
+   discover live (this project's standing rule is no live browser testing
+   on my end, so anything not verifiable was simplified rather than
+   guessed): the mockup's absolute-positioned icon node on a continuous
+   gradient spine required precise cross-container CSS this app's real
+   Streamlit container boundaries make fragile to get right blind - ported
+   as a plain flex row (st.columns, icon column + content column) instead,
+   real Streamlit layout primitives rather than absolute positioning, at
+   the cost of the literal connecting line between sections. Separately,
+   the top nav (Home/Tenant Management/User Management) is Streamlit's own
+   native st.navigation() widget, a DOM region this app can style but
+   can't inject custom rail-node HTML into - its own spacing fix is
+   separate, see [data-testid="stSidebarNavLink"] above. */
+.fl-rail-node {
+    width: 32px; height: 32px; border-radius: 50%; margin-top: 2px;
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 0 0 1px currentColor;
+}
+.fl-rail-node.cloud   { background: rgba(96,165,250,.14); color: #60A5FA; }
+.fl-rail-node.display { background: rgba(52,211,153,.14); color: #34D399; }
+.fl-rail-node.account { background: rgba(167,139,250,.14); color: #A78BFA; }
+.fl-rail-title { font-size: 13.5px; font-weight: 700; color: #F1F5F9; padding-top: 6px; margin-bottom: 4px; }
+.fl-rail-env-line { font-size: 12px; color: #94A3B8; margin: 10px 0 12px; line-height: 1.5; }
+.fl-rail-env-line b { color: #F1F5F9; font-weight: 600; }
 </style>
 """
+
+# Feather Icons (MIT licensed) path data, inlined - see the .fl-rail-node
+# comment above for why this isn't a webfont. currentColor + no fixed fill
+# so each icon inherits whatever text color it's placed in.
+SIDEBAR_ICONS = {
+    "cloud":  '<path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/>',
+    "card":   '<rect x="1" y="4" width="22" height="16" rx="2" ry="2"/><line x1="1" y1="10" x2="23" y2="10"/>',
+    "lock":   '<rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+    "swap":   '<polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>',
+    "logout": '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>',
+}
+
+
+def sidebar_icon(name: str, size: int = 15) -> str:
+    """Inline <svg> string for the sidebar's icon set (see SIDEBAR_ICONS) -
+    embed directly into any unsafe_allow_html markdown/HTML string."""
+    return (
+        f'<svg width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+        f'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">{SIDEBAR_ICONS[name]}</svg>'
+    )
 
 
 def inject_global_css():
