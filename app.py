@@ -230,10 +230,45 @@ def _render_azure_connect_form(key_prefix: str, mode: str = "live"):
         if new_az.is_complete:
             with st.spinner("Auditing Tenant & Subscription RBAC permissions..."):
                 test_res = test_connection(new_az)
+                # Real bug fixed 2026-08-30, caught live on a production
+                # deployment: this button only ever ran test_connection(),
+                # which only checks SUBSCRIPTION-scoped roles (Reader/Cost
+                # Management Reader) via check_role_assignments() - it never
+                # called check_tenant_role_assignments() at all, so the
+                # TENANT-wide Reservations Reader/Savings Plan Reader roles
+                # were never actually verified here, even though "Permission
+                # Audit Passed!" implied everything was checked. Worse: the
+                # "Verified Roles" caption below used to print
+                # test_res["roles_verified"] directly - check_role_
+                # assignments() returns the Service Principal's FULL raw
+                # assigned-role list there (every real role it happens to
+                # have), not just the ones this app actually requires, so a
+                # tenant with extra roles like "Billing Reader"/"Reservation
+                # Purchaser" saw those listed as if "verified" - genuinely
+                # misleading, since "Reservation Purchaser" is a real but
+                # completely DIFFERENT Azure role from "Reservations
+                # Reader" (the one actually required), easy to mistake for
+                # coverage it doesn't provide. The Manage Tenant dialog
+                # never had this bug (it always called both checks via
+                # _run_tenant_permission_check/_render_role_checklist) -
+                # this now matches that same accurate pattern instead of
+                # its own separate, incomplete one.
+                tenant_check = check_tenant_role_assignments(new_az)
                 if test_res["success"]:
                     st.success(f"✅ **Permission Audit Passed!** {test_res['message']}")
                     st.info(f"📋 **Accessible Subscriptions in Tenant ({len(test_res['subscriptions'])}):** {', '.join(test_res['subscriptions'])}")
-                    st.caption(f"Verified Roles: {', '.join(test_res['roles_verified'])}")
+                    st.markdown("**Subscription-level roles** (Inventory & Cost data):")
+                    _render_role_checklist(REQUIRED_SUBSCRIPTION_ROLES, "", ", ".join(test_res.get("roles_verified", [])))
+                    st.markdown("**Tenant-level roles** (Reserved Instance / Savings Plan data):")
+                    if tenant_check["checked"]:
+                        _render_role_checklist(REQUIRED_TENANT_ROLES, "", ", ".join(tenant_check["assigned_roles"]))
+                        if not tenant_check["ready"]:
+                            st.caption(
+                                "Missing one or more tenant-wide roles above - Inventory/Cost sync will still "
+                                "work, but Reservation/Savings Plan data will fail to sync until these are granted."
+                            )
+                    else:
+                        st.caption(f"Could not check tenant-level roles: {tenant_check.get('error') or 'unknown error'}")
                 else:
                     st.error(f"❌ **Permission Test Failed:** {test_res['message']}")
         else:

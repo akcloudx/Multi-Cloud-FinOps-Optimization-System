@@ -245,7 +245,19 @@ def _friendly_auth_error(err: str) -> str:
         return "Application not found - check the Tenant ID and Application ID are correct."
     if "AuthorizationFailed" in err:
         return "Authenticated successfully, but the required role isn't assigned at this scope yet."
-    return err[:250]
+    # Widened 250 -> 450 chars (2026-08-30, real bug caught live on a
+    # production deployment: a genuine, unrecognized BadRequest from Azure
+    # got cut off mid-sentence at 250 chars, right where the actual
+    # diagnostic detail - the real Code/Message the user would need to
+    # actually fix the problem - would have started). Azure SDK
+    # HttpResponseError's own str() is genuinely verbose (often repeats
+    # its own "Message:"/support-timestamp boilerplate), so a short cap
+    # here isn't fixing that verbosity, just hiding the useful part along
+    # with it. 450 leaves headroom under the real DB column size this
+    # ultimately lands in (cloud_tenants.last_sync_message, VARCHAR(500) -
+    # see db/schema.py) once the "API Sync Failed: " prefix is added back
+    # by the caller.
+    return err[:450]
 
 
 def status_from_role_check(role_check: dict) -> tuple:

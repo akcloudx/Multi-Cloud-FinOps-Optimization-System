@@ -158,90 +158,109 @@ def run_ingestion_pipeline(provider: str = "Azure", creds=None, force_mock: bool
             # instanceType/region/OS (see db/schema.py's RetailPrice
             # comment) - so each provider builds its own per-record lookup
             # key to match.
-            if is_azure:
-                rates = refresh_retail_prices(engine, records, provider=provider) if records else {}
-                for r in records:
-                    key = (r.get("SKU"), r.get("Region"), r.get("OS"))
-                    if key in rates:
-                        r["PAYG Hourly Cost USD"] = rates[key]
-            else:
-                rates = refresh_aws_prices(engine, records, live_creds) if records else {}
-                for r in records:
-                    key = (r.get("Resource Type"), r.get("SKU"), r.get("Region"), r.get("OS"), r.get("Redundancy") or "N/A")
-                    if key in rates:
-                        r["PAYG Hourly Cost USD"] = rates[key]
-
-            # Real 1yr/3yr Savings Plan + Reserved Instance rates for every
-            # SKU/region/OS just synced - what savings_plan_analysis() and
-            # reservation_analysis() use instead of a flat safety-buffer guess.
-            # AWS branch added 2026-08-28: only Reserved Instance rates
-            # actually get populated for AWS (aws_creds threaded through for
-            # pricing/aws_ri_offerings.py's live Describe*Offerings calls) -
-            # AWS Savings Plans pricing stays on its own separate mechanism
-            # (see pricing/commitment_pricing.py's module docstring), so
-            # _fetch_aws_sp_rates stays a no-op stub either way.
-            if records:
-                refresh_commitment_prices(engine, records, provider=provider, aws_creds=(None if is_azure else live_creds))
-
-            # VM Reserved Instance instance-size-flexibility group/ratio
-            # cache (Azure only - AWS's equivalent is hardcoded, no live
-            # fetch needed, see analysis/engine.py::_apply_aws_size_flexibility).
-            # Best-effort per region internally (see
-            # pricing/azure_vm_flexibility.py) - a catalog-fetch failure
-            # can't block an otherwise-successful inventory sync, same
-            # discipline as the ri_sp_error isolation above.
-            if is_azure and records:
-                refresh_vm_flexibility_groups(engine, records, live_creds)
-
-            # Derive this app's simplified Commitment rows from the raw
-            # purchase records. Azure's Reservations carry no $ amount at
-            # all - pricing/commitment_mapping.py needs a real 1yr/3yr rate
-            # looked up separately (Retail Prices API). AWS's Reservations
-            # already carry UsagePrice/FixedPrice/Duration, so
-            # pricing/aws_commitment_mapping.py computes the effective
-            # hourly rate directly - no separate lookup step, and no
-            # "(fields, lookup)" tuple shape needed the way Azure's does.
-            # Both providers' Savings Plans already carry their own $/hr
-            # rate and need no lookup either way.
+            # Real bug fixed 2026-08-30, caught live "again" by the user on a
+            # production deployment - same regression class as the ri_sp_error
+            # isolation above, just a different unprotected stretch of this
+            # same try block: refresh_commitment_prices()/
+            # refresh_vm_flexibility_groups()/commitment-field derivation
+            # below were the ONE remaining piece of this function not isolated
+            # - a failure in any of them (e.g. the same missing tenant-wide
+            # role hitting a live Reservation/Savings Plan price lookup, or
+            # any transient Azure API error) propagated all the way to the
+            # OUTER except at the bottom of this function, discarding the
+            # inventory `records` already fetched above and reporting the
+            # WHOLE sync as FAILED with zero rows written - even though
+            # inventory itself was never the problem. Isolated in its own
+            # try/except now, same principle as ri_sp_error: pricing/
+            # flex-group enrichment is real and useful, but secondary to
+            # inventory ever getting saved at all. reservation_commitments/
+            # savings_plan_commitments moved OUTSIDE this try (not declared
+            # inside it) so they're always real empty lists, never undefined,
+            # if an exception fires partway through.
             reservation_commitments = []
             savings_plan_commitments = []
+            enrichment_error = None
+            try:
+                if is_azure:
+                    rates = refresh_retail_prices(engine, records, provider=provider) if records else {}
+                    for r in records:
+                        key = (r.get("SKU"), r.get("Region"), r.get("OS"))
+                        if key in rates:
+                            r["PAYG Hourly Cost USD"] = rates[key]
+                else:
+                    rates = refresh_aws_prices(engine, records, live_creds) if records else {}
+                    for r in records:
+                        key = (r.get("Resource Type"), r.get("SKU"), r.get("Region"), r.get("OS"), r.get("Redundancy") or "N/A")
+                        if key in rates:
+                            r["PAYG Hourly Cost USD"] = rates[key]
 
-            if is_azure:
-                ri_pricing_lookup_rows = []
-                for r in reservation_records:
-                    fields = derive_reservation_commitment_fields(r)
-                    if fields is None:
-                        continue
-                    lookup = fields.pop("_pricing_lookup")
-                    fields["commitment_id"] = _reservation_commitment_id(r)
-                    reservation_commitments.append((fields, lookup))
-                    ri_pricing_lookup_rows.append({
-                        "resource_type": lookup["resource_type"], "sku": lookup["sku"],
-                        "region": lookup["region"], "os": lookup["os"], "redundancy": lookup["redundancy"],
-                    })
-                if ri_pricing_lookup_rows:
-                    refresh_commitment_prices(engine, ri_pricing_lookup_rows, provider="Azure")
+                # Real 1yr/3yr Savings Plan + Reserved Instance rates for every
+                # SKU/region/OS just synced - what savings_plan_analysis() and
+                # reservation_analysis() use instead of a flat safety-buffer guess.
+                # AWS branch added 2026-08-28: only Reserved Instance rates
+                # actually get populated for AWS (aws_creds threaded through for
+                # pricing/aws_ri_offerings.py's live Describe*Offerings calls) -
+                # AWS Savings Plans pricing stays on its own separate mechanism
+                # (see pricing/commitment_pricing.py's module docstring), so
+                # _fetch_aws_sp_rates stays a no-op stub either way.
+                if records:
+                    refresh_commitment_prices(engine, records, provider=provider, aws_creds=(None if is_azure else live_creds))
 
-                for s in savings_plan_records:
-                    fields = derive_savings_plan_commitment_fields(s)
-                    if fields.get("hourly_usd_commitment") is None:
-                        continue   # commitment.grain wasn't 'Hourly' - can't fabricate a rate, skip rather than guess.
-                    fields["commitment_id"] = _savings_plan_commitment_id(s)
-                    savings_plan_commitments.append(fields)
-            else:
-                for r in reservation_records:
-                    fields = derive_aws_reservation_commitment_fields(r)
-                    if fields is None:
-                        continue   # unrecognized service, or duration wasn't a real 1yr/3yr value - see pricing/aws_commitment_mapping.py.
-                    fields["commitment_id"] = _aws_reservation_commitment_id(r)
-                    reservation_commitments.append(fields)
+                # VM Reserved Instance instance-size-flexibility group/ratio
+                # cache (Azure only - AWS's equivalent is hardcoded, no live
+                # fetch needed, see analysis/engine.py::_apply_aws_size_flexibility).
+                if is_azure and records:
+                    refresh_vm_flexibility_groups(engine, records, live_creds)
 
-                for s in savings_plan_records:
-                    fields = derive_aws_savings_plan_commitment_fields(s)
-                    if fields is None:
-                        continue   # SageMaker/Database Savings Plan type - no bucket in this app's UI, see pricing/aws_commitment_mapping.py.
-                    fields["commitment_id"] = _aws_savings_plan_commitment_id(s)
-                    savings_plan_commitments.append(fields)
+                # Derive this app's simplified Commitment rows from the raw
+                # purchase records. Azure's Reservations carry no $ amount at
+                # all - pricing/commitment_mapping.py needs a real 1yr/3yr rate
+                # looked up separately (Retail Prices API). AWS's Reservations
+                # already carry UsagePrice/FixedPrice/Duration, so
+                # pricing/aws_commitment_mapping.py computes the effective
+                # hourly rate directly - no separate lookup step, and no
+                # "(fields, lookup)" tuple shape needed the way Azure's does.
+                # Both providers' Savings Plans already carry their own $/hr
+                # rate and need no lookup either way.
+                if is_azure:
+                    ri_pricing_lookup_rows = []
+                    for r in reservation_records:
+                        fields = derive_reservation_commitment_fields(r)
+                        if fields is None:
+                            continue
+                        lookup = fields.pop("_pricing_lookup")
+                        fields["commitment_id"] = _reservation_commitment_id(r)
+                        reservation_commitments.append((fields, lookup))
+                        ri_pricing_lookup_rows.append({
+                            "resource_type": lookup["resource_type"], "sku": lookup["sku"],
+                            "region": lookup["region"], "os": lookup["os"], "redundancy": lookup["redundancy"],
+                        })
+                    if ri_pricing_lookup_rows:
+                        refresh_commitment_prices(engine, ri_pricing_lookup_rows, provider="Azure")
+
+                    for s in savings_plan_records:
+                        fields = derive_savings_plan_commitment_fields(s)
+                        if fields.get("hourly_usd_commitment") is None:
+                            continue   # commitment.grain wasn't 'Hourly' - can't fabricate a rate, skip rather than guess.
+                        fields["commitment_id"] = _savings_plan_commitment_id(s)
+                        savings_plan_commitments.append(fields)
+                else:
+                    for r in reservation_records:
+                        fields = derive_aws_reservation_commitment_fields(r)
+                        if fields is None:
+                            continue   # unrecognized service, or duration wasn't a real 1yr/3yr value - see pricing/aws_commitment_mapping.py.
+                        fields["commitment_id"] = _aws_reservation_commitment_id(r)
+                        reservation_commitments.append(fields)
+
+                    for s in savings_plan_records:
+                        fields = derive_aws_savings_plan_commitment_fields(s)
+                        if fields is None:
+                            continue   # SageMaker/Database Savings Plan type - no bucket in this app's UI, see pricing/aws_commitment_mapping.py.
+                        fields["commitment_id"] = _aws_savings_plan_commitment_id(s)
+                        savings_plan_commitments.append(fields)
+            except Exception as e:
+                enrichment_error = str(e)[:300]
+                reservation_commitments, savings_plan_commitments = [], []
 
             with Session(engine) as session:
                 # Replace this tenant's prior snapshot so removed/renamed Azure
@@ -331,9 +350,10 @@ def run_ingestion_pipeline(provider: str = "Azure", creds=None, force_mock: bool
                     session.add(Commitment(**fields, provider=provider, tenant_id=tenant_db_id))
 
                 # PARTIAL (not FAILED) when inventory synced fine but RI/SP
-                # fetch hit its own error - the inventory portion is real,
-                # useful progress and shouldn't be reported as a failed sync.
-                status = "PARTIAL" if ri_sp_error else "SUCCESS"
+                # fetch or pricing/flex-group enrichment hit its own error -
+                # the inventory portion is real, useful progress and
+                # shouldn't be reported as a failed sync.
+                status = "PARTIAL" if (ri_sp_error or enrichment_error) else "SUCCESS"
                 session.add(SyncLog(
                     synced_at=now_iso,
                     provider=provider,
@@ -422,6 +442,11 @@ def run_ingestion_pipeline(provider: str = "Azure", creds=None, force_mock: bool
                 message = (
                     f"Inventory synced: {synced_count} resource(s). Reservation/Savings Plan fetch skipped - "
                     f"{ri_sp_error}"
+                )
+            elif enrichment_error:
+                message = (
+                    f"Inventory synced: {synced_count} resource(s). Pricing/flexibility-group enrichment "
+                    f"skipped - {enrichment_error}"
                 )
             else:
                 message = (
