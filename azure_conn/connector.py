@@ -972,6 +972,69 @@ Resources
 | order by type asc, name asc
 """
 
+
+def _strip_kql_comments(query: str) -> str:
+    """Removes // line comments from a KQL query string before it's sent to
+    Azure Resource Graph - real bug fixed 2026-08-30, caught live on a
+    production deployment (a genuine, reproducible ParserFailure with real
+    line/character/token detail, requested from the user via Resource Graph
+    Explorer specifically to pin this down rather than guess blind).
+
+    The error pointed directly at a normal `=` in a plain extend assignment
+    (pgMysqlSkuName = tostring(sku.name)) sitting right after a comment
+    block dense with double-quoted words ("Burstable"/"GeneralPurpose"/...),
+    with a second error further down reporting <EOF> - the classic shape of
+    a lexer losing track of string-literal boundaries partway through and
+    never recovering. Counted every apostrophe across this query's own
+    273 comment-only lines (this file's documentation style leans heavily
+    on possessives - "Microsoft's own ARM template reference", "this app's
+    own convention", etc. - accumulated one new resource type's comment
+    block at a time across many editing rounds) and found an ODD total
+    (99) - consistent with an unmatched quote character somewhere breaking
+    Resource Graph's own parser, even though standard KQL comment handling
+    should make this a non-issue. Rather than hunt down and rephrase
+    apostrophes scattered across hundreds of comment lines (fragile - the
+    next edit could just reintroduce the same accidental parity break),
+    comments are stripped from the query text actually SENT to Azure here,
+    while staying in the source file above for developers reading this
+    code - they serve no purpose to Azure's API either way.
+
+    Quote-aware (tracks single/double-quoted string state) rather than a
+    naive per-line strip, so a real KQL string literal that happened to
+    contain "//" would not be mistaken for a comment - not a concern for
+    this app's current query (its only string literals are resource type
+    paths like 'microsoft.compute/virtualmachines', which never contain
+    "//"), but a correct general-purpose implementation rather than one
+    that would silently corrupt a future query containing a URL or similar."""
+    out = []
+    in_string = None
+    i = 0
+    n = len(query)
+    while i < n:
+        c = query[i]
+        if in_string:
+            out.append(c)
+            if c == in_string:
+                in_string = None
+            i += 1
+            continue
+        if c in ("'", '"'):
+            in_string = c
+            out.append(c)
+            i += 1
+            continue
+        if c == "/" and i + 1 < n and query[i + 1] == "/":
+            while i < n and query[i] != "\n":
+                i += 1
+            continue
+        out.append(c)
+        i += 1
+    # Collapse the blank lines left behind by removed comment-only lines -
+    # not required for correctness, just keeps the query compact if it's
+    # ever logged/inspected for debugging.
+    return "\n".join(line for line in "".join(out).split("\n") if line.strip())
+
+
 def _fetch_ssis_ir_states(credential, subscription_id: str, ir_rows: list) -> dict:
     """Azure-SSIS Integration Runtime's Started/Stopped state isn't a stored
     ARM property Resource Graph can see at all (confirmed via Microsoft's
@@ -1037,7 +1100,7 @@ def fetch_live_inventory(creds: AzureCredentials) -> pd.DataFrame:
     client = ResourceGraphClient(credential)
     request = QueryRequest(
         subscriptions=[creds.subscription_id],
-        query=RESOURCE_GRAPH_QUERY,
+        query=_strip_kql_comments(RESOURCE_GRAPH_QUERY),
     )
     result = client.resources(request)
     rows = result.data if result.data else []
