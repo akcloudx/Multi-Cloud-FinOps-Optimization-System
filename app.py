@@ -1301,7 +1301,19 @@ def page_tenant_management():
             disabled=add_disabled,
             help="Only available in Production Mode." if add_disabled else None,
         ):
+            # st.rerun() added - real bug caught live: `_form_open` is read
+            # at the TOP of this run, before this click's effect is known,
+            # so without forcing an immediate fresh run the button's own
+            # label always lagged one click behind the form's actual open/
+            # closed state (the form itself updated correctly on the same
+            # run, since its `if st.session_state.get(...)` check further
+            # down reads the flag AFTER this block already wrote it - only
+            # the button's label, computed too early, was stale). Same
+            # "force a rerun so state and its own label repaint together"
+            # pattern already used everywhere else in this app for exactly
+            # this reason.
             st.session_state["_show_add_tenant_form"] = not _form_open
+            st.rerun()
 
     if st.session_state.get("_show_add_tenant_form") and tenant_mode == "live":
         with st.container(border=True):
