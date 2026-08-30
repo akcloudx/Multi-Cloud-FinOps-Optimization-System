@@ -364,14 +364,29 @@ def _render_demo_login():
     # (real user feedback), and the fields right below already show the
     # actual pre-filled values, so the message wasn't adding information
     # anyway, just a color clash.
-    with st.form("demo_login_form"):
-        username = st.text_input("Username", value=DEMO_USERNAME)
-        password = st.text_input("Password", value=DEMO_PASSWORD, type="password")
-        submitted = st.form_submit_button("Sign In", type="primary", use_container_width=True)
+    # Wrapped in its own placeholder, 2026-08-30 - real gap the user caught
+    # live: after a successful login, this exact form stayed on screen as a
+    # "watermark" for the several seconds init_all_databases()/
+    # load_live_data() take to actually run (both happen well after this
+    # function returns, and Streamlit doesn't clear old elements until NEW
+    # ones arrive to replace them - a plain st.rerun() alone doesn't blank
+    # the screen at the instant it's called). Scoped to just this form (not
+    # the whole hero/features/process landing page around it, which has its
+    # own documented HTML-fragility history in this file) - redrawing INTO
+    # the same placeholder replaces its content immediately, in this same
+    # run, before the rerun/slow startup work even begins.
+    _signin_ph = st.empty()
+    with _signin_ph.container():
+        with st.form("demo_login_form"):
+            username = st.text_input("Username", value=DEMO_USERNAME)
+            password = st.text_input("Password", value=DEMO_PASSWORD, type="password")
+            submitted = st.form_submit_button("Sign In", type="primary", use_container_width=True)
 
     if submitted:
         user = verify_login(username, password, mode="demo")
         if user:
+            with _signin_ph.container():
+                st.info("Signing you in...")
             _start_session(user, "demo")
             st.rerun()
         else:
@@ -423,14 +438,20 @@ def _render_production_login_form():
     # No mode heading here either (see _render_demo_login's comment) - both
     # the "Production Mode" button above and the card's own "Sign in" title
     # already say this.
-    with st.form("login_form"):
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
-        submitted = st.form_submit_button("Sign In", type="primary", use_container_width=True)
+    # Same placeholder-wrap fix as _render_demo_login above, same reason -
+    # see that function's comment.
+    _signin_ph = st.empty()
+    with _signin_ph.container():
+        with st.form("login_form"):
+            username = st.text_input("Username")
+            password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Sign In", type="primary", use_container_width=True)
 
     if submitted:
         user = verify_login(username, password, mode="live")
         if user:
+            with _signin_ph.container():
+                st.info("Signing you in...")
             # Lands directly on Home (tenant connection happens there now,
             # via its own "Add a new tenant" - no separate gate screen).
             _start_session(user, "live")
