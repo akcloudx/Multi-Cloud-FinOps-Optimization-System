@@ -193,6 +193,13 @@ def _render_landing_hero():
         f'<a href="#fl-signin-anchor" class="fl-btn-primary">Sign in to your dashboard{_icon("arrow", 16, "#0B1120")}</a>'
         '<a href="#fl-features-anchor" class="fl-link-secondary">See how it works ↓</a>'
         "</div>"
+        # Dark Mode note deliberately NOT duplicated here too, 2026-08-30 -
+        # first pass added it both here and in the Sign In card
+        # (_render_landing_closing_cta below); real feedback that one place
+        # is enough, and the card is the better single spot - a returning
+        # visitor (most real usage over time) clicks the anchor link
+        # straight to the card, bypassing this hero section entirely, so
+        # keeping it there catches more visits than keeping it here would.
         '<p class="fl-trustline">Demo Mode available — explore with realistic sample data before connecting a real tenant.</p>'
         "</div>"
         '<div class="fl-heroright"><div class="fl-previewcard">'
@@ -331,6 +338,14 @@ def _render_landing_closing_cta(mode: str):
         # `st-key-fl_signin_card` CSS class Streamlit itself guarantees.
         with st.container(border=True, key="fl_signin_card"):
             st.markdown('<div class="fl-login-card-title">Sign in</div>', unsafe_allow_html=True)
+            # Added 2026-08-30, real feedback: the hero's own "Best
+            # experienced in Dark Mode" note (_render_landing_hero above)
+            # can be scrolled/jumped past entirely via the "Sign in to your
+            # dashboard" anchor link landing straight here - a second,
+            # shorter mention right at the actual point of signing in
+            # catches whoever missed it. st.caption() (a real widget, not
+            # more raw HTML) is enough for a one-line aside like this.
+            st.caption("💡 Best experienced in Dark Mode — switch via the ⋮ menu, top right.")
             # In-card mode switcher, always visible regardless of scroll
             # position. Both buttons write the plain "login_mode" session-
             # state key require_login() reads at the top of the script -

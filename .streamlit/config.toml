@@ -3,6 +3,20 @@
 
 # ── Shared typography & radius (top-level, applies to both modes) ─────────────
 [theme]
+# base="dark" added 2026-08-30 - real feedback: this whole app's UI work
+# was built and tuned against the dark palette below; without an explicit
+# base, Streamlit's own documented default behavior is to follow the
+# VISITOR's OS/browser Light/Dark preference first, falling back to Light
+# only if it can't detect one (confirmed against Streamlit's own docs,
+# not assumed) - meaning anyone whose system prefers light mode got the
+# light palette by default, unpolished by comparison. This sets dark as
+# the app's own explicit default. Note this doesn't remove the Settings
+# menu's Light/Dark/System toggle itself (Streamlit has no documented way
+# to hide just that one item) - a visitor can still manually pick Light -
+# so this is paired with an explicit on-page note recommending Dark Mode
+# (ui/auth_page.py's landing hero), which is the part that's guaranteed
+# to work regardless of any OS-level override nuance.
+base = "dark"
 font = "'Inter':https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
 headingFont = "'Inter':https://fonts.googleapis.com/css2?family=Inter:wght@600;700&display=swap"
 codeFont = "'JetBrains Mono':https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"
