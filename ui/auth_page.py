@@ -345,7 +345,7 @@ def _render_landing_closing_cta(mode: str):
             # shorter mention right at the actual point of signing in
             # catches whoever missed it. st.caption() (a real widget, not
             # more raw HTML) is enough for a one-line aside like this.
-            st.caption("💡 Best experienced in Dark Mode — switch via the ⋮ menu, top right.")
+            st.caption("💡 Best experienced in Dark Mode (⋮ menu, top right).")
             # In-card mode switcher, always visible regardless of scroll
             # position. Both buttons write the plain "login_mode" session-
             # state key require_login() reads at the top of the script -

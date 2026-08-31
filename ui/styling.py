@@ -281,6 +281,7 @@ section[data-testid="stSidebar"] nav span {
     font-size: 12.5px !important; color: #E2E8F0 !important; -webkit-text-fill-color: #E2E8F0 !important;
 }
 .st-key-fl_signin_card label p { font-size: 11px !important; font-weight: 600 !important; color: #94A3B8 !important; }
+.st-key-fl_signin_card [data-testid="stCaptionContainer"] p { white-space: nowrap; }
 .st-key-fl_signin_card [data-testid="stAlertContainer"],
 .st-key-fl_signin_card .stAlertContainer {
     background: rgba(96,165,250,.09) !important; border: 1px solid rgba(96,165,250,.25) !important;
