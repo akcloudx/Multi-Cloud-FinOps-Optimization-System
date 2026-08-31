@@ -132,6 +132,14 @@ $SqlDbName          = "finops-db"
 $FunctionAppName    = "func-$AppNamePrefix-$suffix"
 $WebAppName         = "app-$AppNamePrefix-$suffix"
 $AppPlanName        = "plan-$AppNamePrefix-$suffix"
+# Separate from $AppPlanName (that one hosts the Web App) - the Function
+# App gets its own Consumption/Dynamic plan, auto-created and auto-named
+# by `az functionapp create --consumption-plan-location` if left
+# unnamed (e.g. "WestUS3LinuxDynamicPlan" - real gap the user caught live
+# after a fresh deploy). See this script's own step 5 comment for why
+# giving it a real name needs a different, lower-level command than every
+# other resource here.
+$FunctionPlanName   = "plan-func-$AppNamePrefix-$suffix"
 
 # Storage Account names have the strictest real limit of any resource
 # named here - 3-24 characters, enforced by Azure itself (a name over 24
@@ -236,6 +244,35 @@ $SqlServerFqdn = "$SqlServerName.database.windows.net"
 Write-Host "  [5/7] Azure Function App: $FunctionAppName ..." -ForegroundColor Yellow
 $funcExists = az functionapp show --name $FunctionAppName --resource-group $ResourceGroupName --query name -o tsv 2>$null
 if (-not $funcExists) {
+    # Consumption/Dynamic (Y1) hosting plan created EXPLICITLY and named,
+    # 2026-08-30 - real gap the user caught live after a fresh deploy:
+    # passing --consumption-plan-location (below) to `az functionapp
+    # create` without an explicit --plan makes Azure auto-provision an
+    # UNNAMED plan with its own generated name (e.g.
+    # "WestUS3LinuxDynamicPlan") - not something this script or the user
+    # ever chose. Naming it ourselves turns out to need a genuinely
+    # different, lower-level command than every other resource in this
+    # script: confirmed via Azure CLI's own GitHub issue tracker
+    # (Azure/azure-cli#11195, #19864) that `az functionapp plan create`/
+    # `az appservice plan create` do NOT support the Y1/Dynamic Consumption
+    # tier at all - only paid tiers (B1, S1, EP1, ...). The documented
+    # workaround is a raw ARM resource create against
+    # Microsoft.Web/serverfarms with an explicit sku.name="Y1"/
+    # sku.tier="Dynamic" JSON body - that's what this is. Getting this
+    # SKU/tier wrong would silently switch to a BILLED plan on a
+    # budget-conscious student subscription, so this is deliberately
+    # exact, not approximate - verify after deploying with
+    # `az functionapp plan show --name $FunctionPlanName --resource-group
+    # $ResourceGroupName --query sku` and confirm it still reports
+    # "Dynamic"/"Y1" if you ever touch this block.
+    $funcPlanExists = az functionapp plan show --name $FunctionPlanName --resource-group $ResourceGroupName --query name -o tsv 2>$null
+    if (-not $funcPlanExists) {
+        Write-Host "        Creating named Consumption plan '$FunctionPlanName'..." -ForegroundColor Yellow
+        $planJson = "{`"location`":`"$Location`",`"sku`":{`"name`":`"Y1`",`"tier`":`"Dynamic`"}}"
+        az resource create --resource-group $ResourceGroupName --name $FunctionPlanName --resource-type "Microsoft.Web/serverfarms" --is-full-object --properties $planJson -o none
+        if ($LASTEXITCODE -ne 0) { Fail "Creating named Consumption plan '$FunctionPlanName'" }
+    }
+
     # --disable-app-insights added 2026-08-30, real feedback: without it,
     # `az functionapp create` silently provisions an Application Insights
     # resource (and, per current Azure platform behavior, a backing Log
@@ -244,7 +281,11 @@ if (-not $funcExists) {
     # confirmed via a full repo grep for "Application Insights"/"Log
     # Analytics"/"APPINSIGHTS" before removing it, not assumed. Pure
     # unused monitoring infrastructure this deployment never asked for.
-    az functionapp create --resource-group $ResourceGroupName --consumption-plan-location $Location --runtime python --runtime-version 3.12 --functions-version 4 --name $FunctionAppName --storage-account $StorageAccountName --os-type Linux --disable-app-insights true -o none
+    #
+    # --plan (the just-created named plan above) replaces
+    # --consumption-plan-location here - passing both is invalid, and
+    # --plan alone is what avoids the auto-generated-name behavior.
+    az functionapp create --resource-group $ResourceGroupName --plan $FunctionPlanName --runtime python --runtime-version 3.12 --functions-version 4 --name $FunctionAppName --storage-account $StorageAccountName --os-type Linux --disable-app-insights true -o none
     if ($LASTEXITCODE -ne 0) { Fail "Creating Function App '$FunctionAppName'" }
     Start-Sleep -Seconds 5
     Write-Host "        [OK] Provisioned." -ForegroundColor Green

@@ -9,8 +9,8 @@ name: Deploy FinOps App to Azure
 #      "Publish Profile" (Overview page -> Get publish profile).
 #   2. In this GitHub repo: Settings -> Secrets and variables -> Actions,
 #      add:
-#        AZURE_WEBAPP_PUBLISH_PROFILE      = contents of the App Service's publish profile
-#        AZURE_FUNCTIONAPP_PUBLISH_PROFILE = contents of the Function App's publish profile
+#        AZURE_WEBAPP_FINOPS_PUBLISH_PROFILE  = contents of the App Service's publish profile
+#        AZURE_FUNCTION_FINOPS_PUBLISH_PROFILE = contents of the Function App's publish profile
 #   3. Update the app/function names below if they ever change (they're
 #      derived from -AppNamePrefix/-OwnerHandle in
 #      azure_deploy/deploy_all_resources.ps1 - see that script's header
@@ -44,7 +44,7 @@ jobs:
         uses: azure/webapps-deploy@v3
         with:
           app-name: ${{ env.AZURE_WEBAPP_NAME }}
-          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+          publish-profile: ${{ secrets.AZURE_WEBAPP_FINOPS_PUBLISH_PROFILE }}
           package: dist
 
   deploy-function:
@@ -76,7 +76,7 @@ jobs:
         with:
           app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
           package: dist-func
-          publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}
+          publish-profile: ${{ secrets.AZURE_FUNCTION_FINOPS_PUBLISH_PROFILE }}
           # Azure/functions-action@v1 defaults BOTH of these to false when
           # unset (confirmed from a real run's log, 2026-08-16: "Setting
           # SCM_DO_BUILD_DURING_DEPLOYMENT in Kudu container to false") - the
