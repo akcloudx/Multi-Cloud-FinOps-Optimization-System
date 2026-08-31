@@ -22,6 +22,7 @@ for exactly that reason - it should always be
 guessed.
 """
 
+import re
 from datetime import datetime
 from typing import Optional
 
@@ -75,14 +76,44 @@ def ensure_demo_user() -> None:
         session.commit()
 
 
+def validate_password_strength(password: str) -> None:
+    """Raises ValueError with a specific, actionable reason if the password
+    doesn't meet the strength bar. Added 2026-08-30, real feedback: the old
+    rule was 8 characters and nothing else - weaker than what mature apps
+    typically require. Centralized HERE and called from every real
+    password-setting function (create_user, update_user_password) instead
+    of being duplicated inline at each UI call site - that duplication was
+    real, not hypothetical: this exact "at least 8 characters" check was
+    independently copy-pasted in THREE places (here, the Add User form in
+    app.py, and the production bootstrap form in ui/auth_page.py) before
+    this fix, the same "one rule, N copies, N-1 eventually drift" pattern
+    already fixed elsewhere in this app for AWS policies/RBAC roles.
+    create_user() previously had NO internal enforcement at all - it relied
+    entirely on its callers' own inline checks, unlike update_user_password()
+    which already validated internally - a real inconsistency, not by design."""
+    password = password or ""
+    if len(password) < 8:
+        raise ValueError("Password must be at least 8 characters long.")
+    if not re.search(r'[A-Z]', password):
+        raise ValueError("Password must include at least one uppercase letter.")
+    if not re.search(r'[a-z]', password):
+        raise ValueError("Password must include at least one lowercase letter.")
+    if not re.search(r'[0-9]', password):
+        raise ValueError("Password must include at least one number.")
+    if not re.search(r'[^A-Za-z0-9]', password):
+        raise ValueError("Password must include at least one special character.")
+
+
 def create_user(username: str, password: str, display_name: str = "", mode: str = "live") -> int:
     """Creates a new user with a bcrypt-hashed password. Raises ValueError if
-    the username is already taken or either field is blank. mode defaults to
-    "live" since every real call site (production bootstrap, User Management's
+    the username is already taken, either field is blank, or the password
+    doesn't meet validate_password_strength()'s bar. mode defaults to "live"
+    since every real call site (production bootstrap, User Management's
     "add a user") only ever creates real accounts - never the demo one."""
     username = (username or "").strip()
     if not username or not password:
         raise ValueError("Username and password are both required.")
+    validate_password_strength(password)
 
     init_db(_ENGINE_PROVIDER, mode)
     now_iso = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -202,23 +233,32 @@ def update_user(user_id: int, mode: str, username: str = None, display_name: str
         session.commit()
 
 
-def update_user_password(user_id: int, new_password: str, mode: str) -> None:
+def update_user_password(user_id: int, new_password: str, mode: str, clear_must_change_password: bool = True) -> None:
     """Sets a new password for an existing user - same bcrypt hashing as
-    create_user(). Raises ValueError if the password is too short, matching
-    the same 8-char minimum already enforced on the Add User form. Clears
-    must_change_password unconditionally - whoever set this new password
-    (an admin via the Manage dialog, the user themselves via self-service
-    change, or the forced post-reactivation flow) has by definition just
-    satisfied whatever required the change."""
-    if len(new_password or "") < 8:
-        raise ValueError("Use at least 8 characters for the password.")
+    create_user(), same shared validate_password_strength() rule (see that
+    function's own comment for why this used to be a hand-duplicated
+    8-char-only check).
+
+    clear_must_change_password defaults True - whoever set this new
+    password (an admin via the Manage dialog, the user themselves via
+    self-service change, or the user themselves via the forced
+    post-reactivation flow) has by definition just satisfied whatever
+    required the change, in every case EXCEPT one: an admin setting a
+    TEMPORARY password AS PART OF reactivating an account (see
+    set_user_active()'s own comment on why this exists - the user may
+    genuinely have forgotten their old password across the deactivated
+    gap, so the admin needs a way to get them a working password without
+    that counting as "the user completed their own required change").
+    That one call site passes False explicitly."""
+    validate_password_strength(new_password)
     init_db(_ENGINE_PROVIDER, mode)
     with Session(get_engine(_ENGINE_PROVIDER, mode)) as session:
         user = session.query(AppUser).filter(AppUser.id == user_id).first()
         if not user:
             raise ValueError("User not found.")
         user.password_hash = bcrypt.hashpw(new_password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-        user.must_change_password = False
+        if clear_must_change_password:
+            user.must_change_password = False
         session.commit()
 
 

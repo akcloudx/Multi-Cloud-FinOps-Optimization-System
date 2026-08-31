@@ -379,8 +379,8 @@ def _render_demo_login():
     _signin_ph = st.empty()
     with _signin_ph.container():
         with st.form("demo_login_form"):
-            username = st.text_input("Username", value=DEMO_USERNAME)
-            password = st.text_input("Password", value=DEMO_PASSWORD, type="password")
+            username = st.text_input("Username", value=DEMO_USERNAME, autocomplete="username")
+            password = st.text_input("Password", value=DEMO_PASSWORD, type="password", autocomplete="current-password")
             submitted = st.form_submit_button("Sign In", type="primary", use_container_width=True)
 
     if submitted:
@@ -415,10 +415,10 @@ def _render_bootstrap_form():
         "More people can be added later from the User Management page."
     )
     with st.form("bootstrap_form"):
-        username = st.text_input("Username")
+        username = st.text_input("Username", autocomplete="username")
         display_name = st.text_input("Display name (optional)")
-        pw1 = st.text_input("Password", type="password")
-        pw2 = st.text_input("Confirm password", type="password")
+        pw1 = st.text_input("Password", type="password", autocomplete="new-password")
+        pw2 = st.text_input("Confirm password", type="password", autocomplete="new-password")
         submitted = st.form_submit_button("Create Account", type="primary", use_container_width=True)
 
     if submitted:
@@ -426,9 +426,11 @@ def _render_bootstrap_form():
             st.error("Username and password are both required.")
         elif pw1 != pw2:
             st.error("Passwords don't match.")
-        elif len(pw1) < 8:
-            st.error("Use at least 8 characters for the password.")
         else:
+            # Password strength is enforced INSIDE create_user() itself
+            # (db/users.py's shared validate_password_strength()) - same
+            # de-duplication as app.py's Add User form, see that call
+            # site's own comment.
             try:
                 create_user(username, pw1, display_name)
                 st.success("Account created — log in below.")
@@ -453,8 +455,8 @@ def _render_production_login_form():
             icon=":material/lock_reset:",
         )
         with st.form("forced_pw_change_form"):
-            new_pw1 = st.text_input("New password", type="password")
-            new_pw2 = st.text_input("Confirm new password", type="password")
+            new_pw1 = st.text_input("New password", type="password", autocomplete="new-password")
+            new_pw2 = st.text_input("Confirm new password", type="password", autocomplete="new-password")
             pw_submitted = st.form_submit_button("Set Password & Continue", type="primary", use_container_width=True)
         if pw_submitted:
             if new_pw1 != new_pw2:
@@ -477,8 +479,8 @@ def _render_production_login_form():
     _signin_ph = st.empty()
     with _signin_ph.container():
         with st.form("login_form"):
-            username = st.text_input("Username")
-            password = st.text_input("Password", type="password")
+            username = st.text_input("Username", autocomplete="username")
+            password = st.text_input("Password", type="password", autocomplete="current-password")
             submitted = st.form_submit_button("Sign In", type="primary", use_container_width=True)
 
     if submitted:
@@ -575,9 +577,9 @@ def render_change_password_control():
         return
     with st.expander("Change password", icon=":material/key:"):
         with st.form("change_password_form"):
-            current_pw = st.text_input("Current password", type="password")
-            new_pw1 = st.text_input("New password", type="password")
-            new_pw2 = st.text_input("Confirm new password", type="password")
+            current_pw = st.text_input("Current password", type="password", autocomplete="current-password")
+            new_pw1 = st.text_input("New password", type="password", autocomplete="new-password")
+            new_pw2 = st.text_input("Confirm new password", type="password", autocomplete="new-password")
             submitted = st.form_submit_button("Update password", type="primary", use_container_width=True)
         if submitted:
             if not verify_login(user["username"], current_pw, mode="live"):

@@ -332,7 +332,7 @@ def _render_azure_connect_form(key_prefix: str, mode: str = "live"):
             az_domain = st.text_input("Domain (optional)", value="", placeholder="contoso.onmicrosoft.com", key=f"{key_prefix}_az_domain")
         with col2:
             az_sub = st.text_input("Subscription ID", value="", placeholder="c3d4e5f6-7a8b-4c3d-9e4f-5a6b7c8d9e0f", key=f"{key_prefix}_az_sub")
-            az_sec = st.text_input("Client Secret", value="", type="password", key=f"{key_prefix}_az_sec")
+            az_sec = st.text_input("Client Secret", value="", type="password", key=f"{key_prefix}_az_sec", autocomplete="new-password")
 
         c_btn1, c_btn2 = st.columns(2)
         with c_btn1:
@@ -618,7 +618,7 @@ def _render_aws_connect_form(key_prefix: str, mode: str = "live"):
             aws_key = st.text_input("AWS Access Key ID", value="", placeholder="AKIAXXXXXXXXXXXXXXXX")
             aws_reg = st.text_input("Default AWS Region", value="us-east-1", placeholder="us-east-1")
         with col2:
-            aws_sec = st.text_input("AWS Secret Access Key", value="", type="password")
+            aws_sec = st.text_input("AWS Secret Access Key", value="", type="password", autocomplete="new-password")
 
         c_btn1, c_btn2 = st.columns(2)
         with c_btn1:
@@ -849,7 +849,7 @@ def _manage_tenant_dialog(t, mode: str):
                     aws_key_edit = st.text_input("AWS Access Key ID", value=t.client_id)
                     aws_reg_edit = st.text_input("Default AWS Region", value=t.tenant_id)
                     aws_sec_edit = st.text_input("AWS Secret Access Key", value="", type="password",
-                                                  placeholder="Leave blank to keep the current secret")
+                                                  placeholder="Leave blank to keep the current secret", autocomplete="new-password")
                     if st.form_submit_button("Save credentials", type="primary"):
                         secret_to_save = aws_sec_edit if aws_sec_edit else get_tenant_credentials(t)
                         upsert_tenant(
@@ -984,7 +984,7 @@ def _manage_tenant_dialog(t, mode: str):
                 with c2:
                     new_client_id = st.text_input("Application ID", value=t.client_id)
                     new_secret = st.text_input("Client secret", value="", type="password",
-                                                placeholder="Leave blank to keep the current secret")
+                                                placeholder="Leave blank to keep the current secret", autocomplete="new-password")
                 creds_submitted = st.form_submit_button("Save credentials", type="primary")
             if creds_submitted:
                 secret_to_save = new_secret if new_secret else get_tenant_credentials(t)
@@ -1473,7 +1473,7 @@ def _manage_user_dialog(u, mode: str):
         st.success(_toast)
 
     with st.form(f"mgmt_user_identity_{u.id}"):
-        new_username = st.text_input("Username", value=u.username)
+        new_username = st.text_input("Username", value=u.username, autocomplete="username")
         new_display = st.text_input("Display name", value=u.display_name or u.username)
         identity_submitted = st.form_submit_button("Save", type="primary")
     if identity_submitted:
@@ -1487,8 +1487,8 @@ def _manage_user_dialog(u, mode: str):
     st.divider()
     st.markdown("**Change password**")
     with st.form(f"mgmt_user_pw_{u.id}"):
-        pw1 = st.text_input("New password", type="password")
-        pw2 = st.text_input("Confirm new password", type="password")
+        pw1 = st.text_input("New password", type="password", autocomplete="new-password")
+        pw2 = st.text_input("Confirm new password", type="password", autocomplete="new-password")
         pw_submitted = st.form_submit_button("Update password", type="primary")
     if pw_submitted:
         if pw1 != pw2:
@@ -1531,10 +1531,35 @@ def _manage_user_dialog(u, mode: str):
             except ValueError as e:
                 st.error(str(e))
     else:
-        if st.button("Reactivate account", icon=":material/check_circle:", type="primary", key=f"mgmt_user_reactivate_{u.id}"):
-            set_user_active(u.id, True, mode)
-            st.session_state["_user_mgmt_toast"] = "Account reactivated."
-            st.rerun()
+        # Redesigned 2026-08-30 - real gap the user caught: reactivating
+        # used to just flip is_active back on, leaving the account's OLD
+        # password (from before it was deactivated) as the only way back
+        # in - if the person genuinely forgot it across the gap (the whole
+        # reason `must_change_password` gets forced on reactivation is that
+        # this app assumes they might have), they'd be stuck: verify_login()
+        # still requires knowing that old password correctly before the
+        # forced-change screen is ever reached, so there was no actual path
+        # in for someone who'd forgotten it. Matches how Entra ID/AD really
+        # handle a re-enabled account: an admin sets a fresh TEMPORARY
+        # password as PART of reactivating it (relayed to the user
+        # out-of-band - Slack, in person, however), not "their old one
+        # still works, they'll just be forced to change it." The user signs
+        # in with THIS temp password, then is still forced to pick their
+        # own new one (clear_must_change_password=False here is what keeps
+        # that second step required - update_user_password() would
+        # otherwise clear it, correctly, for every other caller).
+        st.caption("Set a temporary password for this user - they'll sign in with it, then be required to choose their own.")
+        with st.form(f"mgmt_user_reactivate_form_{u.id}"):
+            temp_pw = st.text_input("Temporary password", type="password", autocomplete="new-password")
+            reactivate_submitted = st.form_submit_button("Reactivate & Set Temporary Password", type="primary")
+        if reactivate_submitted:
+            try:
+                set_user_active(u.id, True, mode)
+                update_user_password(u.id, temp_pw, mode, clear_must_change_password=False)
+                st.session_state["_user_mgmt_toast"] = "Account reactivated with a temporary password - share it with the user directly."
+                st.rerun()
+            except ValueError as e:
+                st.error(str(e))
 
     st.divider()
     if st.button("Delete user", icon=":material/delete:", key=f"mgmt_user_delete_{u.id}", disabled=is_self, help=_self_help):
@@ -1629,19 +1654,25 @@ def page_users():
     if st.session_state.get("_show_add_user_form"):
         with st.container(border=True):
             with st.form("add_user_form"):
-                nu_username = st.text_input("Username", key="add_user_username")
+                nu_username = st.text_input("Username", key="add_user_username", autocomplete="username")
                 nu_display = st.text_input("Display name (optional)", key="add_user_display")
-                nu_pw1 = st.text_input("Password", type="password", key="add_user_pw1")
-                nu_pw2 = st.text_input("Confirm password", type="password", key="add_user_pw2")
+                nu_pw1 = st.text_input("Password", type="password", key="add_user_pw1", autocomplete="new-password")
+                nu_pw2 = st.text_input("Confirm password", type="password", key="add_user_pw2", autocomplete="new-password")
                 nu_submit = st.form_submit_button("Add User", icon=":material/person_add:", type="primary")
             if nu_submit:
                 if not nu_username or not nu_pw1:
                     st.error("Username and password are both required.")
                 elif nu_pw1 != nu_pw2:
                     st.error("Passwords don't match.")
-                elif len(nu_pw1) < 8:
-                    st.error("Use at least 8 characters for the password.")
                 else:
+                    # Password strength (length + upper/lower/digit/special)
+                    # is now enforced INSIDE create_user() itself
+                    # (db/users.py's shared validate_password_strength()) -
+                    # this used to duplicate just the 8-char part of that
+                    # rule inline here, which is exactly the kind of
+                    # same-rule-copy-pasted-in-3-places drift this app has
+                    # already been bitten by elsewhere. The ValueError below
+                    # now carries the real, specific reason.
                     try:
                         create_user(nu_username, nu_pw1, nu_display, mode="live")
                         st.session_state["_reset_add_user_form"] = True
