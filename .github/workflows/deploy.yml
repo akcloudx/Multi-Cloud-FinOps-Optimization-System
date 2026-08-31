@@ -12,8 +12,10 @@ name: Deploy FinOps App to Azure
 #        AZURE_WEBAPP_PUBLISH_PROFILE      = contents of the App Service's publish profile
 #        AZURE_FUNCTIONAPP_PUBLISH_PROFILE = contents of the Function App's publish profile
 #   3. Update the app/function names below if they ever change (they're
-#      derived from your subscription ID suffix by deploy_all_resources.ps1,
-#      so they only change if you deploy under a different subscription).
+#      derived from -AppNamePrefix/-OwnerHandle in
+#      azure_deploy/deploy_all_resources.ps1 - see that script's header
+#      comment for the full naming convention - so they only change if you
+#      deploy under a different prefix/handle).
 
 on:
   push:
@@ -21,8 +23,8 @@ on:
   workflow_dispatch:
 
 env:
-  AZURE_WEBAPP_NAME: finops-app-e0b96fd6
-  AZURE_FUNCTIONAPP_NAME: finops-func-e0b96fd6
+  AZURE_WEBAPP_NAME: app-finops-ascloudx
+  AZURE_FUNCTIONAPP_NAME: func-finops-ascloudx
 
 jobs:
   deploy-webapp:

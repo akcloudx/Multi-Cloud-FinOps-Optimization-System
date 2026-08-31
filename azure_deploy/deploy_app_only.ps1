@@ -2,9 +2,13 @@
 # Fast Code-Only Deployment Script for Multi-Cloud FinOps Optimization System
 # Pushes local application code changes to Azure App Service in ~15 seconds without touching infrastructure.
 
+# Naming convention matches deploy_all_resources.ps1's own 2026-08-30
+# redesign - see that script's header comment for the full reasoning
+# (readable owner handle instead of an opaque subscription-ID hash).
 param (
-    [string]$ResourceGroupName = "rg-finops-optimizer",
-    [string]$AppNamePrefix     = "finops"
+    [string]$ResourceGroupName = "",
+    [string]$AppNamePrefix     = "finops",
+    [string]$OwnerHandle       = "ascloudx"
 )
 
 $subId = (az account show --query id -o tsv 2>&1).Trim()
@@ -13,8 +17,13 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-$suffix     = $subId.Replace("-","").Substring(0,8).ToLower()
-$WebAppName = "$AppNamePrefix-app-$suffix"
+$suffix = ($OwnerHandle -replace '[^a-zA-Z0-9]', '').ToLower()
+if (-not $suffix) {
+    Write-Host "[ERROR] OwnerHandle resolved empty after removing non-alphanumeric characters." -ForegroundColor Red
+    exit 1
+}
+if (-not $ResourceGroupName) { $ResourceGroupName = "rg-$AppNamePrefix-$suffix" }
+$WebAppName = "app-$AppNamePrefix-$suffix"
 
 Write-Host "========================================================================" -ForegroundColor Cyan
 Write-Host "  FAST LIVE CODE DEPLOYMENT (Streamlit App Service)" -ForegroundColor Cyan

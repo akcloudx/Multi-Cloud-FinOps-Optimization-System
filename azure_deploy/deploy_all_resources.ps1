@@ -33,13 +33,42 @@
 # at all. Both the Web App and Function App now connect via their own
 # System-Assigned Managed Identity (passwordless, no secret anywhere) - see
 # db/schema.py's get_engine() and the "Managed Identity setup" step below.
+# NAMING CONVENTION (2026-08-30 redesign - real feedback: the old scheme
+# suffixed almost every resource with the first 8 hex characters of the
+# SUBSCRIPTION ID (e.g. "finops-app-e0b96fd6") - unreadable, and not
+# something you ever see or choose. That suffix existed for a real reason
+# (Storage Accounts, Web Apps, Function Apps, and SQL Servers all need
+# GLOBALLY unique names across ALL of Azure, since they get public DNS
+# names like *.azurewebsites.net - a plain "finops-app" would very likely
+# already be taken by someone else worldwide), but the source of the
+# uniqueness doesn't need to be an opaque hash - $OwnerHandle below is an
+# explicit, human-chosen replacement for it.
+#
+# Every resource now follows Microsoft's own Cloud Adoption Framework
+# convention (<resource-type-abbreviation>-<app-name>-<owner-handle>,
+# lowercase alphanumeric-only with no hyphens for Storage Accounts, which
+# don't allow them):
+#   rg-finops-<OwnerHandle>      Resource Group      (not globally unique - no suffix strictly required, kept for consistency with everything else)
+#   stfinops<OwnerHandle>        Storage Account      (globally unique - REQUIRES this)
+#   sql-finops-<OwnerHandle>     SQL Server           (globally unique - REQUIRES this)
+#   finops-db                    SQL Database         (scoped under the server, not globally unique - unchanged, was already clean)
+#   func-finops-<OwnerHandle>    Function App         (globally unique - REQUIRES this)
+#   app-finops-<OwnerHandle>     Web App              (globally unique - REQUIRES this)
+#   plan-finops-<OwnerHandle>    App Service Plan     (not globally unique - no suffix strictly required, kept for consistency)
 param (
-    [string]$ResourceGroupName = "rg-finops-optimizer",
+    [string]$ResourceGroupName = "",
     [string]$Location          = "westus3",
     [string]$SqlAdminUser      = "finopsadmin",
     [Parameter(Mandatory = $true)]
     [SecureString]$SqlAdminPassword,
-    [string]$AppNamePrefix     = "finops"
+    [string]$AppNamePrefix     = "finops",
+    # Your own short, memorable handle - the readable replacement for the
+    # old subscription-ID hash. Lowercase alphanumeric only (Storage
+    # Account naming's strictest constraint applies to the whole scheme,
+    # so every resource stays consistent) - sanitized below regardless of
+    # what's passed in, so stray punctuation/casing can't silently produce
+    # an invalid Storage Account name.
+    [string]$OwnerHandle       = "ascloudx"
 )
 
 # Converted once, right here, to the plain string az CLI actually needs -
@@ -85,13 +114,34 @@ Write-Host "        [OK] az, python, and func are all available." -ForegroundCol
 $subId = (az account show --query id -o tsv 2>&1).Trim()
 if ($LASTEXITCODE -ne 0) { Fail "Cannot reach Azure CLI. Run 'az login' first." }
 
-$suffix             = $subId.Replace("-","").Substring(0,8).ToLower()
-$StorageAccountName = "$($AppNamePrefix)st$suffix"
-$SqlServerName      = "$AppNamePrefix-sql-$suffix"
+# Sanitized once, here, regardless of what was passed in - lowercased and
+# stripped to alphanumeric-only, since that's Storage Account naming's
+# strictest constraint and every resource name below shares this same
+# token for consistency (a Storage Account name can't have hyphens at
+# all, so a raw "-OwnerHandle 'A.Cloud-X'" would otherwise silently
+# produce an invalid Storage Account name while looking fine everywhere
+# else, until step 3 fails).
+$suffix = ($OwnerHandle -replace '[^a-zA-Z0-9]', '').ToLower()
+if (-not $suffix) { Fail "OwnerHandle resolved empty after removing non-alphanumeric characters - pick a short alphanumeric handle, e.g. 'ascloudx'." }
+
+if (-not $ResourceGroupName) { $ResourceGroupName = "rg-$AppNamePrefix-$suffix" }
+
+$StorageAccountName = "st$($AppNamePrefix)$suffix"
+$SqlServerName      = "sql-$AppNamePrefix-$suffix"
 $SqlDbName          = "finops-db"
-$FunctionAppName    = "$AppNamePrefix-func-$suffix"
-$WebAppName         = "$AppNamePrefix-app-$suffix"
-$AppPlanName        = "$AppNamePrefix-plan-$suffix"
+$FunctionAppName    = "func-$AppNamePrefix-$suffix"
+$WebAppName         = "app-$AppNamePrefix-$suffix"
+$AppPlanName        = "plan-$AppNamePrefix-$suffix"
+
+# Storage Account names have the strictest real limit of any resource
+# named here - 3-24 characters, enforced by Azure itself (a name over 24
+# chars is rejected outright at creation, not truncated) - checked
+# up front with the defaults' own math shown in the message, rather than
+# letting a longer -AppNamePrefix/-OwnerHandle combination fail confusingly
+# deep into step 3.
+if ($StorageAccountName.Length -gt 24) {
+    Fail "Storage Account name '$StorageAccountName' is $($StorageAccountName.Length) characters - Azure's limit is 24. Shorten -AppNamePrefix and/or -OwnerHandle (the default 'st' + 'finops' + 'ascloudx' is 16)."
+}
 
 Write-Host ""
 Write-Host "========================================================================" -ForegroundColor Cyan
@@ -186,7 +236,15 @@ $SqlServerFqdn = "$SqlServerName.database.windows.net"
 Write-Host "  [5/7] Azure Function App: $FunctionAppName ..." -ForegroundColor Yellow
 $funcExists = az functionapp show --name $FunctionAppName --resource-group $ResourceGroupName --query name -o tsv 2>$null
 if (-not $funcExists) {
-    az functionapp create --resource-group $ResourceGroupName --consumption-plan-location $Location --runtime python --runtime-version 3.12 --functions-version 4 --name $FunctionAppName --storage-account $StorageAccountName --os-type Linux -o none
+    # --disable-app-insights added 2026-08-30, real feedback: without it,
+    # `az functionapp create` silently provisions an Application Insights
+    # resource (and, per current Azure platform behavior, a backing Log
+    # Analytics Workspace auto-named something like "DefaultWorkspace-..."
+    # or "Default...") that this app has zero code reference to anywhere -
+    # confirmed via a full repo grep for "Application Insights"/"Log
+    # Analytics"/"APPINSIGHTS" before removing it, not assumed. Pure
+    # unused monitoring infrastructure this deployment never asked for.
+    az functionapp create --resource-group $ResourceGroupName --consumption-plan-location $Location --runtime python --runtime-version 3.12 --functions-version 4 --name $FunctionAppName --storage-account $StorageAccountName --os-type Linux --disable-app-insights true -o none
     if ($LASTEXITCODE -ne 0) { Fail "Creating Function App '$FunctionAppName'" }
     Start-Sleep -Seconds 5
     Write-Host "        [OK] Provisioned." -ForegroundColor Green
