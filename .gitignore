@@ -20,6 +20,7 @@ app_logs.zip
 # Editor/agent tooling config - not part of the deployed app
 .claude/
 .agents/
+.vscode/
 
 # OS noise
 .DS_Store
