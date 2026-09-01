@@ -345,7 +345,16 @@ def _render_landing_closing_cta(mode: str):
             # shorter mention right at the actual point of signing in
             # catches whoever missed it. st.caption() (a real widget, not
             # more raw HTML) is enough for a one-line aside like this.
-            st.caption("💡 Best experienced in Dark Mode (⋮ menu, top right).")
+            # Wrapped in its own keyed container (not just relying on the
+            # card's own .st-key-fl_signin_card scope) so the CSS forcing
+            # this one caption onto a single line can target it uniquely -
+            # real regression caught 2026-09-02: that nowrap rule was
+            # originally scoped to EVERY caption inside the card, which
+            # also broke _render_bootstrap_form()'s much longer caption
+            # below (forced onto one line too, overflowing past the card
+            # instead of wrapping across several).
+            with st.container(key="fl_signin_darkmode_note"):
+                st.caption("💡 Best experienced in Dark Mode (⋮ menu, top right).")
             # In-card mode switcher, always visible regardless of scroll
             # position. Both buttons write the plain "login_mode" session-
             # state key require_login() reads at the top of the script -

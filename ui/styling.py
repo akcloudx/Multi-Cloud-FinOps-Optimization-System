@@ -104,9 +104,24 @@ section[data-testid="stSidebar"] nav span {
 /* More breathing room between Home/Tenant Management/User Management
    (2026-08-30, real feedback: "very close tightened to each other") -
    the individual nav links themselves, not the outer nav container, so
-   this only adds gaps BETWEEN items, not around the whole nav block. */
+   this only adds gaps BETWEEN items, not around the whole nav block.
+   padding/border-radius added 2026-09-02, real feedback: nav read as
+   "single line, small font" next to Cloud & Data Source's icon-badge
+   rows below it - can't replicate .fl-rail-node's colored circle per
+   item this way (st.navigation()'s Page(icon=...) has no per-item
+   background/color hook, unlike the custom HTML rail sections), but
+   taller rows + a bigger icon close most of the visual gap without one.
+   svg is Streamlit's actual Material icon markup inside a nav link (a
+   generic, version-stable target, unlike a specific testid that could
+   drift). */
 [data-testid="stSidebarNavLink"] {
     margin-bottom: 6px !important;
+    padding: 10px 12px !important;
+    border-radius: 10px !important;
+}
+[data-testid="stSidebarNavLink"] svg {
+    width: 20px !important;
+    height: 20px !important;
 }
 
 /* Login / setup gate hero heading - a bit more presence than a plain ## */
@@ -281,7 +296,7 @@ section[data-testid="stSidebar"] nav span {
     font-size: 12.5px !important; color: #E2E8F0 !important; -webkit-text-fill-color: #E2E8F0 !important;
 }
 .st-key-fl_signin_card label p { font-size: 11px !important; font-weight: 600 !important; color: #94A3B8 !important; }
-.st-key-fl_signin_card [data-testid="stCaptionContainer"] p { white-space: nowrap; }
+.st-key-fl_signin_darkmode_note [data-testid="stCaptionContainer"] p { white-space: nowrap; }
 .st-key-fl_signin_card [data-testid="stAlertContainer"],
 .st-key-fl_signin_card .stAlertContainer {
     background: rgba(96,165,250,.09) !important; border: 1px solid rgba(96,165,250,.25) !important;
