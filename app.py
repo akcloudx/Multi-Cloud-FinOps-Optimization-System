@@ -2768,9 +2768,28 @@ def _render_sp_pool_economics(pool_label: str, pool_df: pd.DataFrame, existing_c
     # (always good news) - "you're over-committed" is a real warning, not
     # savings, so it gets the card's own red "warn" variant rather than
     # forcing the same green framing onto a bad-news number.
+    # Real bug caught 2026-09-02, same root cause already fixed once on RI
+    # Coverage the same way (see that tab's own "fully_covered > 0" comment):
+    # recommended_hr <= 0.001 is also true when baseline_hr itself is $0
+    # because this pool's PAYG rate couldn't be priced yet (a real,
+    # confirmed gap - Azure SQL Database Serverless's rate wasn't
+    # resolvable by the old lookup, see pricing/azure_retail_api.py) - NOT
+    # because the resource is actually free or genuinely well covered. The
+    # old code couldn't tell "$0 eligible spend, nothing to cover" apart
+    # from "$0 because we don't know the real rate yet", and confidently
+    # printed "well covered" either way. baseline_hr > 0 is now required
+    # before that verdict is trusted - a pool with eligible resources but
+    # no priceable spend gets its own honest "can't price this yet" state
+    # instead, same "don't guess" discipline as the "Estimate only" caption
+    # already applies to the separate commitment-rate gap below.
     is_warning = leakage_hr > 0
     if is_warning:
         sentence = f"You've committed <b>{fmt(leakage_hr)}/hr</b> more than is currently eligible — worth reviewing this plan."
+    elif baseline_hr <= 0.001:
+        sentence = (
+            "<b>Can't price this yet</b> — this pool has eligible resources, but no cached PAYG rate for "
+            "them. Re-run a sync from the tenant's Manage dialog on the Home page."
+        )
     elif recommended_hr <= 0.001:
         sentence = "<b>You're already well covered</b> — no additional commitment recommended right now."
     elif has_real_pricing:
