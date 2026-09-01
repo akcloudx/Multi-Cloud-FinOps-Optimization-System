@@ -2028,10 +2028,27 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
         unsafe_allow_html=True,
     )
 
-    # Live mode: show which tenant a subscription ID belongs to, not just the raw GUID.
+    # Live mode: show which subscription a resource actually belongs to.
+    # Real feedback 2026-09-02: this used to show the app's own internal
+    # tenant label (CloudTenant.tenant_name, e.g. "Local azure tenant" or
+    # "Prod Azure Tenant" - whatever this connection happens to be named)
+    # instead of the real Azure subscription's own display name (e.g.
+    # "Azure for Students") - misleading, since a "subscription" column
+    # showing a tenant label isn't actually naming the subscription. The
+    # real name IS already fetched and cached (TenantSubscription, synced
+    # via "Sync subscriptions" in Manage Tenant) - looked up per-row by
+    # subscription_id here instead of assuming one name for the whole
+    # tenant, since a tenant can genuinely span multiple subscriptions.
+    # Falls back to the tenant label only if that subscription hasn't
+    # been synced yet (same fallback the old code always used).
     if is_live_mode and is_live_configured and active_tenant is not None:
+        _subs_by_id = {
+            s.subscription_id: s.subscription_name
+            for s in list_subscriptions(selected_provider, tenant_mode, active_tenant.id)
+            if s.subscription_name
+        }
         disp["Subscription"] = disp["Subscription"].apply(
-            lambda sid: f"{active_tenant.tenant_name} ({sid})" if sid else active_tenant.tenant_name
+            lambda sid: f"{_subs_by_id.get(sid, active_tenant.tenant_name)} ({sid})" if sid else active_tenant.tenant_name
         )
 
     # Azure-Portal-style filter bar. Third iteration, 2026-08-23 - the
@@ -2637,7 +2654,13 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
             # app's own real longest value or the header label - not a
             # generic guess.
             "Resource Name":          st.column_config.TextColumn(pinned=True, width=200),
-            "Subscription":           st.column_config.TextColumn(width=140),
+            # 140 -> 420, 2026-09-02: this cell's real content changed (see
+            # the Subscription-name fix above) from a short tenant label to
+            # "{real subscription name} ({subscription id GUID})" - the
+            # GUID alone is 36 chars, plus " ()" plus a variable-length
+            # subscription name on top, routinely 50-60+ chars total. 140px
+            # was never sized for that.
+            "Subscription":           st.column_config.TextColumn(width=420),
             "Resource Type":          st.column_config.TextColumn("Service", width=220),
             "Status":                 st.column_config.TextColumn("Power State", width=170),
             "Region":                 st.column_config.TextColumn(width=110),
@@ -2654,7 +2677,19 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
             # only and clipped the real longest value mid-sentence. Sized to
             # that 90-char cap using this table's own established ratio
             # (~5.4px/char, from "Resource Type" 220px/41-char real value).
-            "Est. Monthly PAYG Cost": st.column_config.TextColumn("Est. Monthly Cost", width=480),
+            #
+            # 480 -> 620, 2026-09-02: real feedback, seen live - even the
+            # already-90-char-capped reason text was still visibly clipped
+            # at 480px. The 5.4px/char ratio (derived from a DIFFERENT
+            # column, "Resource Type") apparently doesn't hold for this
+            # column's actual rendering - cell padding/font differences
+            # this app has no way to measure without live browser
+            # inspection (not done per standing instruction). Widened with
+            # real headroom (~6.9px/char at the same 90-char cap) rather
+            # than re-deriving an exact ratio that can't be verified
+            # blind - re-check against a live screenshot, adjust further if
+            # still clipped.
+            "Est. Monthly PAYG Cost": st.column_config.TextColumn("Est. Monthly Cost", width=620),
         },
     )
     with dl_col:
