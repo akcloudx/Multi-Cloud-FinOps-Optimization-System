@@ -321,12 +321,14 @@ if (-not $funcExists) {
 
     # --disable-app-insights added 2026-08-30, real feedback: without it,
     # `az functionapp create` silently provisions an Application Insights
-    # resource (and, per current Azure platform behavior, a backing Log
-    # Analytics Workspace auto-named something like "DefaultWorkspace-..."
-    # or "Default...") that this app has zero code reference to anywhere -
-    # confirmed via a full repo grep for "Application Insights"/"Log
-    # Analytics"/"APPINSIGHTS" before removing it, not assumed. Pure
-    # unused monitoring infrastructure this deployment never asked for.
+    # resource pointing at Azure's own DEFAULT, unscoped Log Analytics
+    # Workspace naming/placement - kept disabled here even though this
+    # deployment DOES want Application Insights now (see the explicit,
+    # properly-scoped creation right after this function app block below,
+    # added 2026-09-01) - that later step creates it deliberately, in
+    # this resource group, pointed at a workspace this script also
+    # creates here, rather than accepting whatever this flag would have
+    # auto-generated.
     #
     # Real error hit 2026-09-01: `az functionapp create --plan
     # $FunctionPlanName` (pointing at the named plan created above) fails
@@ -365,6 +367,40 @@ if (-not $funcExists) {
 } else {
     Write-Host "        [OK] Already exists - skipped." -ForegroundColor DarkGreen
 }
+
+# Application Insights, scoped properly this time (2026-09-01). Real
+# incident: Application Insights turned out to be essential - it's the
+# ONLY supported way to see a Python Function's startup errors on a
+# Linux Consumption plan (confirmed via Microsoft's own docs) - and is
+# literally how today's real "0 functions indexed" bug (a missing
+# analysis/ package in the deploy staging list) got diagnosed, after
+# every Kudu/filesystem-log approach 404'd. But creating an App Insights
+# component with no --workspace makes Azure auto-provision its own Log
+# Analytics Workspace in a SEPARATE, Azure-managed resource group (name
+# pattern "ai_<name>_<guid>_managed") that resources can't be moved out
+# of afterward - confirmed via Microsoft's own docs on managed
+# workspaces. Pre-creating the workspace HERE, in this same resource
+# group, and passing --workspace avoids that sprawl entirely - --disable
+# -app-insights true stays on the functionapp create call above so Azure
+# never attempts its own default (unscoped) auto-creation in parallel.
+$LogAnalyticsWorkspaceName = "log-$AppNamePrefix-$suffix"
+$AppInsightsName           = "appi-$AppNamePrefix-$suffix"
+$lawExists = az monitor log-analytics workspace show --resource-group $ResourceGroupName --workspace-name $LogAnalyticsWorkspaceName --query name -o tsv 2>$null
+if (-not $lawExists) {
+    Write-Host "        Creating Log Analytics Workspace '$LogAnalyticsWorkspaceName'..." -ForegroundColor Yellow
+    az monitor log-analytics workspace create --resource-group $ResourceGroupName --workspace-name $LogAnalyticsWorkspaceName --location $Location -o none
+    if ($LASTEXITCODE -ne 0) { Fail "Creating Log Analytics Workspace '$LogAnalyticsWorkspaceName'" }
+}
+$workspaceId = az monitor log-analytics workspace show --resource-group $ResourceGroupName --workspace-name $LogAnalyticsWorkspaceName --query id -o tsv
+
+$appInsightsExists = az monitor app-insights component show --app $AppInsightsName --resource-group $ResourceGroupName --query name -o tsv 2>$null
+if (-not $appInsightsExists) {
+    Write-Host "        Creating Application Insights '$AppInsightsName'..." -ForegroundColor Yellow
+    az monitor app-insights component create --app $AppInsightsName --location $Location --resource-group $ResourceGroupName --application-type web --workspace $workspaceId -o none
+    if ($LASTEXITCODE -ne 0) { Fail "Creating Application Insights '$AppInsightsName'" }
+}
+Write-Host "        Connecting Application Insights to the Function App..." -ForegroundColor Yellow
+az monitor app-insights component connect-function --app $AppInsightsName --function $FunctionAppName --resource-group $ResourceGroupName -o none
 
 # Managed Identity (passwordless) - no DATABASE_URL / secret app setting at
 # all. AZURE_SQL_SERVER/AZURE_SQL_DATABASE are plain identifiers, not
@@ -624,10 +660,24 @@ if ($signedInUser -and (Test-Path $venvPython) -and (Test-Path $grantScriptPath)
     try { $myIp = (Invoke-RestMethod -Uri "https://api.ipify.org" -TimeoutSec 10) } catch {}
     if ($myIp) {
         az sql server firewall-rule create --resource-group $ResourceGroupName --server $SqlServerName --name "TempDeployAccess" --start-ip-address $myIp --end-ip-address $myIp -o none 2>$null
-        Start-Sleep -Seconds 15   # firewall rule propagation
+        # Retry once with a longer wait - real timeout hit 2026-09-01 even
+        # though this whole IP-whitelist dance ran successfully: a single
+        # 15s wait isn't always enough for the firewall rule to actually
+        # propagate before the connection attempt. If it's a network-level
+        # block on outbound port 1433 (common on some ISPs/campus networks)
+        # instead, no amount of waiting fixes it - falls through to the
+        # manual Query editor instructions either way, same as before.
+        Start-Sleep -Seconds 15
         & $venvPython $grantScriptPath $SqlServerFqdn $SqlDbName $WebAppName $FunctionAppName
         if ($LASTEXITCODE -eq 0) {
             $grantAutomated = $true
+        } else {
+            Write-Host "        First attempt timed out - waiting longer for firewall propagation and retrying once..." -ForegroundColor DarkYellow
+            Start-Sleep -Seconds 30
+            & $venvPython $grantScriptPath $SqlServerFqdn $SqlDbName $WebAppName $FunctionAppName
+            if ($LASTEXITCODE -eq 0) { $grantAutomated = $true }
+        }
+        if ($grantAutomated) {
             Write-Host "        [OK] Managed Identity database access granted automatically." -ForegroundColor Green
         } else {
             Write-Host "        [WARNING] Automated grant failed - falling back to manual instructions below." -ForegroundColor DarkYellow
