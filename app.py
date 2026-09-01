@@ -140,6 +140,7 @@ from data.sync_pipeline import run_ingestion_pipeline
 from pricing.retail_pricing import usd, fmt_currency, get_inr_rate
 from pricing.commitment_pricing import get_commitment_prices, MONTH_HOURS
 from pricing.azure_vm_flexibility import get_vm_flexibility_groups
+from pricing.cache_admin import clear_pricing_caches
 from commitments.existing_commitments import (
     get_existing_savings_plans,
     get_existing_reservations,
@@ -1105,9 +1106,28 @@ def _manage_tenant_dialog(t, mode: str):
             st.cache_data.clear()
             st.rerun()
 
-    # ── Features (placeholder) ────────────────────────────────────────
+    # ── Features ─────────────────────────────────────────────────────
     elif active_section == "Features":
-        st.caption("Nothing here yet - reserved for upcoming tenant-level features.")
+        st.markdown("##### Pricing cache")
+        st.caption(
+            "Clears every cached PAYG rate, commitment (RI/Savings Plan) rate, and (Azure) VM "
+            "flexibility-group/memory-spec row for this provider, then re-fetches everything from "
+            "scratch on the next sync. None of these caches are specific to this one tenant - they're "
+            f"shared by SKU/region across every {selected_provider} tenant in this environment, so "
+            "clearing here clears them for all of those tenants, not just this one."
+        )
+        if st.button(
+            "Clear cached pricing", icon=":material/restart_alt:", key=f"mgmt_clear_pricing_{t.id}",
+            disabled=is_demo,
+            help="Only available for Production tenants." if is_demo else
+                 "Use this if a resource's shown cost looks wrong and you suspect a stale/incorrect cached rate.",
+        ):
+            deleted = clear_pricing_caches(get_engine(selected_provider, mode), selected_provider)
+            total = sum(deleted.values())
+            st.session_state["_tenant_mgmt_toast"] = (
+                f"Cleared {total} cached pricing row(s). Run a sync to re-fetch live rates."
+            )
+            st.rerun()
 
     st.divider()
     if st.button("Delete tenant", icon=":material/delete:", disabled=is_demo, key=f"mgmt_delete_prod_{t.id}",
