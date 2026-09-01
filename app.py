@@ -2894,21 +2894,24 @@ def _render_sp_pool_economics(pool_label: str, pool_df: pd.DataFrame, existing_c
             _pool_unpriced_reasons.append((_r.get("Resource Type"), _reason))
     _is_never_priced_by_design = bool(_pool_unpriced_reasons)
 
+    # sub mirrors RI Coverage's own headline pattern exactly (see
+    # _render_ri_coverage_tab's "sub" variable + .rec-headline-sub CSS
+    # class, already used there and on the combined Recommendations card)
+    # - real feedback 2026-09-02: the by-design explanation read as "too
+    # long a story" crammed into one sentence. Short headline + a pointer
+    # to the real detail already sitting in the "What's eligible" expander
+    # below (now shows a "Why $0.00/hr" column, same fix), not a wall of
+    # text in the headline card itself.
+    sub = ""
     is_warning = leakage_hr > 0
     if is_warning:
         sentence = f"You've committed <b>{fmt(leakage_hr)}/hr</b> more than is currently eligible — worth reviewing this plan."
     elif baseline_hr <= 0.001 and _is_never_priced_by_design:
-        _distinct = list(dict.fromkeys(_pool_unpriced_reasons))   # de-dupe, keep first-seen order
-        _explained = "; ".join(f"{rt} ({reason})" for rt, reason in _distinct)
-        sentence = (
-            f"<b>Can't price this by design</b> — every eligible resource here is a type this app doesn't "
-            f"compute a flat PAYG rate for: {_explained}. Re-syncing won't change this."
-        )
+        sentence = "<b>Can't price this by design</b> — re-syncing won't change this."
+        sub = "See the \"Why $0.00/hr\" column in \"What's eligible\" below for the real reason."
     elif baseline_hr <= 0.001:
-        sentence = (
-            "<b>Can't price this yet</b> — this pool has eligible resources, but no cached PAYG rate for "
-            "them. Re-run a sync from the tenant's Manage dialog on the Home page."
-        )
+        sentence = "<b>Can't price this yet</b> — no cached PAYG rate for this pool's resources."
+        sub = "Re-run a sync from the tenant's Manage dialog on the Home page."
     elif recommended_hr <= 0.001:
         sentence = "<b>You're already well covered</b> — no additional commitment recommended right now."
     elif has_real_pricing:
@@ -2922,7 +2925,8 @@ def _render_sp_pool_economics(pool_label: str, pool_df: pd.DataFrame, existing_c
         f'<div class="rec-headline-card{" warn" if is_warning else ""}">'
         f'<div class="rec-headline-eyebrow">{html.escape(pool_label)} Savings Plan</div>'
         f'<div class="rec-headline-sentence">{sentence}</div>'
-        "</div>",
+        + (f'<div class="rec-headline-sub">{sub}</div>' if sub else "")
+        + "</div>",
         unsafe_allow_html=True,
     )
 
@@ -3045,6 +3049,19 @@ def _render_sp_pool_economics(pool_label: str, pool_df: pd.DataFrame, existing_c
     elig_container_key = f"{key_prefix}_eligible"
     with st.container(key=elig_container_key), st.expander(f"What's eligible — {len(pool_df)} resource{'s' if len(pool_df) != 1 else ''}, {fmt(baseline_hr)}/hr", icon=":material/checklist:", expanded=False):
         elig_show = pool_df[["Resource Name", "Resource Type", "SKU", "PAYG Hourly Cost USD"]].copy()
+        # "Why $0.00/hr" - added 2026-09-02, the real detail the headline's
+        # "Can't price this by design" / "Can't price this yet" sub-line
+        # now points to instead of spelling it out in the headline itself.
+        # Reuses the same pricing/unpriced_by_design.py registry the
+        # headline check above uses, so the two never disagree - a genuine
+        # (not by-design) gap gets a plain, honest "No cached PAYG rate
+        # yet" rather than pretending to know why.
+        def _why_zero(r):
+            if r["PAYG Hourly Cost USD"]:
+                return ""
+            reason = unpriced_by_design_reason(selected_provider, r["Resource Type"], r["SKU"])
+            return reason if reason else "No cached PAYG rate yet"
+        elig_show["Why $0.00/hr"] = pool_df.apply(_why_zero, axis=1)
         elig_show["PAYG Hourly Cost USD"] = elig_show["PAYG Hourly Cost USD"].apply(lambda x: fmt(x, 4))
         elig_show = elig_show.rename(columns={"PAYG Hourly Cost USD": "PAYG Cost/hr"})
         # Dynamic widths, not a fixed dict - real gap caught live,
@@ -3063,7 +3080,14 @@ def _render_sp_pool_economics(pool_label: str, pool_df: pd.DataFrame, existing_c
             longest_chars = max([len(col)] + [len(str(v)) for v in elig_show[col]])
             return int(min(max_px, max(min_px, longest_chars * 7.5 + 32)))
 
-        col_widths = {col: _col_width(col) for col in elig_show.columns}
+        # "Why $0.00/hr" gets its own higher cap - real disclosed reasons
+        # from pricing/unpriced_by_design.py run 60-90+ chars, well past
+        # every other column's short, compact real values (a name, a
+        # type, a SKU) this 320px default cap was actually sized for.
+        col_widths = {
+            col: (_col_width(col, max_px=650) if col == "Why $0.00/hr" else _col_width(col))
+            for col in elig_show.columns
+        }
         # The table's own content-driven width (sum of its column widths,
         # plus glide-data-grid's own border/cell chrome, ~2px/col) - reused
         # below as an explicit width on the "By resource type" list so the
