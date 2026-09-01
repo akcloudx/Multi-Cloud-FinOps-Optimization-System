@@ -2924,7 +2924,16 @@ def _render_sp_pool_economics(pool_label: str, pool_df: pd.DataFrame, existing_c
         # sentence. When literally every eligible resource is a known,
         # permanently-unpriced type, the headline itself says so plainly,
         # with no "try syncing" advice to contradict.
-        sentence = "<b>Can't price this by design</b> — not a data gap, and re-syncing won't change it."
+        #
+        # Real feedback 2026-09-02, right after THAT fix: "not a data gap,
+        # and re-syncing won't change it" is defensive copy that rebuts
+        # advice nobody reading this fresh has actually seen - it answers
+        # a question a first-time user never asked. "Data gap" is also
+        # internal jargon (this app's own vocabulary for the bug being
+        # fixed), meaningless to an actual reader. Simplified to plainly
+        # state the situation - no jargon, no pre-emptive negation of
+        # advice that was never given here.
+        sentence = "<b>No cost estimate available</b> for this pool."
         sub = "See \"Why $0.00/hr\" in \"What's eligible\" below for the reason."
     elif baseline_hr <= 0.001:
         sentence = "<b>Can't price this yet</b> — no cached PAYG rate for this pool's resources."
@@ -2945,11 +2954,13 @@ def _render_sp_pool_economics(pool_label: str, pool_df: pd.DataFrame, existing_c
     # so directly (adding this again would just repeat the same fact in
     # two places); when it's NONE, there's nothing to disclose.
     if 0 < _unpriced_by_design_count < _pool_size:
+        # Same plain-language fix as the headline branch above - no
+        # "not a gap, re-syncing won't help" defensive phrasing here either.
         _plural = _unpriced_by_design_count != 1
         _disclosure = (
-            f"{_unpriced_by_design_count} resource{'s' if _plural else ''} here {'are' if _plural else 'is'} "
-            f'priced $0 by design (not a gap - re-syncing won\'t change it) - see "Why $0.00/hr" in '
-            '"What\'s eligible" below.'
+            f"{_unpriced_by_design_count} resource{'s' if _plural else ''} here "
+            f"{'have' if _plural else 'has'} no cost estimate — "
+            'see "Why $0.00/hr" in "What\'s eligible" below.'
         )
         sub = f"{sub} {_disclosure}" if sub else _disclosure
     st.markdown(
