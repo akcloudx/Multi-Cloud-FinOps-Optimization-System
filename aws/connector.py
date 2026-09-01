@@ -21,6 +21,7 @@ REQUIRED AWS IAM POLICY PERMISSIONS:
 """
 
 import os
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 import pandas as pd
 
@@ -202,6 +203,22 @@ REQUIRED_AWS_POLICIES = [
         "AWS Managed Policy": "NeptuneGraphReadOnlyAccess",
         "Required":        "Yes — For Neptune Analytics inventory",
         "Purpose":         "Scan Neptune Analytics graphs (a separate product from Neptune Database) for Database Savings Plan coverage",
+    },
+    # Added for EC2 Rightsizing (VM/EC2 utilization-based classification -
+    # this app's own analysis/rightsizing.py) - not covered by
+    # AmazonEC2ReadOnlyAccess above (that policy is EC2-service-only, no
+    # cloudwatch:* actions at all, confirmed via the policy's own JSON).
+    # GetMetricData reads CPUUtilization (namespace AWS/EC2, always
+    # available, no agent needed) and mem_used_percent (namespace CWAgent,
+    # only present if the CloudWatch Agent is installed on that specific
+    # instance - AWS exposes zero OS-level memory metrics without it,
+    # confirmed via AWS's own CloudWatch docs) - an instance without the
+    # agent simply has no CWAgent data to return, not a permission problem.
+    {
+        "Policy / Action": "cloudwatch:GetMetricData",
+        "AWS Managed Policy": "CloudWatchReadOnlyAccess",
+        "Required":        "Yes — For EC2 Rightsizing",
+        "Purpose":         "Read EC2 CPUUtilization (always available) and mem_used_percent (only if the CloudWatch Agent is installed on that instance) utilization metrics for rightsizing classification",
     },
 ]
 
@@ -426,6 +443,18 @@ def check_aws_permissions(creds: AWSCredentials) -> dict:
     _probe(
         "neptune-graph:ListGraphs / neptune-graph:GetGraph",
         lambda: session.client("neptune-graph").list_graphs(maxResults=20),
+    )
+    # cloudwatch:ListMetrics stands in for cloudwatch:GetMetricData here -
+    # GetMetricData itself isn't free to probe cheaply (it always evaluates
+    # at least one real metric query), while ListMetrics is a genuinely
+    # free, real, read-only call that CloudWatchReadOnlyAccess (the one
+    # managed policy REQUIRED_AWS_POLICIES actually recommends for this
+    # row) grants together with GetMetricData - same "closest free real
+    # proxy for the recommended managed policy" discipline as pricing:
+    # GetProducts above, not a literal 1:1 IAM-action check.
+    _probe(
+        "cloudwatch:GetMetricData",
+        lambda: session.client("cloudwatch").list_metrics(Namespace="AWS/EC2", MetricName="CPUUtilization"),
     )
 
     for action in ["ce:GetCostAndUsage", "ce:GetSavingsPlansPurchaseRecommendation"]:
@@ -1520,6 +1549,139 @@ def _recurring_hourly_charge(charges: list) -> Optional[float]:
             total += float(c["Amount"])
             found = True
     return total if found else None
+
+
+def fetch_ec2_utilization_metrics(creds: AWSCredentials, ec2_records: list, lookback_days: int) -> dict:
+    """Real CPU/memory utilization (Average + P95) per EC2 instance, over
+    the last `lookback_days` days, via CloudWatch GetMetricData. Returns
+    {resource_id: {"avg_cpu": float|None, "p95_cpu": float|None,
+    "avg_mem_available_pct": float|None, "p95_mem_available_pct":
+    float|None}} - resource_id is the raw EC2 instance ID (e.g.
+    "i-0abc123..."), matching this app's own "Resource ID" convention for
+    EC2 rows (see fetch_live_inventory above).
+
+    CPUUtilization (namespace AWS/EC2) is a host-level metric, always
+    available for every instance with no agent needed - confirmed AWS-wide
+    behavior. mem_used_percent (namespace CWAgent) is a guest-level metric
+    that needs the CloudWatch Agent installed on that specific instance
+    (AWS exposes zero OS-level metrics without it, confirmed via AWS's own
+    CloudWatch docs) - an instance without the agent simply has no CWAgent
+    data points, which GetMetricData returns as an empty Values list here,
+    becoming None, same as every other "can't determine" fallback in this
+    app. mem_used_percent is USAGE %, not available % - inverted via
+    `100 - value` to match this app's "available" convention (same flip
+    analysis/rightsizing.py's _project_metrics already documents for this
+    exact metric).
+
+    Unlike Azure Monitor's classic Metrics API (no native percentile,
+    computed client-side - see azure_conn/connector.py::
+    fetch_vm_utilization_metrics), CloudWatch computes P95 server-side via
+    Stat="p95" (a real ExtendedStatistic, confirmed via AWS's own
+    GetMetricStatistics/GetMetricData docs) - one query per (metric, stat)
+    pair, `Period` set to the FULL lookback window in seconds so each
+    query returns exactly one aggregated value across the whole window
+    (not one value per sub-bucket) - CloudWatch computes this from
+    whatever finer-grained data is still retained in that range, standard
+    documented usage, no manual aggregation needed on this app's side.
+
+    Batched via MetricDataQueries (AWS's real 500-queries-per-call limit,
+    confirmed via the GetMetricData API reference) - 4 queries/instance
+    (cpu avg, cpu p95, mem avg, mem p95), so up to 125 instances per call,
+    chunked if more. Grouped by region first (CloudWatch is a regional
+    service, same as every other per-region client already used in this
+    file). Best-effort per chunk: a failure fetching one chunk doesn't
+    block any other chunk or region, matches this app's established
+    "one bad batch can't sink the whole sync" discipline.
+    """
+    if not HAS_BOTO3:
+        raise ImportError("boto3 library is not installed. Run: pip install boto3")
+
+    session = boto3.Session(
+        aws_access_key_id=creds.access_key_id,
+        aws_secret_access_key=creds.secret_access_key,
+        region_name=creds.region,
+    )
+
+    end_time = datetime.now(timezone.utc)
+    start_time = end_time - timedelta(days=lookback_days)
+    period_seconds = int(lookback_days * 86400)
+
+    results: dict = {}
+    by_region: dict = {}
+    for r in ec2_records:
+        instance_id = r.get("Resource ID") or r.get("resource_id")
+        region = r.get("Region") or r.get("region")
+        if instance_id and region:
+            by_region.setdefault(region, []).append(instance_id)
+
+    for region, instance_ids in by_region.items():
+        try:
+            cw = session.client("cloudwatch", region_name=region)
+        except Exception:
+            continue   # best-effort - a failed region client shouldn't block other regions
+
+        for i in range(0, len(instance_ids), 125):   # 4 queries/instance, 500-query cap per call
+            chunk = instance_ids[i:i + 125]
+            id_map = {}   # query-id prefix -> instance_id, since AWS's Id syntax can't hold a hyphenated instance ID directly
+            queries = []
+            for idx, instance_id in enumerate(chunk):
+                prefix = f"q{idx}"
+                id_map[prefix] = instance_id
+                dims = [{"Name": "InstanceId", "Value": instance_id}]
+                queries.append({
+                    "Id": f"{prefix}cavg", "MetricStat": {
+                        "Metric": {"Namespace": "AWS/EC2", "MetricName": "CPUUtilization", "Dimensions": dims},
+                        "Period": period_seconds, "Stat": "Average",
+                    }, "ReturnData": True,
+                })
+                queries.append({
+                    "Id": f"{prefix}cp95", "MetricStat": {
+                        "Metric": {"Namespace": "AWS/EC2", "MetricName": "CPUUtilization", "Dimensions": dims},
+                        "Period": period_seconds, "Stat": "p95",
+                    }, "ReturnData": True,
+                })
+                queries.append({
+                    "Id": f"{prefix}mavg", "MetricStat": {
+                        "Metric": {"Namespace": "CWAgent", "MetricName": "mem_used_percent", "Dimensions": dims},
+                        "Period": period_seconds, "Stat": "Average",
+                    }, "ReturnData": True,
+                })
+                queries.append({
+                    "Id": f"{prefix}mp95", "MetricStat": {
+                        "Metric": {"Namespace": "CWAgent", "MetricName": "mem_used_percent", "Dimensions": dims},
+                        "Period": period_seconds, "Stat": "p95",
+                    }, "ReturnData": True,
+                })
+                results[instance_id] = {"avg_cpu": None, "p95_cpu": None, "avg_mem_available_pct": None, "p95_mem_available_pct": None}
+
+            try:
+                paginator = cw.get_paginator("get_metric_data")
+                for page in paginator.paginate(
+                    MetricDataQueries=queries, StartTime=start_time, EndTime=end_time, ScanBy="TimestampDescending",
+                ):
+                    for md in page.get("MetricDataResults", []):
+                        qid = md.get("Id", "")
+                        values = md.get("Values") or []
+                        if not values:
+                            continue
+                        value = float(values[0])   # one bucket (Period == full window), so at most one value
+                        prefix = qid[:-4]   # strips the 4-char suffix (cavg/cp95/mavg/mp95)
+                        instance_id = id_map.get(prefix)
+                        if instance_id is None:
+                            continue
+                        entry = results[instance_id]
+                        if qid.endswith("cavg"):
+                            entry["avg_cpu"] = round(value, 1)
+                        elif qid.endswith("cp95"):
+                            entry["p95_cpu"] = round(value, 1)
+                        elif qid.endswith("mavg"):
+                            entry["avg_mem_available_pct"] = round(100.0 - value, 1)
+                        elif qid.endswith("mp95"):
+                            entry["p95_mem_available_pct"] = round(100.0 - value, 1)
+            except Exception:
+                continue   # best-effort - one chunk's failure can't block the rest, see docstring
+
+    return results
 
 
 def fetch_live_reservations(creds: AWSCredentials) -> pd.DataFrame:

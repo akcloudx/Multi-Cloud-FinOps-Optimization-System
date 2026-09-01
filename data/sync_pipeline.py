@@ -41,19 +41,22 @@ from azure_conn.connector import (
     load_credentials_from_env, fetch_live_inventory, fetch_live_reservations,
     fetch_live_savings_plans, test_connection, AzureCredentials, _friendly_auth_error,
     list_accessible_subscriptions, check_role_assignments, status_from_role_check,
+    fetch_vm_utilization_metrics,
 )
 from aws.connector import (
     load_aws_credentials_from_env, test_aws_connection, fetch_live_inventory as fetch_live_aws_inventory,
     fetch_live_reservations as fetch_live_aws_reservations, fetch_live_savings_plans as fetch_live_aws_savings_plans,
-    fetch_savings_plans_recommendation,
+    fetch_savings_plans_recommendation, fetch_ec2_utilization_metrics,
 )
 from pricing.azure_retail_api import refresh_retail_prices
 from pricing.aws_price_list import refresh_aws_prices
 from pricing.commitment_pricing import refresh_commitment_prices
 from pricing.azure_vm_flexibility import refresh_vm_flexibility_groups
+from pricing.azure_vm_memory import refresh_vm_sku_memory, get_vm_sku_memory
 from pricing.commitment_mapping import derive_reservation_commitment_fields, derive_savings_plan_commitment_fields
 from pricing.aws_commitment_mapping import derive_aws_reservation_commitment_fields, derive_aws_savings_plan_commitment_fields
 from db.tenants import upsert_subscription
+from analysis.rightsizing import get_rightsizing_settings
 
 
 def _reservation_commitment_id(r: dict) -> str:
@@ -262,6 +265,61 @@ def run_ingestion_pipeline(provider: str = "Azure", creds=None, force_mock: bool
                 enrichment_error = str(e)[:300]
                 reservation_commitments, savings_plan_commitments = [], []
 
+            # VM/EC2 Rightsizing utilization metrics (Avg/P95 CPU + memory-
+            # available %) - real Azure Monitor / AWS CloudWatch fetch,
+            # closing the gap where this only ever worked in Demo mode
+            # (mentor feedback, 2026-09-01): demo seeding populated these 4
+            # CloudInventory columns, but this live ingestion path never
+            # did, so every live VM's classify_vm_utilization() call always
+            # fell through to "Unknown" (fewer than N days of data - there
+            # was never ANY data). Isolated in its own try/except, same
+            # discipline as ri_sp_error/enrichment_error above - a failure
+            # here (permission gap, transient API error) must not fail an
+            # otherwise-successful inventory sync. Only running Compute
+            # rows are queried (matches vm_inventory's own filter in
+            # app.py, and refresh_vm_flexibility_groups' filter above) -
+            # stopped resources have nothing running to measure, and
+            # classify_vm_utilization already returns "Unknown" for any
+            # non-Running resource regardless.
+            utilization_error = None
+            try:
+                vm_records = [
+                    r for r in records
+                    if r.get("Resource Type") == "Compute" and r.get("Resource State") == "Running"
+                ]
+                if vm_records:
+                    # Lookback window comes from the TENANT's own saved
+                    # Rightsizing setting (analysis/rightsizing.py's
+                    # get_rightsizing_settings - same settings infrastructure
+                    # the Rightsizing tab's Settings popover already writes
+                    # to), not a separately-invented value - falls back to
+                    # the "Balanced" preset default when there's no tenant
+                    # row yet (tenant_db_id is None) or no saved override.
+                    tenant_row = None
+                    if tenant_db_id is not None:
+                        with Session(engine) as _settings_session:
+                            tenant_row = _settings_session.get(CloudTenant, tenant_db_id)
+                    lookback_days = get_rightsizing_settings(tenant_row)["lookback_days"]
+
+                    if is_azure:
+                        refresh_vm_sku_memory(engine, vm_records, live_creds)
+                        sku_memory_gb = get_vm_sku_memory(engine)
+                        metrics_by_id = fetch_vm_utilization_metrics(
+                            live_creds, vm_records, lookback_days, sku_memory_gb
+                        )
+                    else:
+                        metrics_by_id = fetch_ec2_utilization_metrics(live_creds, vm_records, lookback_days)
+
+                    for r in records:
+                        m = metrics_by_id.get(r.get("Resource ID"))
+                        if m:
+                            r["Avg CPU %"] = m["avg_cpu"]
+                            r["P95 CPU %"] = m["p95_cpu"]
+                            r["Avg Memory Available %"] = m["avg_mem_available_pct"]
+                            r["P95 Memory Available %"] = m["p95_mem_available_pct"]
+            except Exception as e:
+                utilization_error = str(e)[:300]
+
             with Session(engine) as session:
                 # Replace this tenant's prior snapshot so removed/renamed Azure
                 # resources don't linger as stale rows across re-syncs.
@@ -300,6 +358,10 @@ def run_ingestion_pipeline(provider: str = "Azure", creds=None, force_mock: bool
                         ha_replica_count=r.get("HA Replicas", 0) or 0,
                         payg_hourly_usd=r.get("PAYG Hourly Cost USD", 0.0),
                         avg_daily_running_hours=r.get("Avg Daily Running Hours", 24),
+                        avg_cpu_percent=r.get("Avg CPU %"),
+                        p95_cpu_percent=r.get("P95 CPU %"),
+                        avg_memory_percent=r.get("Avg Memory Available %"),
+                        p95_memory_percent=r.get("P95 Memory Available %"),
                         subscription=r.get("Subscription", ""),
                         resource_group=r.get("Resource Group", "") or "",
                         availability_zone=r.get("Availability Zone", "") or "",
@@ -353,7 +415,7 @@ def run_ingestion_pipeline(provider: str = "Azure", creds=None, force_mock: bool
                 # fetch or pricing/flex-group enrichment hit its own error -
                 # the inventory portion is real, useful progress and
                 # shouldn't be reported as a failed sync.
-                status = "PARTIAL" if (ri_sp_error or enrichment_error) else "SUCCESS"
+                status = "PARTIAL" if (ri_sp_error or enrichment_error or utilization_error) else "SUCCESS"
                 session.add(SyncLog(
                     synced_at=now_iso,
                     provider=provider,
@@ -447,6 +509,11 @@ def run_ingestion_pipeline(provider: str = "Azure", creds=None, force_mock: bool
                 message = (
                     f"Inventory synced: {synced_count} resource(s). Pricing/flexibility-group enrichment "
                     f"skipped - {enrichment_error}"
+                )
+            elif utilization_error:
+                message = (
+                    f"Inventory synced: {synced_count} resource(s). Rightsizing utilization metrics fetch "
+                    f"skipped - {utilization_error}"
                 )
             else:
                 message = (

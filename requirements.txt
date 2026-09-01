@@ -29,4 +29,12 @@ azure-mgmt-authorization>=4.0.0
 azure-mgmt-reservations>=3.0.0
 azure-mgmt-billingbenefits>=1.0.0b2
 azure-mgmt-datafactory>=10.0.0
+# Added for VM Rightsizing in production (2026-09-01, mentor feedback) -
+# azure-mgmt-compute's resource_skus.list() gets each VM SKU's total RAM
+# (needed to convert Azure Monitor's raw-bytes memory metric to %), and
+# azure-mgmt-monitor's metrics.list() is the real live CPU/memory
+# utilization fetch itself. See azure_conn/connector.py::
+# fetch_vm_sku_memory / fetch_vm_utilization_metrics.
+azure-mgmt-compute>=30.0.0
+azure-mgmt-monitor>=6.0.0
 cryptography<44,>=42

@@ -688,6 +688,28 @@ class AzureVmFlexibilityGroup(Base):
     fetched_at         = Column(String(255), nullable=False)
 
 
+class AzureVmSkuMemory(Base):
+    """
+    Cache of REAL total RAM (GB) per Azure VM SKU/region, fetched from the
+    Resource SKUs API (GET .../providers/Microsoft.Compute/skus?$filter=
+    location eq '{region}', real endpoint confirmed via Microsoft's own REST
+    API reference - see azure_conn/connector.py::fetch_vm_sku_memory).
+    Needed because Azure Monitor's "Available Memory Bytes" VM metric is a
+    raw byte count, not a %, so converting it to the "% available" this
+    app's rightsizing engine expects (analysis/rightsizing.py) needs each
+    SKU's total RAM. Exact sibling of AzureVmFlexibilityGroup above - same
+    per-region-cache architecture, same narrow "only SKUs actually present
+    in this tenant's inventory" keying discipline.
+    """
+    __tablename__ = "azure_vm_sku_memory"
+
+    id                 = Column(Integer, primary_key=True, autoincrement=True)
+    region             = Column(String(255), nullable=False)
+    sku                = Column(String(255), nullable=False)
+    memory_gb          = Column(Float, nullable=False)
+    fetched_at         = Column(String(255), nullable=False)
+
+
 class ReservationPurchase(Base):
     """
     A purchased Reserved Instance / Reserved Capacity record, schema-matched

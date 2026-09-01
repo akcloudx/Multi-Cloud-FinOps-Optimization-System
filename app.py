@@ -4781,18 +4781,22 @@ def _render_rightsizing_tab():
         return
 
     # Percentile setting selects the aggregation the real per-provider metrics
-    # service would query in production (Azure Monitor Metrics / Amazon
-    # CloudWatch); today's demo/synced data only ever captures Avg and P95
-    # (see data/inventory_loader.py), so classification reads the stored P95
-    # columns regardless of the configured percentile - disclosed
-    # simplification, not silently pretended to be arbitrary-percentile-
-    # accurate. Threshold changes alone already drive real classification
-    # differences without this, so nothing downstream is faked.
+    # service queries (Azure Monitor Metrics / Amazon CloudWatch, live for a
+    # connected tenant - data/sync_pipeline.py, added 2026-09-01 after mentor
+    # feedback that Rightsizing only ever worked in Demo; also still true for
+    # demo/synced data - see data/inventory_loader.py); classification reads
+    # the stored P95 columns regardless of the configured percentile - the
+    # sync fetches one fixed Avg+P95 pair per sync run, not a live query
+    # re-run for whatever percentile happens to be selected right now.
+    # Disclosed simplification, not silently pretended to be arbitrary-
+    # percentile-accurate. Threshold changes alone already drive real
+    # classification differences without this, so nothing downstream is
+    # faked.
     live_metrics_service = "Azure Monitor Metrics" if is_azure else "Amazon CloudWatch"
     st.caption(
-        ":material/info: Classification currently reads the stored P95 CPU/Memory values (this app's synced "
-        f"summary stats). Full arbitrary-percentile aggregation requires a live production-phase "
-        f"{live_metrics_service} query — not built yet."
+        ":material/info: Classification reads the stored P95 CPU/Memory values (this app's synced "
+        f"summary stats, refreshed each sync from live {live_metrics_service} data for a connected tenant). "
+        "Full arbitrary-percentile aggregation on demand would require a live query per render — not built."
     )
 
     rows = []

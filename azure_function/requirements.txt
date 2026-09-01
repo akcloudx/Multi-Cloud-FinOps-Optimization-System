@@ -24,5 +24,9 @@ azure-mgmt-subscription>=3.1.1
 azure-mgmt-authorization>=4.0.0
 azure-mgmt-reservations>=3.0.0
 azure-mgmt-billingbenefits>=1.0.0b2
+# Added for VM Rightsizing in production (2026-09-01) - see the root
+# requirements.txt's comment on the same two lines.
+azure-mgmt-compute>=30.0.0
+azure-mgmt-monitor>=6.0.0
 cryptography<44,>=42
 azure-functions

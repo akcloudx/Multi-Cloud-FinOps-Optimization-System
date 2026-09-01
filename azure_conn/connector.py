@@ -81,8 +81,22 @@ try:
 except ImportError:
     HAS_DATAFACTORY = False
 
+try:
+    from azure.mgmt.compute import ComputeManagementClient
+    HAS_COMPUTE = True
+except ImportError:
+    HAS_COMPUTE = False
+
+try:
+    from azure.mgmt.monitor import MonitorManagementClient
+    HAS_MONITOR = True
+except ImportError:
+    HAS_MONITOR = False
+
 import base64
 import json
+from datetime import datetime, timedelta, timezone
+import numpy as np
 import pandas as pd
 
 
@@ -1243,6 +1257,164 @@ def fetch_vm_flexibility_groups(creds: AzureCredentials, location: str) -> dict:
         if item.name and group_name and ratio is not None:
             groups[item.name] = (group_name, ratio)
     return groups
+
+
+def fetch_vm_sku_memory(creds: AzureCredentials, location: str) -> dict:
+    """Real total RAM (GB) per Azure VM SKU, for one region, via the
+    Resource SKUs API (GET /subscriptions/{subscriptionId}/providers/
+    Microsoft.Compute/skus?api-version=2021-07-01&$filter=location eq
+    '{location}' - real endpoint + $filter syntax confirmed against
+    Microsoft's own REST API reference, not guessed). Returns
+    {sku_name: memory_gb} for every virtualMachines-type SKU where the
+    MemoryGB capability was present - a SKU missing it is silently
+    omitted, same "can't determine, don't fabricate" discipline as
+    fetch_vm_flexibility_groups above.
+
+    ComputeManagementClient.resource_skus.list(filter=...) is the
+    documented Python SDK method for this endpoint (confirmed against
+    Microsoft's own azure-mgmt-compute API reference) - only a location
+    filter is supported server-side, so resourceType=="virtualMachines"
+    is filtered client-side, same shape as fetch_vm_flexibility_groups
+    filtering client-side too. subscription_id is only needed to
+    authenticate the call, same pattern already documented for
+    ReservationsMgmtClient/BillingBenefitsMgmtClient above.
+
+    No new IAM permission needed: Reader (already required, see
+    REQUIRED_SUBSCRIPTION_ROLES) is Azure's built-in role with
+    "actions": ["*/read"] (confirmed via Microsoft's own built-in-roles
+    reference, learn.microsoft.com/azure/role-based-access-control/
+    built-in-roles/general#reader) - a wildcard covering
+    Microsoft.Compute/skus/read already.
+    """
+    if not HAS_AZURE_IDENTITY or not HAS_COMPUTE:
+        raise ImportError(
+            "Install required packages: pip install azure-identity azure-mgmt-compute"
+        )
+
+    credential = ClientSecretCredential(
+        tenant_id=creds.tenant_id, client_id=creds.client_id, client_secret=creds.client_secret,
+    )
+    client = ComputeManagementClient(credential, creds.subscription_id)
+
+    memory_by_sku: dict = {}
+    for sku in client.resource_skus.list(filter=f"location eq '{location}'"):
+        if sku.resource_type != "virtualMachines":
+            continue
+        memory_gb = None
+        for cap in (sku.capabilities or []):
+            if cap.name == "MemoryGB":
+                try:
+                    memory_gb = float(cap.value)
+                except (TypeError, ValueError):
+                    memory_gb = None
+                break
+        if sku.name and memory_gb is not None:
+            memory_by_sku[sku.name] = memory_gb
+    return memory_by_sku
+
+
+def fetch_vm_utilization_metrics(creds: AzureCredentials, vm_records: list, lookback_days: int,
+                                  sku_memory_gb: dict) -> dict:
+    """Real CPU/memory utilization (Average + P95) per Azure VM, over the
+    last `lookback_days` days, via Azure Monitor Metrics (GET .../
+    providers/microsoft.insights/metrics?api-version=2018-01-01&
+    metricnames=Percentage CPU,Available Memory Bytes&timespan=...&
+    interval=PT1H&aggregation=Average - real endpoint/params confirmed
+    against Microsoft's own REST API reference for VM metrics). Returns
+    {resource_id: {"avg_cpu": float|None, "p95_cpu": float|None,
+    "avg_mem_available_pct": float|None, "p95_mem_available_pct":
+    float|None}}.
+
+    Percentage CPU is a host-level (hypervisor) metric, always available
+    for every VM with no agent needed. Available Memory Bytes is a
+    guest-level metric that needs the Azure Diagnostics extension /
+    guest-level monitoring installed on that specific VM (confirmed via
+    Microsoft Learn) - a VM without it simply returns an empty series
+    here, which becomes None, same as every other "can't determine"
+    fallback in this app.
+
+    MonitorManagementClient.metrics.list() only supports Average/Minimum/
+    Maximum/Total/Count server-side aggregation - NO native percentile
+    (confirmed against Microsoft's own supported-metrics docs, unlike
+    AWS CloudWatch's real ExtendedStatistics="p95"). P95 is therefore
+    computed client-side (numpy) from the hourly Average time-series
+    points this call returns - same "Avg + P95 from the stored summary
+    stats" simplification already disclosed in app.py's Rightsizing tab
+    caption for demo data, now genuinely true for live data too.
+
+    Available Memory Bytes -> "% available" conversion needs each VM's
+    total RAM, looked up from `sku_memory_gb` (the caller-supplied
+    {sku: memory_gb} dict from pricing/azure_vm_memory.py's cache) - a SKU
+    missing from that dict (uncached, or Azure's SKU catalog didn't have
+    it) means memory fields stay None for that VM, CPU is unaffected.
+
+    Best-effort per VM: a failure fetching one VM's metrics (transient
+    API error, VM deleted mid-sync, etc.) doesn't block any other VM -
+    matches this app's established "one bad row can't sink the whole
+    sync" discipline (see data/sync_pipeline.py's own isolation comments).
+    """
+    if not HAS_AZURE_IDENTITY or not HAS_MONITOR:
+        raise ImportError(
+            "Install required packages: pip install azure-identity azure-mgmt-monitor"
+        )
+
+    credential = ClientSecretCredential(
+        tenant_id=creds.tenant_id, client_id=creds.client_id, client_secret=creds.client_secret,
+    )
+    client = MonitorManagementClient(credential, creds.subscription_id)
+
+    end_time = datetime.now(timezone.utc)
+    start_time = end_time - timedelta(days=lookback_days)
+    timespan = f"{start_time.isoformat()}/{end_time.isoformat()}"
+
+    results: dict = {}
+    for vm in vm_records:
+        resource_id = vm.get("Resource ID") or vm.get("resource_id")
+        sku = vm.get("SKU") or vm.get("sku")
+        if not resource_id:
+            continue
+        entry = {"avg_cpu": None, "p95_cpu": None, "avg_mem_available_pct": None, "p95_mem_available_pct": None}
+        try:
+            response = client.metrics.list(
+                resource_uri=resource_id,
+                metricnames="Percentage CPU,Available Memory Bytes",
+                timespan=timespan,
+                interval="PT1H",
+                aggregation="Average",
+            )
+        except Exception:
+            results[resource_id] = entry
+            continue   # best-effort - one VM's metrics failure can't block the rest, see docstring
+
+        for metric in (response.value or []):
+            points = []
+            for series in (metric.timeseries or []):
+                for point in (series.data or []):
+                    if point.average is not None:
+                        points.append(point.average)
+            if not points:
+                continue
+            if metric.name and metric.name.value == "Percentage CPU":
+                entry["avg_cpu"] = round(float(np.mean(points)), 1)
+                entry["p95_cpu"] = round(float(np.percentile(points, 95)), 1)
+            elif metric.name and metric.name.value == "Available Memory Bytes":
+                memory_gb = sku_memory_gb.get(sku)
+                if memory_gb:
+                    total_bytes = memory_gb * (1024 ** 3)
+                    avail_pct_points = [min(100.0, (b / total_bytes) * 100.0) for b in points]
+                    entry["avg_mem_available_pct"] = round(float(np.mean(avail_pct_points)), 1)
+                    # "P95 memory pressure" means the P95 of USAGE, i.e. a
+                    # near-worst-case-pressure moment - since available% is
+                    # the mirror of usage% (available = 100 - used), that
+                    # same worst-case moment is the 5th percentile of the
+                    # AVAILABLE-% distribution, not the 95th (aws/connector
+                    # .py's equivalent doesn't need this flip - CloudWatch
+                    # already returns one pre-aggregated p95-of-usage
+                    # scalar there, converted via 100-x afterward, not a
+                    # full distribution percentiled directly like this).
+                    entry["p95_mem_available_pct"] = round(float(np.percentile(avail_pct_points, 5)), 1)
+        results[resource_id] = entry
+    return results
 
 
 def fetch_live_savings_plans(creds: AzureCredentials) -> pd.DataFrame:
