@@ -2900,11 +2900,13 @@ def _render_sp_pool_economics(pool_label: str, pool_df: pd.DataFrame, existing_c
     # pool that's genuinely "well covered" overall STILL discloses that 2
     # of its resources are permanently unpriced, instead of only ever
     # saying something when literally every resource is.
+    _pool_size = len(pool_df)
     _unpriced_by_design_count = 0
     if not pool_df.empty:
         for _, _r in pool_df.iterrows():
             if unpriced_by_design_reason(selected_provider, _r.get("Resource Type"), _r.get("SKU")):
                 _unpriced_by_design_count += 1
+    _all_unpriced_by_design = _pool_size > 0 and _unpriced_by_design_count == _pool_size
 
     # sub mirrors RI Coverage's own headline pattern (see
     # _render_ri_coverage_tab's "sub" variable + .rec-headline-sub CSS
@@ -2913,6 +2915,17 @@ def _render_sp_pool_economics(pool_label: str, pool_df: pd.DataFrame, existing_c
     is_warning = leakage_hr > 0
     if is_warning:
         sentence = f"You've committed <b>{fmt(leakage_hr)}/hr</b> more than is currently eligible — worth reviewing this plan."
+    elif baseline_hr <= 0.001 and _all_unpriced_by_design:
+        # Real bug caught 2026-09-02, right after the structural fix below
+        # shipped: for a pool that's 100% by-design-unpriced, the previous
+        # version STILL said "Can't price this yet... Re-run a sync",
+        # and then immediately appended the disclosure saying "re-syncing
+        # won't change it" - a direct, visible contradiction in the same
+        # sentence. When literally every eligible resource is a known,
+        # permanently-unpriced type, the headline itself says so plainly,
+        # with no "try syncing" advice to contradict.
+        sentence = "<b>Can't price this by design</b> — not a data gap, and re-syncing won't change it."
+        sub = "See \"Why $0.00/hr\" in \"What's eligible\" below for the reason."
     elif baseline_hr <= 0.001:
         sentence = "<b>Can't price this yet</b> — no cached PAYG rate for this pool's resources."
         sub = "Re-run a sync from the tenant's Manage dialog on the Home page."
@@ -2926,7 +2939,12 @@ def _render_sp_pool_economics(pool_label: str, pool_df: pd.DataFrame, existing_c
     else:
         sentence = f"We recommend committing <b>{fmt(recommended_hr)}/hr</b> more, based on your safety buffer setting."
 
-    if _unpriced_by_design_count > 0:
+    # Disclosure only added for a PARTIAL mix (some priced, some not) - the
+    # realistic large-tenant case the structural fix above exists for. When
+    # it's ALL unpriced-by-design, the headline branch above already says
+    # so directly (adding this again would just repeat the same fact in
+    # two places); when it's NONE, there's nothing to disclose.
+    if 0 < _unpriced_by_design_count < _pool_size:
         _plural = _unpriced_by_design_count != 1
         _disclosure = (
             f"{_unpriced_by_design_count} resource{'s' if _plural else ''} here {'are' if _plural else 'is'} "
