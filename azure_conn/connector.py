@@ -585,6 +585,25 @@ Resources
     # top-level sku (Pool/Instance Pool). zoneRedundant/haReplicaCount only
     # apply to standalone databases. master DB and pooled-MI exclusions kept
     # exactly as before.
+    # sqlUseFreeLimit (extend clause below) reads the real ARM property
+    # Microsoft.Sql/servers/databases.properties.useFreeLimit (confirmed
+    # via Microsoft's own Bicep/ARM template reference) - Azure SQL's real
+    # "free-limits" program flag, added 2026-09-02 real feedback: a
+    # Serverless database enrolled in this program bills genuinely $0 up
+    # to 100K vCore-seconds/month, but this app's PAYG lookup has no way
+    # to represent that (deliberately left unpriced - see pricing/
+    # azure_retail_api.py's own disclosed reasoning) and was showing a
+    # generic "Not eligible for RI" note instead of the far more relevant
+    # "this is on the free tier" one. Only meaningful for a single
+    # database (elastic pools/managed instances/instance pools don't
+    # carry this property - coalesced to false for those below, same
+    # "can't determine, don't guess" fallback as every other resolved*
+    # field in this query). Kept as a real Python comment OUTSIDE the KQL
+    # string, not a "#"-prefixed line inside it - KQL only recognizes "//"
+    # for comments, and a stray "#" inside the query text is invalid
+    # syntax that silently failed this whole query group (caught by
+    # group_errors below, logged, returns zero rows) - a real regression
+    # caught live 2026-09-02 (finops-db vanished from Inventory entirely).
     "sql": """
 Resources
 | where type in (
@@ -603,19 +622,6 @@ Resources
     poolSkuName = tostring(sku.name),
     poolSkuCapacity = tostring(sku.capacity),
     instancePoolVCores = tostring(properties.vCores),
-    # Real ARM property (Microsoft.Sql/servers/databases, confirmed via
-    # Microsoft's own Bicep/ARM template reference) - Azure SQL's real
-    # "free-limits" program flag, added 2026-09-02 real feedback: a
-    # Serverless database enrolled in this program bills genuinely $0 up
-    # to 100K vCore-seconds/month, but this app's PAYG lookup has no way
-    # to represent that (deliberately left unpriced - see pricing/
-    # azure_retail_api.py's own disclosed reasoning) and was showing a
-    # generic "Not eligible for RI" note instead of the far more relevant
-    # "this is on the free tier" one. Only meaningful for a single
-    # database (elastic pools/managed instances/instance pools don't
-    # carry this property - coalesced to false for those below, same
-    # "can't determine, don't guess" fallback as every other resolved*
-    # field in this query).
     sqlUseFreeLimit = tobool(properties.useFreeLimit)
 | extend
     sqlSku = case(
