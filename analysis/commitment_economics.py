@@ -45,6 +45,18 @@ def _hyperscale_replica_multiplier(resource_type: str, sku: str, ha_replicas) ->
 
 
 def _lookup_rate(prices_df: pd.DataFrame, instrument: str, term: str, resource_type: str, region: str, sku: str, os_: str, redundancy: str = "N/A"):
+    """Real crash fixed 2026-09-02, live: a CommitmentPriceCache row can
+    legitimately exist with effective_hourly_rate_usd = NULL - that's not
+    missing data, it's pricing/commitment_pricing.py's own live fetch
+    having CONFIRMED no Reservation offering exists for this SKU (see
+    term_row_exists()'s own docstring for the same distinction: a null-
+    rate row is a real, durable "no" answer, not "unknown"). A Serverless
+    Azure SQL Database - not RI-eligible at all, per analysis/
+    ri_eligibility.py - is exactly this case, and this function crashed
+    trying float(None) on it instead of returning None like every other
+    "can't price this" path here. .notna() filters those out BEFORE the
+    empty check, same guard _lookup_payg() right below already has -
+    this just never got the same fix when that one did."""
     if prices_df is None or prices_df.empty:
         return None
     m = prices_df[
@@ -55,6 +67,7 @@ def _lookup_rate(prices_df: pd.DataFrame, instrument: str, term: str, resource_t
         (prices_df["sku"] == sku) &
         (prices_df["os"] == os_) &
         (prices_df["redundancy"] == (redundancy or "N/A"))
+        & prices_df["effective_hourly_rate_usd"].notna()
     ]
     if m.empty:
         return None
