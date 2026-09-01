@@ -69,7 +69,12 @@ jobs:
         run: |
           mkdir -p dist-func
           cp azure_function/host.json azure_function/function_app.py azure_function/requirements.txt dist-func/
-          cp -r db data azure_conn pricing aws dist-func/
+          # "analysis" added 2026-09-01 - real bug caught live via
+          # Application Insights ("No module named 'analysis'"): this list
+          # was never updated when the VM Rightsizing work added
+          # data/sync_pipeline.py's first-ever import from analysis/ - see
+          # azure_deploy/deploy_all_resources.ps1's matching comment.
+          cp -r db data azure_conn pricing aws analysis dist-func/
 
       - name: Deploy 24h cron Function App
         uses: Azure/functions-action@v1

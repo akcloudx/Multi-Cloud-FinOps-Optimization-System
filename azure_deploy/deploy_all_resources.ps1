@@ -456,7 +456,19 @@ if (Test-Path $funcCodePath) {
     Copy-Item (Join-Path $funcCodePath "host.json") $funcStagePath
     Copy-Item (Join-Path $funcCodePath "function_app.py") $funcStagePath
     Copy-Item (Join-Path $funcCodePath "requirements.txt") $funcStagePath
-    foreach ($dep in @("db", "data", "azure_conn", "pricing", "aws")) {
+    # "analysis" added 2026-09-01 - real bug caught live (Application
+    # Insights logs, once temporarily enabled to diagnose "0 functions
+    # indexed": "Error: No module named 'analysis'. Cannot find module.")
+    # - this list was never updated when data/sync_pipeline.py's VM
+    # Rightsizing work added its first-ever import from analysis/
+    # (analysis.rightsizing.get_rightsizing_settings). Latent since
+    # sync_pipeline.py never needed anything from analysis/ before that,
+    # so the Function App's host indexing silently worked despite this
+    # gap - until that import made it a hard ImportError at module load,
+    # which kills ALL function registration for the whole file, not just
+    # the one import. Same gap existed in .github/workflows/deploy.yml's
+    # deploy-function job - fixed there too.
+    foreach ($dep in @("db", "data", "azure_conn", "pricing", "aws", "analysis")) {
         Copy-Item (Join-Path $parentPath $dep) (Join-Path $funcStagePath $dep) -Recurse
     }
 
