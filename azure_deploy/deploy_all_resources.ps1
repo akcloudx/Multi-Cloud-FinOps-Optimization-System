@@ -266,11 +266,57 @@ if (-not $funcExists) {
     # $ResourceGroupName --query sku` and confirm it still reports
     # "Dynamic"/"Y1" if you ever touch this block.
     $funcPlanExists = az functionapp plan show --name $FunctionPlanName --resource-group $ResourceGroupName --query name -o tsv 2>$null
+    if ($funcPlanExists) {
+        # Real error hit 2026-09-01, one run after the @file JSON-quoting
+        # fix below: the plan WAS created, but the JSON body only set
+        # location/sku - with no kind/reserved, ARM defaults a serverfarm
+        # to WINDOWS, and Python Functions only run on Linux ("Runtime
+        # python not supported for os windows" - the exact live error).
+        # Detects and self-heals a plan left over from that: `reserved`
+        # is ARM's real Linux/Windows flag on Microsoft.Web/serverfarms
+        # (confirmed via Microsoft's own ARM/Bicep samples for a Linux
+        # Consumption Function plan) - "true" means Linux. A plan that's
+        # already correctly Linux is left alone (idempotent, no-op).
+        $funcPlanIsLinux = (az functionapp plan show --name $FunctionPlanName --resource-group $ResourceGroupName --query reserved -o tsv 2>$null) -eq "true"
+        if (-not $funcPlanIsLinux) {
+            Write-Host "        Existing plan '$FunctionPlanName' is Windows-mode (Python needs Linux) - deleting so it can be recreated correctly..." -ForegroundColor Yellow
+            az functionapp plan delete --name $FunctionPlanName --resource-group $ResourceGroupName --yes -o none
+            $funcPlanExists = $null
+        }
+    }
     if (-not $funcPlanExists) {
         Write-Host "        Creating named Consumption plan '$FunctionPlanName'..." -ForegroundColor Yellow
-        $planJson = "{`"location`":`"$Location`",`"sku`":{`"name`":`"Y1`",`"tier`":`"Dynamic`"}}"
-        az resource create --resource-group $ResourceGroupName --name $FunctionPlanName --resource-type "Microsoft.Web/serverfarms" --is-full-object --properties $planJson -o none
-        if ($LASTEXITCODE -ne 0) { Fail "Creating named Consumption plan '$FunctionPlanName'" }
+        # Passed via a temp @file, not inline on the command line - real
+        # error hit 2026-09-01: `az` on Windows is az.cmd, a batch wrapper
+        # that re-parses the command line through cmd.exe before Python
+        # ever sees it, and that re-parse strips embedded double quotes
+        # from an inline JSON string PowerShell passes to a native/batch
+        # exe (confirmed live: the JSON arrived as
+        # {location:westus3,sku:{name:Y1,tier:Dynamic}} - every `"` gone).
+        # `az`'s own `--properties @<file>` form reads the JSON straight
+        # off disk instead, sidestepping that re-parse entirely - the
+        # standard, documented fix for this exact class of Windows-only
+        # az CLI quoting bug. [System.IO.File]::WriteAllText (not
+        # Set-Content -Encoding utf8) writes UTF-8 with NO byte-order-mark
+        # in both Windows PowerShell 5.1 and 7+ - Set-Content's BOM-less
+        # "utf8NoBOM" encoding name only exists from PS 6 on, and a BOM at
+        # the front of this file could itself trip up az's JSON parser.
+        # kind="linux" + properties.reserved=true is what actually makes
+        # this a LINUX Consumption plan (see the self-heal comment above -
+        # omitting these is exactly what produced the Windows-default
+        # plan the first time).
+        $planJsonPath = Join-Path $env:TEMP "finops-func-plan-$suffix.json"
+        $planJson = @{
+            location   = $Location
+            kind       = "linux"
+            sku        = @{ name = "Y1"; tier = "Dynamic" }
+            properties = @{ reserved = $true }
+        } | ConvertTo-Json -Compress
+        [System.IO.File]::WriteAllText($planJsonPath, $planJson)
+        az resource create --resource-group $ResourceGroupName --name $FunctionPlanName --resource-type "Microsoft.Web/serverfarms" --is-full-object --properties "@$planJsonPath" -o none
+        $funcPlanCreateExit = $LASTEXITCODE
+        Remove-Item -Path $planJsonPath -Force -ErrorAction SilentlyContinue
+        if ($funcPlanCreateExit -ne 0) { Fail "Creating named Consumption plan '$FunctionPlanName'" }
     }
 
     # --disable-app-insights added 2026-08-30, real feedback: without it,
@@ -282,11 +328,38 @@ if (-not $funcExists) {
     # Analytics"/"APPINSIGHTS" before removing it, not assumed. Pure
     # unused monitoring infrastructure this deployment never asked for.
     #
-    # --plan (the just-created named plan above) replaces
-    # --consumption-plan-location here - passing both is invalid, and
-    # --plan alone is what avoids the auto-generated-name behavior.
-    az functionapp create --resource-group $ResourceGroupName --plan $FunctionPlanName --runtime python --runtime-version 3.12 --functions-version 4 --name $FunctionAppName --storage-account $StorageAccountName --os-type Linux --disable-app-insights true -o none
+    # Real error hit 2026-09-01: `az functionapp create --plan
+    # $FunctionPlanName` (pointing at the named plan created above) fails
+    # with "AlwaysOn cannot be set for this site as the plan does not
+    # allow it" - a long-standing, documented Azure CLI bug (Azure/
+    # azure-cli#8388, #12271): the --plan code path always tries to set
+    # AlwaysOn regardless of what plan it's given, and Consumption/Dynamic
+    # plans reject AlwaysOn outright. Only --consumption-plan-location
+    # correctly skips it - but that auto-names the plan, defeating the
+    # whole point of creating a named one above. Real, documented
+    # workaround (same GitHub issues): create via
+    # --consumption-plan-location (known-good path, gets an auto-named
+    # throwaway Consumption plan), then move the Function App onto the
+    # ALREADY-CREATED named plan via `az functionapp update --plan`
+    # (confirmed a real, supported parameter via Microsoft's own CLI
+    # reference) - moving a Consumption-tier Function App between two
+    # Consumption plans in the same region is a supported, low-risk
+    # operation (Consumption plans are a scaling/billing construct, not a
+    # dedicated host). The now-empty throwaway plan is deleted afterward
+    # so it doesn't linger as clutter.
+    az functionapp create --resource-group $ResourceGroupName --consumption-plan-location $Location --runtime python --runtime-version 3.12 --functions-version 4 --name $FunctionAppName --storage-account $StorageAccountName --os-type Linux --disable-app-insights true -o none
     if ($LASTEXITCODE -ne 0) { Fail "Creating Function App '$FunctionAppName'" }
+
+    $tempPlanId = az functionapp show --resource-group $ResourceGroupName --name $FunctionAppName --query "appServicePlanId" -o tsv
+    $tempPlanName = ($tempPlanId -split '/')[-1]
+    if ($tempPlanName -and $tempPlanName -ne $FunctionPlanName) {
+        Write-Host "        Moving Function App onto the named plan '$FunctionPlanName'..." -ForegroundColor Yellow
+        az functionapp update --resource-group $ResourceGroupName --name $FunctionAppName --plan $FunctionPlanName -o none
+        if ($LASTEXITCODE -ne 0) { Fail "Moving Function App '$FunctionAppName' onto '$FunctionPlanName'" }
+        Write-Host "        Deleting the auto-named throwaway plan '$tempPlanName'..." -ForegroundColor Yellow
+        az functionapp plan delete --resource-group $ResourceGroupName --name $tempPlanName --yes -o none
+    }
+
     Start-Sleep -Seconds 5
     Write-Host "        [OK] Provisioned." -ForegroundColor Green
 } else {
