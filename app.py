@@ -1965,7 +1965,21 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
         if r["Resource State"] != "Running" or r["PAYG Hourly Cost USD"]:
             return ""
         reason = _payg_blank_reason(r["Resource Type"], r["SKU"], r.get("Is Free Limit Enabled", False))
-        return (reason[:87] + "...") if len(reason) > 90 else reason
+        # Cap raised 90 -> 150, 2026-09-02, real feedback: the 4 reasons an
+        # actual tenant is likely to hit (Storage's 100TB+ note, App
+        # Service Basic/Consumption-plan RI/SP notes, the new free-limits
+        # note) are all 87-123 chars - all were getting cut mid-sentence at
+        # the old 90-char cap even after the column itself was widened,
+        # since widening the COLUMN doesn't un-truncate a STRING already
+        # cut by this line. 150 shows every one of those in full. A
+        # genuinely rare, much longer reason (checked across every real
+        # reason string in analysis/ri_eligibility.py, analysis/
+        # sp_eligibility.py, pricing/sku_mapping.py - a couple of edge
+        # cases like AWS EC2 Mac instances/Azure-SSIS Integration Runtime
+        # run up to ~265 chars) still gets truncated deliberately - showing
+        # those in full would need a ~2000px column, which would wreck
+        # this table's scannability for the sake of 2-3 rare edge cases.
+        return (reason[:147] + "...") if len(reason) > 150 else reason
 
     disp["_monthly_blank_reason"] = disp.apply(_monthly_blank_reason, axis=1)
     # MONTH_HOURS (730, pricing/commitment_pricing.py) is the same constant
@@ -2689,7 +2703,14 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
             # than re-deriving an exact ratio that can't be verified
             # blind - re-check against a live screenshot, adjust further if
             # still clipped.
-            "Est. Monthly PAYG Cost": st.column_config.TextColumn("Est. Monthly Cost", width=620),
+            #
+            # 620 -> 1000, 2026-09-02: real feedback, still seen live -
+            # widening the COLUMN didn't un-truncate the underlying STRING,
+            # which was still being cut at 90 chars by _monthly_blank_
+            # reason() above regardless of how much column space existed.
+            # That cap is now 150 (same ~6.9px/char ratio applied to the
+            # new cap) - this width follows it up to match.
+            "Est. Monthly PAYG Cost": st.column_config.TextColumn("Est. Monthly Cost", width=1000),
         },
     )
     with dl_col:
