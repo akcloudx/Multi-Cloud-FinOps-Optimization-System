@@ -2869,9 +2869,31 @@ def _render_sp_pool_economics(pool_label: str, pool_df: pd.DataFrame, existing_c
     # no priceable spend gets its own honest "can't price this yet" state
     # instead, same "don't guess" discipline as the "Estimate only" caption
     # already applies to the separate commitment-rate gap below.
+    # "Can't price this yet... re-run a sync" is only true when the gap
+    # is genuinely transient (a real rate that a fresh sync could still
+    # find). Real feedback 2026-09-02: for a pool made ENTIRELY of Azure
+    # SQL Database Serverless resources, that's not true - this app
+    # deliberately never prices Serverless SQL at a flat $/hr, permanently
+    # (see pricing/azure_retail_api.py's own disclosed reasoning: it bills
+    # per-vCore-second with auto-pause and a real free-limits program, not
+    # a fixed rate) - no amount of re-syncing will ever populate a rate
+    # here, so telling someone to "re-run a sync" for this specific case
+    # is actively misleading, not just imprecise.
+    _serverless_sql_sku_re = re.compile(r"^(GP|HS)_S_Gen\d+_\d+$")
+    _is_never_priced_serverless_sql = (not pool_df.empty) and pool_df.apply(
+        lambda r: r.get("Resource Type") == "Azure SQL Database" and bool(_serverless_sql_sku_re.match(r.get("SKU") or "")),
+        axis=1,
+    ).all()
+
     is_warning = leakage_hr > 0
     if is_warning:
         sentence = f"You've committed <b>{fmt(leakage_hr)}/hr</b> more than is currently eligible — worth reviewing this plan."
+    elif baseline_hr <= 0.001 and _is_never_priced_serverless_sql:
+        sentence = (
+            "<b>Can't price this by design</b> — every eligible resource here is Serverless SQL Database, "
+            "which bills per-vCore-second (not a flat rate) and may be on Azure's free-limits program. "
+            "Re-syncing won't change this."
+        )
     elif baseline_hr <= 0.001:
         sentence = (
             "<b>Can't price this yet</b> — this pool has eligible resources, but no cached PAYG rate for "
