@@ -82,6 +82,7 @@ def get_compute_inventory(provider: str = "Azure", mode: str = "demo", tenant_id
             "P95 CPU %":                r.p95_cpu_percent,
             "Avg Memory Available %":   r.avg_memory_percent,
             "P95 Memory Available %":   r.p95_memory_percent,
+            "Is Free Limit Enabled":    bool(r.is_free_limit_enabled),
             "Provider":                 r.provider,
             "Is Orphaned":              r.is_orphaned,
         }
@@ -91,5 +92,5 @@ def get_compute_inventory(provider: str = "Azure", mode: str = "demo", tenant_id
                "SKU", "Redundancy", "HA Replicas", "PAYG Hourly Cost USD", "Avg Daily Running Hours",
                "Subscription", "Resource Group", "Availability Zone",
                "Avg CPU %", "P95 CPU %", "Avg Memory Available %", "P95 Memory Available %",
-               "Provider", "Is Orphaned"]
+               "Is Free Limit Enabled", "Provider", "Is Orphaned"]
     return pd.DataFrame(data, columns=columns)

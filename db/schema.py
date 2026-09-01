@@ -353,6 +353,10 @@ def init_db(provider: str = "Azure", mode: str = "demo"):
     _ensure_column(engine, schema_name, "cloud_inventory", "p95_cpu_percent", "FLOAT")
     _ensure_column(engine, schema_name, "cloud_inventory", "avg_memory_percent", "FLOAT")
     _ensure_column(engine, schema_name, "cloud_inventory", "p95_memory_percent", "FLOAT")
+    # "BIT" not "BOOLEAN" - SQL Server has no BOOLEAN type, a mistake that
+    # already caused a real production outage twice this session on other
+    # boolean columns added the wrong way.
+    _ensure_column(engine, schema_name, "cloud_inventory", "is_free_limit_enabled", "BIT")
     _ensure_column(engine, schema_name, "cloud_tenants", "rightsizing_percentile", "INTEGER")
     _ensure_column(engine, schema_name, "cloud_tenants", "rightsizing_cpu_under_pct", "FLOAT")
     _ensure_column(engine, schema_name, "cloud_tenants", "rightsizing_cpu_over_pct", "FLOAT")
@@ -461,6 +465,12 @@ class CloudInventory(Base):
     p95_cpu_percent            = Column(Float, nullable=True)
     avg_memory_percent         = Column(Float, nullable=True)
     p95_memory_percent         = Column(Float, nullable=True)
+    # Real ARM property (Microsoft.Sql/servers/databases.properties.
+    # useFreeLimit) - only ever true for Azure SQL Database rows, added
+    # 2026-09-02 so the Inventory tab can show "on the free-limits
+    # program" instead of a generic RI-ineligibility note for a resource
+    # this app deliberately never prices (see pricing/azure_retail_api.py).
+    is_free_limit_enabled     = Column(Boolean, nullable=True)
     provider                 = Column(String(255), default="Azure")
     is_orphaned              = Column(Boolean, default=False)
     # NULL = demo/seed data. Non-NULL = live-ingested, scoped to that cloud_tenants.id.

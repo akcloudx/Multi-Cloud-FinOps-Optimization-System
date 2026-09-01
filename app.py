@@ -1744,17 +1744,28 @@ def _split_sp_eligible(df_24x7: pd.DataFrame, azure_provider: bool):
     return df_24x7[is_elig], excluded_df
 
 
-def _payg_blank_reason(resource_type: str, sku: str) -> str:
+def _payg_blank_reason(resource_type: str, sku: str, is_free_limit_enabled: bool = False) -> str:
     """A blank PAYG cell can mean genuinely different things - conflating
     them into one generic 'Not RI/SP-metered' label (the old behavior) reads
     as a bug to anyone who doesn't already know why a specific resource has
-    no hourly rate. Distinguishes: (1) genuinely free/ineligible tiers (Free
-    App Service, Consumption-plan Functions) via the same real eligibility
-    reasons already computed for the RI Coverage/Savings Plan tabs, (2)
-    resources this app can't price per-instance at all (e.g. Storage, sold
-    in 100TB+ blocks) via sku_mapping.py's own documented reason, (3) a
-    genuine, currently-unresolved pricing gap - kept distinct from the first
-    two so it doesn't get mistaken for 'this is fine, it's just free'."""
+    no hourly rate. Distinguishes: (0) a database enrolled in Azure's real
+    free-limits program (added 2026-09-02, real feedback: this used to fall
+    through to a technically-true-but-less-useful "Not eligible for RI" -
+    Serverless genuinely isn't RI-eligible, but that's not why THIS resource
+    shows no cost; a resource-level ARM property (properties.useFreeLimit,
+    threaded through azure_conn/connector.py's KQL) is a real, static signal
+    this app can check, unlike "is it STILL within the free quota this
+    month", which would need actual usage/billing data this app doesn't
+    ingest - so this is deliberately worded as "on the program", not "this
+    month is free"), (1) genuinely free/ineligible tiers (Free App Service,
+    Consumption-plan Functions) via the same real eligibility reasons
+    already computed for the RI Coverage/Savings Plan tabs, (2) resources
+    this app can't price per-instance at all (e.g. Storage, sold in 100TB+
+    blocks) via sku_mapping.py's own documented reason, (3) a genuine,
+    currently-unresolved pricing gap - kept distinct from the others so it
+    doesn't get mistaken for 'this is fine, it's just free'."""
+    if is_free_limit_enabled:
+        return "On Azure's free-limits program (up to 100K vCore-seconds/month) - actual cost may be $0"
     # Check the pricing layer's OWN reason first - it's the most direct
     # explanation (e.g. Storage's "sold in 100TB+ blocks" note) and is more
     # specific than a generic eligibility message whenever both apply.
@@ -1953,7 +1964,7 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
     def _monthly_blank_reason(r):
         if r["Resource State"] != "Running" or r["PAYG Hourly Cost USD"]:
             return ""
-        reason = _payg_blank_reason(r["Resource Type"], r["SKU"])
+        reason = _payg_blank_reason(r["Resource Type"], r["SKU"], r.get("Is Free Limit Enabled", False))
         return (reason[:87] + "...") if len(reason) > 90 else reason
 
     disp["_monthly_blank_reason"] = disp.apply(_monthly_blank_reason, axis=1)

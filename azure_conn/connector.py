@@ -602,7 +602,21 @@ Resources
     haReplicaCount = toint(properties.highAvailabilityReplicaCount),
     poolSkuName = tostring(sku.name),
     poolSkuCapacity = tostring(sku.capacity),
-    instancePoolVCores = tostring(properties.vCores)
+    instancePoolVCores = tostring(properties.vCores),
+    # Real ARM property (Microsoft.Sql/servers/databases, confirmed via
+    # Microsoft's own Bicep/ARM template reference) - Azure SQL's real
+    # "free-limits" program flag, added 2026-09-02 real feedback: a
+    # Serverless database enrolled in this program bills genuinely $0 up
+    # to 100K vCore-seconds/month, but this app's PAYG lookup has no way
+    # to represent that (deliberately left unpriced - see pricing/
+    # azure_retail_api.py's own disclosed reasoning) and was showing a
+    # generic "Not eligible for RI" note instead of the far more relevant
+    # "this is on the free tier" one. Only meaningful for a single
+    # database (elastic pools/managed instances/instance pools don't
+    # carry this property - coalesced to false for those below, same
+    # "can't determine, don't guess" fallback as every other resolved*
+    # field in this query).
+    sqlUseFreeLimit = tobool(properties.useFreeLimit)
 | extend
     sqlSku = case(
         isnotempty(sqlSkuName) and isnotempty(sqlSkuCapacity), strcat(sqlSkuName, "_", sqlSkuCapacity),
@@ -634,11 +648,12 @@ Resources
     resolvedHaReplicas = case(
         type == 'microsoft.sql/servers/databases' and isnotnull(haReplicaCount), haReplicaCount,
         0
-    )
+    ),
+    resolvedFreeLimit = coalesce(sqlUseFreeLimit, false)
 | project
     id, name, type, location, subscriptionId,
     resolvedPowerState = 'Running', resolvedSku, osType = 'N/A',
-    resolvedRedundancy, resolvedHaReplicas,
+    resolvedRedundancy, resolvedHaReplicas, resolvedFreeLimit,
     resourceGroup, tags
 """,
 
@@ -1037,6 +1052,11 @@ def fetch_live_inventory(creds: AzureCredentials) -> pd.DataFrame:
             "Resource Group":         r.get("resourceGroup", "") or "",
             "Provider":                "Azure",
             "Is Orphaned":             False,
+            # Only ever true for the "sql" query group (resolvedFreeLimit) -
+            # every other group's rows simply don't have this key, so this
+            # defaults to False for them, same fallback pattern as every
+            # other resolved* field read here.
+            "Is Free Limit Enabled":   bool(r.get("resolvedFreeLimit", False)),
         })
     return pd.DataFrame(records)
 

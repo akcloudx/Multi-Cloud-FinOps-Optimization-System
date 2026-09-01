@@ -362,6 +362,7 @@ def run_ingestion_pipeline(provider: str = "Azure", creds=None, force_mock: bool
                         p95_cpu_percent=r.get("P95 CPU %"),
                         avg_memory_percent=r.get("Avg Memory Available %"),
                         p95_memory_percent=r.get("P95 Memory Available %"),
+                        is_free_limit_enabled=r.get("Is Free Limit Enabled", False),
                         subscription=r.get("Subscription", ""),
                         resource_group=r.get("Resource Group", "") or "",
                         availability_zone=r.get("Availability Zone", "") or "",
