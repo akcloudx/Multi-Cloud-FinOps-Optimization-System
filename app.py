@@ -141,6 +141,7 @@ from pricing.retail_pricing import usd, fmt_currency, get_inr_rate
 from pricing.commitment_pricing import get_commitment_prices, MONTH_HOURS
 from pricing.azure_vm_flexibility import get_vm_flexibility_groups
 from pricing.cache_admin import clear_pricing_caches
+from pricing.unpriced_by_design import unpriced_by_design_reason
 from commitments.existing_commitments import (
     get_existing_savings_plans,
     get_existing_reservations,
@@ -2869,30 +2870,39 @@ def _render_sp_pool_economics(pool_label: str, pool_df: pd.DataFrame, existing_c
     # no priceable spend gets its own honest "can't price this yet" state
     # instead, same "don't guess" discipline as the "Estimate only" caption
     # already applies to the separate commitment-rate gap below.
-    # "Can't price this yet... re-run a sync" is only true when the gap
-    # is genuinely transient (a real rate that a fresh sync could still
-    # find). Real feedback 2026-09-02: for a pool made ENTIRELY of Azure
-    # SQL Database Serverless resources, that's not true - this app
-    # deliberately never prices Serverless SQL at a flat $/hr, permanently
-    # (see pricing/azure_retail_api.py's own disclosed reasoning: it bills
-    # per-vCore-second with auto-pause and a real free-limits program, not
-    # a fixed rate) - no amount of re-syncing will ever populate a rate
-    # here, so telling someone to "re-run a sync" for this specific case
-    # is actively misleading, not just imprecise.
-    _serverless_sql_sku_re = re.compile(r"^(GP|HS)_S_Gen\d+_\d+$")
-    _is_never_priced_serverless_sql = (not pool_df.empty) and pool_df.apply(
-        lambda r: r.get("Resource Type") == "Azure SQL Database" and bool(_serverless_sql_sku_re.match(r.get("SKU") or "")),
-        axis=1,
-    ).all()
+    # "Can't price this yet... re-run a sync" is only true when the gap is
+    # genuinely transient (a real rate a fresh sync could still find).
+    # Real feedback 2026-09-02: first written narrowly for the one case
+    # actually on screen (Azure SQL Database Serverless), then correctly
+    # pushed back on - the SAME situation applies to any OTHER resource
+    # type this app has deliberately decided never to price (AWS Aurora
+    # Serverless v2 is the confirmed sibling case, and a future tenant
+    # could hit a different one entirely) - a narrow one-off check would
+    # silently keep showing the misleading "re-run a sync" message for
+    # every case except the one it happened to be written against.
+    # pricing/unpriced_by_design.py centralizes this as a small, named
+    # registry instead - extensible by adding an entry there, not by
+    # writing a new check here each time. The message below reflects
+    # whatever reason(s) actually matched, not a hardcoded resource name.
+    _pool_unpriced_reasons = []
+    if not pool_df.empty:
+        for _, _r in pool_df.iterrows():
+            _reason = unpriced_by_design_reason(selected_provider, _r.get("Resource Type"), _r.get("SKU"))
+            if _reason is None:
+                _pool_unpriced_reasons = []   # even one "might be fixable" row means this ISN'T a by-design-only pool
+                break
+            _pool_unpriced_reasons.append((_r.get("Resource Type"), _reason))
+    _is_never_priced_by_design = bool(_pool_unpriced_reasons)
 
     is_warning = leakage_hr > 0
     if is_warning:
         sentence = f"You've committed <b>{fmt(leakage_hr)}/hr</b> more than is currently eligible — worth reviewing this plan."
-    elif baseline_hr <= 0.001 and _is_never_priced_serverless_sql:
+    elif baseline_hr <= 0.001 and _is_never_priced_by_design:
+        _distinct = list(dict.fromkeys(_pool_unpriced_reasons))   # de-dupe, keep first-seen order
+        _explained = "; ".join(f"{rt} ({reason})" for rt, reason in _distinct)
         sentence = (
-            "<b>Can't price this by design</b> — every eligible resource here is Serverless SQL Database, "
-            "which bills per-vCore-second (not a flat rate) and may be on Azure's free-limits program. "
-            "Re-syncing won't change this."
+            f"<b>Can't price this by design</b> — every eligible resource here is a type this app doesn't "
+            f"compute a flat PAYG rate for: {_explained}. Re-syncing won't change this."
         )
     elif baseline_hr <= 0.001:
         sentence = (
