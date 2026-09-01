@@ -2884,31 +2884,35 @@ def _render_sp_pool_economics(pool_label: str, pool_df: pd.DataFrame, existing_c
     # registry instead - extensible by adding an entry there, not by
     # writing a new check here each time. The message below reflects
     # whatever reason(s) actually matched, not a hardcoded resource name.
-    _pool_unpriced_reasons = []
+    # Real structural bug caught 2026-09-02 (not just wording): the FIRST
+    # version of this check only looked at whether the WHOLE POOL's
+    # baseline_hr summed to $0 - true for THIS tenant only because it
+    # happens to have exactly one resource, and that resource is
+    # unpriced-by-design. For any realistic tenant with a MIX of resources
+    # (say 48 normally-priced databases + 2 Serverless ones), the 48 real
+    # rates dominate the sum, baseline_hr is well above zero, and the
+    # by-design resources silently vanish into that sum with NO
+    # disclosure anywhere in the main card - the whole check was
+    # effectively dead code outside this one degenerate single-resource
+    # case. Fixed by making this an ADDITIVE disclosure (a sub-line
+    # appended regardless of which main verdict below actually fires),
+    # not a mutually-exclusive branch gated on the pool-wide sum - so a
+    # pool that's genuinely "well covered" overall STILL discloses that 2
+    # of its resources are permanently unpriced, instead of only ever
+    # saying something when literally every resource is.
+    _unpriced_by_design_count = 0
     if not pool_df.empty:
         for _, _r in pool_df.iterrows():
-            _reason = unpriced_by_design_reason(selected_provider, _r.get("Resource Type"), _r.get("SKU"))
-            if _reason is None:
-                _pool_unpriced_reasons = []   # even one "might be fixable" row means this ISN'T a by-design-only pool
-                break
-            _pool_unpriced_reasons.append((_r.get("Resource Type"), _reason))
-    _is_never_priced_by_design = bool(_pool_unpriced_reasons)
+            if unpriced_by_design_reason(selected_provider, _r.get("Resource Type"), _r.get("SKU")):
+                _unpriced_by_design_count += 1
 
-    # sub mirrors RI Coverage's own headline pattern exactly (see
+    # sub mirrors RI Coverage's own headline pattern (see
     # _render_ri_coverage_tab's "sub" variable + .rec-headline-sub CSS
-    # class, already used there and on the combined Recommendations card)
-    # - real feedback 2026-09-02: the by-design explanation read as "too
-    # long a story" crammed into one sentence. Short headline + a pointer
-    # to the real detail already sitting in the "What's eligible" expander
-    # below (now shows a "Why $0.00/hr" column, same fix), not a wall of
-    # text in the headline card itself.
+    # class, already used there and on the combined Recommendations card).
     sub = ""
     is_warning = leakage_hr > 0
     if is_warning:
         sentence = f"You've committed <b>{fmt(leakage_hr)}/hr</b> more than is currently eligible — worth reviewing this plan."
-    elif baseline_hr <= 0.001 and _is_never_priced_by_design:
-        sentence = "<b>Can't price this by design</b> — re-syncing won't change this."
-        sub = "See the \"Why $0.00/hr\" column in \"What's eligible\" below for the real reason."
     elif baseline_hr <= 0.001:
         sentence = "<b>Can't price this yet</b> — no cached PAYG rate for this pool's resources."
         sub = "Re-run a sync from the tenant's Manage dialog on the Home page."
@@ -2921,6 +2925,15 @@ def _render_sp_pool_economics(pool_label: str, pool_df: pd.DataFrame, existing_c
         )
     else:
         sentence = f"We recommend committing <b>{fmt(recommended_hr)}/hr</b> more, based on your safety buffer setting."
+
+    if _unpriced_by_design_count > 0:
+        _plural = _unpriced_by_design_count != 1
+        _disclosure = (
+            f"{_unpriced_by_design_count} resource{'s' if _plural else ''} here {'are' if _plural else 'is'} "
+            f'priced $0 by design (not a gap - re-syncing won\'t change it) - see "Why $0.00/hr" in '
+            '"What\'s eligible" below.'
+        )
+        sub = f"{sub} {_disclosure}" if sub else _disclosure
     st.markdown(
         f'<div class="rec-headline-card{" warn" if is_warning else ""}">'
         f'<div class="rec-headline-eyebrow">{html.escape(pool_label)} Savings Plan</div>'
