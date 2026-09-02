@@ -881,7 +881,7 @@ def _manage_tenant_dialog(t, mode: str):
         # name row's screen position is reserved via a placeholder so it
         # still renders first visually.
         aws_sync_icon = {"SUCCESS": ":material/check_circle:", "FAILED": ":material/cancel:", "PARTIAL": ":material/warning:"}.get(t.last_sync_status, "")
-        _AWS_SECTIONS = ["Credentials", "Permissions", "Sync"]
+        _AWS_SECTIONS = ["Credentials", "Permissions", "Sync", "Features"]
         _aws_section_icons = {"Sync": aws_sync_icon}
         aws_section_key = f"mgmt_aws_section_{t.id}"
         active_aws_section = st.segmented_control(
@@ -972,6 +972,37 @@ def _manage_tenant_dialog(t, mode: str):
                     res = run_ingestion_pipeline(selected_provider, creds=sync_creds, tenant_db_id=t.id)
                 record_sync_result(selected_provider, mode, t.id, res["status"], res["message"])
                 st.cache_data.clear()
+                st.rerun()
+
+        # Real gap caught live 2026-09-02: clear_pricing_caches() itself was
+        # already fully provider-generic (filters RetailPrice/
+        # CommitmentPriceCache by whatever `provider` is passed, correctly
+        # no-ops the two Azure-only tables for AWS - see pricing/
+        # cache_admin.py), but this button was only ever wired into the
+        # AZURE branch's own separate _SECTIONS list - AWS has always had
+        # its own distinct _AWS_SECTIONS list above, and "Features" was
+        # never added to it, so the button was completely unreachable for
+        # AWS tenants despite the backend already supporting them.
+        elif active_aws_section == "Features":
+            st.markdown("##### Pricing cache")
+            st.caption(
+                "Clears every cached PAYG rate and commitment (RI/Savings Plan) rate for this "
+                "provider, then re-fetches everything from scratch on the next sync. Neither cache "
+                "is specific to this one tenant - they're shared by SKU/region across every AWS "
+                "tenant in this environment, so clearing here clears them for all of those tenants, "
+                "not just this one."
+            )
+            if st.button(
+                "Clear cached pricing", icon=":material/restart_alt:", key=f"mgmt_aws_clear_pricing_{t.id}",
+                disabled=is_demo,
+                help="Only available for Production tenants." if is_demo else
+                     "Use this if a resource's shown cost looks wrong and you suspect a stale/incorrect cached rate.",
+            ):
+                deleted = clear_pricing_caches(get_engine(selected_provider, mode), selected_provider)
+                total = sum(deleted.values())
+                st.session_state["_tenant_mgmt_toast"] = (
+                    f"Cleared {total} cached pricing row(s). Run a sync to re-fetch live rates."
+                )
                 st.rerun()
 
         st.divider()
@@ -2177,7 +2208,8 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
             break
 
     normal_filter_specs = [("Resource Type", "Resource Type"), ("Status", "Status"), ("Region", "Region"),
-                            ("Subscription", "Subscription"), ("OS", "OS"), ("SKU", "SKU")]
+                            ("Subscription", "Subscription" if selected_provider == "Azure" else "Account ID"),
+                            ("OS", "OS"), ("SKU", "SKU")]
     if extra_col:
         normal_filter_specs.append((extra_col, extra_label))
 
@@ -2749,7 +2781,14 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
             # GUID alone is 36 chars, plus " ()" plus a variable-length
             # subscription name on top, routinely 50-60+ chars total. 140px
             # was never sized for that.
-            "Subscription":           st.column_config.TextColumn(width=420),
+            # AWS has no "subscription" concept at all - this column holds
+            # the real AWS Account ID (aws/connector.py's fetch_live_
+            # inventory docstring), so labeling it "Subscription" for AWS
+            # is just wrong, not merely inconsistent - relabeled per
+            # provider, same pattern as "Service"/"Power State" below.
+            "Subscription":           st.column_config.TextColumn(
+                "Subscription" if selected_provider == "Azure" else "Account ID", width=420
+            ),
             "Resource Type":          st.column_config.TextColumn("Service", width=220),
             "Status":                 st.column_config.TextColumn("Power State", width=170),
             "Region":                 st.column_config.TextColumn(width=110),
@@ -2785,7 +2824,23 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
             # reason() above regardless of how much column space existed.
             # That cap is now 150 (same ~6.9px/char ratio applied to the
             # new cap) - this width follows it up to match.
-            "Est. Monthly PAYG Cost": st.column_config.TextColumn("Est. Monthly Cost", width=1000),
+            #
+            # Made provider-conditional, 2026-09-02: 1000px was sized for
+            # Azure's real blank-reason sentences, but AWS's real data
+            # (this app's own live AWS test tenant, not a guess) is mostly
+            # short "$X.XX" values with no cached-rate reason text yet - a
+            # 1000px column showing "$7.59" just looks like a giant empty
+            # gap, seen live. Kept at 1000 for Azure (no regression to the
+            # 4 rounds of fixes above); narrowed to 420 for AWS (matching
+            # "Subscription"'s width above, same order of magnitude as
+            # this app's other "reasonably sized, not worst-case sized"
+            # columns) - AWS CAN still occasionally hit a long reason (e.g.
+            # EC2 Mac instances), which will ellipsis-truncate at 420px,
+            # same tradeoff every other column here already accepts for
+            # its own rare long values.
+            "Est. Monthly PAYG Cost": st.column_config.TextColumn(
+                "Est. Monthly Cost", width=1000 if selected_provider == "Azure" else 420
+            ),
         },
     )
     with dl_col:
