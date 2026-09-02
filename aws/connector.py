@@ -89,6 +89,21 @@ _NOT_ACTIVATED_MESSAGE_MARKER = "needs a subscription for the service"
 # service's own Describe* family), so no custom inline policy is needed
 # after all.
 REQUIRED_AWS_POLICIES = [
+    # Real gap caught live 2026-09-02: _discover_regions() (used to find
+    # every enabled region before the real multi-region EC2/RDS/etc. scan)
+    # calls ec2.describe_regions(), which needs its own distinct action -
+    # this was never declared here AND never probed by Test Access
+    # Permissions, so a tenant could pass every check 13/13 and still hit
+    # a live "UnauthorizedOperation ... DescribeRegions" failure the first
+    # time an actual sync ran. AmazonEC2ReadOnlyAccess already covers it
+    # (part of the same ec2:Describe* family as the row below), just never
+    # listed as its own requirement.
+    {
+        "Policy / Action": "ec2:DescribeRegions",
+        "AWS Managed Policy": "AmazonEC2ReadOnlyAccess",
+        "Required":        "Yes — Mandatory",
+        "Purpose":         "Discover which regions are enabled for this account before scanning each one for resources",
+    },
     {
         "Policy / Action": "ec2:DescribeInstances",
         "AWS Managed Policy": "AmazonEC2ReadOnlyAccess",
@@ -427,6 +442,11 @@ def check_aws_permissions(creds: AWSCredentials) -> dict:
         except Exception as e:
             results.append({"action": action, "status": "error", "detail": str(e)[:250]})
 
+    _probe(
+        "ec2:DescribeRegions",
+        lambda: session.client("ec2").describe_regions(DryRun=True),
+        dry_run_convention=True,
+    )
     _probe(
         "ec2:DescribeInstances",
         lambda: session.client("ec2").describe_instances(DryRun=True),
