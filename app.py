@@ -503,24 +503,49 @@ def _render_aws_iam_setup_guide(expanded: bool = False):
     alongside the same fix for Azure (_render_azure_sp_setup_guide), for the
     same reason: this guidance previously only existed on the Add tenant
     form itself, with no way to see it before landing there."""
-    # Real feedback, 2026-08-30: this rendered all of REQUIRED_AWS_POLICIES
-    # (18 actions and counting, as more AWS services got inventory support
-    # over time) as one long bulleted list, each line carrying a full
-    # sentence of "Purpose" prose - "difficult to read", especially here.
-    # What you actually DO is attach a much shorter list of distinct
-    # managed policies (12 today) - leads with that as scannable chips,
-    # calls out the handful of actions with no dedicated policy separately,
-    # and pushes the full action-by-action justification into a collapsed
-    # reference table below. Policy names/counts are all still computed
-    # FROM REQUIRED_AWS_POLICIES, not hand-typed - the stale caption this
-    # replaced had hardcoded "9 policies... 13 actions" from an earlier,
-    # smaller version of that list and had quietly drifted wrong (real
-    # count by now: 12 policies / 18 actions) - computing it live means it
-    # can't drift out of sync again as the list keeps growing.
-    _distinct_policies = list(dict.fromkeys(
-        p["AWS Managed Policy"] for p in REQUIRED_AWS_POLICIES if not p["AWS Managed Policy"].startswith("(")
-    ))
-    _custom_actions = [p["Policy / Action"] for p in REQUIRED_AWS_POLICIES if p["AWS Managed Policy"].startswith("(")]
+    # REAL BUG caught live, 2026-09-03: this used to have the user attach
+    # each of the 14 distinct AWS-managed policies below INDIVIDUALLY, as
+    # 14 separate "Attach policy" clicks in the IAM Console - hit a real,
+    # hard AWS IAM quota ("The selected policies exceed this account's
+    # quota") partway through. Verified against AWS's own current IAM
+    # quotas (as of the Aug-2026 increase): even the newest default (20
+    # managed policies per user, some accounts still on the older, lower
+    # default) was never designed to comfortably hold a growing list like
+    # this - REQUIRED_AWS_POLICIES has already grown past 14 distinct
+    # policies once this session and will likely keep growing as more AWS
+    # services get inventory support, so this would only get worse over
+    # time even on an account with the higher quota.
+    #
+    # Fixed properly, not by trimming the list: this app's own
+    # REQUIRED_AWS_POLICIES already tracks the SPECIFIC, narrow actions it
+    # actually calls (e.g. "ec2:DescribeInstances", not everything
+    # AmazonEC2ReadOnlyAccess grants) - flattened into ONE custom policy
+    # covering all of them, the same JSON-generation approach already used
+    # below for the handful of actions with no dedicated managed policy at
+    # all. Computed live: 32 distinct actions today, 1,374 characters as
+    # JSON - comfortably under AWS's real 6,144-character limit for a
+    # single customer-managed/inline policy (confirmed via AWS's own IAM
+    # quotas reference), leaving room to keep growing for a long time
+    # before this would need to split into two policies. This is also
+    # MORE narrowly-scoped than the 14 broad AWS-managed policies were,
+    # not a compromise - every one of those grants many more actions than
+    # this app actually uses; one policy with exactly the 32 actions
+    # needed is closer to real least-privilege, not further from it.
+    _all_actions = sorted({
+        action.strip() for p in REQUIRED_AWS_POLICIES for action in p["Policy / Action"].split(" / ")
+    })
+    _policy_json = json.dumps(
+        {
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Sid": "FinOpsOptimizerReadOnly",
+                "Effect": "Allow",
+                "Action": _all_actions,
+                "Resource": "*",
+            }],
+        },
+        indent=2,
+    )
 
     with st.expander("📖 Instructions: How to obtain AWS IAM Access Keys", expanded=expanded):
         st.markdown(
@@ -533,56 +558,20 @@ def _render_aws_iam_setup_guide(expanded: bool = False):
             unsafe_allow_html=True,
         )
 
-        st.markdown(f'<span class="fl-setup-num">5</span><span class="fl-setup-head">Attach these {len(_distinct_policies)} managed policies</span>', unsafe_allow_html=True)
         st.markdown(
-            '<div class="fl-setup-desc">One per AWS service this app reads from. Each is a stock, read-only '
-            'AWS-managed policy - attach exactly these, nothing broader is needed.</div>',
+            f'<span class="fl-setup-num">5</span><span class="fl-setup-head">Add one custom policy with these {len(_all_actions)} read-only actions</span>',
             unsafe_allow_html=True,
         )
-        _chip_html = "".join(f'<div class="fl-policy-chip"><span class="dot"></span>{p}</div>' for p in _distinct_policies)
-        st.markdown(f'<div class="fl-policy-grid">{_chip_html}</div>', unsafe_allow_html=True)
-
-        if _custom_actions:
-            st.markdown(
-                f'<div class="fl-custom-note">⚠️ <div><b>{len(_custom_actions)} actions have no dedicated AWS-managed policy</b> '
-                f'({", ".join(f"<code>{a.split(" ")[0]}</code>" for a in _custom_actions)}) - cover them with a small '
-                'custom inline policy below, or the broad <code>ReadOnlyAccess</code> policy.</div></div>',
-                unsafe_allow_html=True,
-            )
-            # Real gap the user caught, 2026-08-30: the callout above told
-            # you to "attach a small custom inline policy" but never showed
-            # HOW - no console steps, no actual policy document. Individual
-            # actions flattened from _custom_actions ("dms:Describe... /
-            # dms:Describe... / dms:Describe...") into one real JSON policy
-            # document, generated FROM REQUIRED_AWS_POLICIES (not
-            # hand-typed) so it can't silently drift from the actions listed
-            # above it as more services are added later.
-            _custom_flat_actions = sorted({
-                action.strip() for group in _custom_actions for action in group.split(" / ")
-            })
-            _policy_json = json.dumps(
-                {
-                    "Version": "2012-10-17",
-                    "Statement": [{
-                        "Sid": "FinOpsOptimizerCustomActions",
-                        "Effect": "Allow",
-                        "Action": _custom_flat_actions,
-                        "Resource": "*",
-                    }],
-                },
-                indent=2,
-            )
-            st.markdown(
-                f'<span class="fl-setup-num">6</span><span class="fl-setup-head">Add one custom inline policy for the remaining {len(_custom_flat_actions)} actions</span>',
-                unsafe_allow_html=True,
-            )
-            st.markdown(
-                '<div class="fl-setup-desc">In the IAM Console: open your user &gt; <b>Permissions</b> tab &gt; '
-                '<b>Add permissions</b> &gt; <b>Create inline policy</b> &gt; <b>JSON</b> tab - paste this, then '
-                'name it (e.g. <code>FinOpsOptimizerCustomActions</code>) and create it:</div>',
-                unsafe_allow_html=True,
-            )
-            st.code(_policy_json, language="json")
+        st.markdown(
+            '<div class="fl-setup-desc">One per AWS service this app reads from - narrower than attaching the '
+            'equivalent stock AWS-managed policies (each of those grants far more than this app actually uses), '
+            'and avoids a real AWS limit on how many separate managed policies one user can hold. In the IAM '
+            'Console: open your user &gt; <b>Permissions</b> tab &gt; <b>Add permissions</b> &gt; <b>Create '
+            'inline policy</b> &gt; <b>JSON</b> tab - paste this, then name it (e.g. '
+            '<code>FinOpsOptimizerReadOnly</code>) and create it:</div>',
+            unsafe_allow_html=True,
+        )
+        st.code(_policy_json, language="json")
 
         st.caption("🧪 Use **Test Access Permissions** on the Add tenant form to check all of this for real - it reports these exact same policy names.")
 
