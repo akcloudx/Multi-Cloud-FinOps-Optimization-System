@@ -2056,7 +2056,25 @@ def _render_inventory_section(df: pd.DataFrame, key_prefix: str):
     # tenant, since a tenant can genuinely span multiple subscriptions.
     # Falls back to the tenant label only if that subscription hasn't
     # been synced yet (same fallback the old code always used).
-    if is_live_mode and is_live_configured and active_tenant is not None:
+    #
+    # Azure-only (2026-09-03, real follow-up): AWS has no equivalent
+    # per-account "subscription name" this app can reliably fetch -
+    # data/sync_pipeline.py's "Sync subscriptions" mechanism
+    # (list_accessible_subscriptions -> upsert_subscription) is gated
+    # `if is_azure` there too, so list_subscriptions() always returns
+    # empty for an AWS tenant and this WOULD have silently kept falling
+    # back to the same tenant-label wrapping just fixed for Azure - the
+    # exact same bug, just less obviously wrong since a bare 12-digit
+    # AWS Account ID doesn't masquerade as a friendly name the way
+    # "TenantName (guid)" did. AWS's real closest equivalent (an IAM
+    # account alias, or the AWS Organizations account name) isn't
+    # reliably fetchable either way: alias is optional and often unset,
+    # and the account-name lookup needs AWS Organizations membership +
+    # org-level read access most standalone/member accounts don't have -
+    # not guessed here. AWS's "Subscription" column is left exactly as
+    # aws/connector.py already sets it (the real Account ID, unwrapped) -
+    # already the correct, real identifier on its own, nothing to fix.
+    if is_live_mode and is_live_configured and active_tenant is not None and is_azure:
         _subs_by_id = {
             s.subscription_id: s.subscription_name
             for s in list_subscriptions(selected_provider, tenant_mode, active_tenant.id)
