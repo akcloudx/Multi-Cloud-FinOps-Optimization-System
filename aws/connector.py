@@ -43,6 +43,22 @@ except ImportError:
 # given AWS itself doesn't apply this consistently.
 _ACCESS_DENIED_CODES = {"AccessDenied", "AccessDeniedException", "UnauthorizedOperation"}
 
+# Real confusion caught live, 2026-09-03: OptInRequired/SubscriptionRequired
+# Exception ("The AWS Access Key Id needs a subscription for the service")
+# were falling into the generic "error" bucket with the raw AWS exception
+# text as the only explanation - confirmed via AWS's own documented
+# behavior this is NOT a permissions problem at all: it means the AWS
+# ACCOUNT itself has never activated that particular service (common for
+# less-commonly-used services like Redshift Reserved Nodes pricing,
+# MemoryDB, or Neptune Analytics - AWS activates whatever existed at
+# account-creation time, but newer/less-common services need an explicit
+# opt-in the account owner never did). Harmless and expected if that
+# service genuinely isn't used - this app will just show zero resources
+# for it, same as if it were never IAM-permitted at all, but the reason is
+# completely different (an account setting, not a policy) and the two
+# shouldn't look identical in the UI.
+_NOT_ACTIVATED_CODES = {"OptInRequired", "SubscriptionRequiredException"}
+
 
 # AWS Managed Policy names verified against official AWS docs (each policy's
 # own reference page + JSON document), not guessed - confirmed live 2026-08
@@ -364,6 +380,12 @@ def check_aws_permissions(creds: AWSCredentials) -> dict:
                 results.append({"action": action, "status": "ready", "detail": None})
             elif code in _ACCESS_DENIED_CODES:
                 results.append({"action": action, "status": "missing", "detail": f"Access denied ({code})."})
+            elif code in _NOT_ACTIVATED_CODES:
+                results.append({
+                    "action": action, "status": "not_activated",
+                    "detail": "This AWS account has never activated this service - not a permissions "
+                              "problem. Harmless if you don't use it; the sync will just find nothing here.",
+                })
             else:
                 results.append({"action": action, "status": "error", "detail": str(e)[:250]})
         except Exception as e:

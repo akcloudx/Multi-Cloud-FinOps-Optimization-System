@@ -602,10 +602,18 @@ def _render_aws_connect_form(key_prefix: str, mode: str = "live"):
     # whatever tenant was LAST connected - wrong for "Add a NEW tenant".
     # Starts genuinely blank now (region keeps a plain, non-identifying
     # "us-east-1" default - not tied to any previously-connected tenant).
+    # Real gap caught 2026-09-03: unlike _render_azure_connect_form above,
+    # this form had no name field at all - every AWS tenant got the same
+    # auto-generated "AWS ({region})" label, with no way to tell two AWS
+    # accounts apart by anything meaningful (e.g. "Prod AWS" vs "Dev AWS
+    # Sandbox") the way Azure tenants already could. Optional - falls back
+    # to the same auto-generated label as before if left blank, so this
+    # doesn't force a decision on anyone who doesn't care.
     _render_help_page_link("New here? See the Getting Started guide")
     with st.form(f"{key_prefix}_aws_form"):
         col1, col2 = st.columns(2)
         with col1:
+            aws_name = st.text_input("Tenant Name (optional)", value="", placeholder="e.g. Prod AWS Account")
             aws_key = st.text_input("AWS Access Key ID", value="", placeholder="AKIAXXXXXXXXXXXXXXXX")
             aws_reg = st.text_input("Default AWS Region", value="us-east-1", placeholder="us-east-1")
         with col2:
@@ -634,7 +642,7 @@ def _render_aws_connect_form(key_prefix: str, mode: str = "live"):
         if new_aws.is_complete:
             save_aws_credentials_to_env_file(new_aws)
             tenant_db_id = upsert_tenant(
-                provider="AWS", mode=mode, tenant_name=f"AWS ({aws_reg})",
+                provider="AWS", mode=mode, tenant_name=aws_name.strip() or f"AWS ({aws_reg})",
                 tenant_id=aws_reg, subscription_id=aws_reg,
                 client_id=aws_key, client_secret=aws_sec,
             )
@@ -713,9 +721,24 @@ def _render_aws_permission_checklist(results: list):
     fundamentally checked action-by-action (no single named "role" the way
     Azure RBAC has) - see check_aws_permissions()'s docstring for the full
     reasoning, including why ce:* actions show "unverified" rather than a
-    real pass/fail here."""
-    icons = {"ready": "✅", "missing": "❌", "error": "⚠️", "unverified": "🕓"}
+    real pass/fail here.
+
+    Redesigned 2026-09-03, real feedback: a flat, unstructured list of 32
+    rows (one line + one caption each) read as "cluttered... difficult to
+    read" - especially once most of them are Ready and only a handful
+    genuinely need attention. Now: a KPI summary row for the at-a-glance
+    count (same .rec-metric-card family already used on RI Coverage/
+    Rightsizing, not a new component), Ready items collapsed into their own
+    expander since they need no action, and everything else (missing/
+    not-activated/error/unverified) grouped by status with a real section
+    heading, so the things actually worth reading aren't buried in a wall
+    of green checkmarks."""
+    icons = {"ready": "✅", "missing": "❌", "not_activated": "⏸️", "error": "⚠️", "unverified": "🕓"}
+    _by_status: dict = {}
     for r in results:
+        _by_status.setdefault(r["status"], []).append(r)
+
+    def _row(r):
         icon = icons.get(r["status"], "❓")
         # Same managed-policy name as the Instructions expander above -
         # check_aws_permissions() attaches it to every result specifically
@@ -724,8 +747,44 @@ def _render_aws_permission_checklist(results: list):
         policy = r.get("managed_policy")
         policy_suffix = f" — `{policy}`" if policy and not policy.startswith("(") else ""
         st.markdown(f"{icon} `{r['action']}`{policy_suffix}")
-        if r.get("detail") and r["status"] in ("missing", "error", "unverified"):
+        if r.get("detail"):
             st.caption(r["detail"])
+
+    _ready = _by_status.get("ready", [])
+    _kpi_defs = [
+        ("savings", "✅ Ready", len(_ready)),
+        ("over", "❌ Missing", len(_by_status.get("missing", []))),
+        ("neutral", "⏸️ Not Activated", len(_by_status.get("not_activated", []))),
+        ("under", "⚠️ Error", len(_by_status.get("error", []))),
+        ("combined", "🕓 Unverified", len(_by_status.get("unverified", []))),
+    ]
+    _kpi_cols = st.columns(len(_kpi_defs))
+    for col, (tone, label, count) in zip(_kpi_cols, _kpi_defs):
+        with col:
+            st.markdown(
+                f'<div class="rec-metric-card {tone}">'
+                f'<div class="lbl">{label}</div>'
+                f'<div class="val fl-mono">{count}</div>'
+                "</div>", unsafe_allow_html=True,
+            )
+    st.markdown("")
+
+    for status, heading in [
+        ("missing", "❌ Missing"), ("not_activated", "⏸️ Not Activated (harmless if unused)"),
+        ("error", "⚠️ Error"), ("unverified", "🕓 Unverified"),
+    ]:
+        rows = _by_status.get(status, [])
+        if not rows:
+            continue
+        st.markdown(f"**{heading}**")
+        for r in rows:
+            _row(r)
+        st.markdown("")
+
+    if _ready:
+        with st.expander(f"✅ {len(_ready)} permission{'s' if len(_ready) != 1 else ''} ready - nothing to do", expanded=False):
+            for r in _ready:
+                _row(r)
 
 
 def _run_tenant_permission_check(t, mode: str) -> dict:
