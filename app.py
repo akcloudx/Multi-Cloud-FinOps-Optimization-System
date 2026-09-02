@@ -35,6 +35,7 @@ for site_pkg in glob.glob("/home/site/wwwroot/antenv/lib/python*/site-packages")
         sys.path.insert(0, site_pkg)
 
 import json
+from datetime import datetime
 import streamlit as st
 import pandas as pd
 
@@ -262,6 +263,30 @@ def _render_azure_sp_setup_guide(expanded: bool = False):
             '<div class="fl-setup-callout">✅ <div>Missing step 3 is <b>not fatal</b> - a sync will report which parts succeeded.</div></div>',
             unsafe_allow_html=True,
         )
+
+
+def _fmt_ts(raw, fallback: str = "Never") -> str:
+    """Every timestamp this app stores (db/tenants.py, db/users.py,
+    db/sessions.py, every pricing/*.py cache) is written the same way:
+    datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC") - deliberately UTC,
+    not server-local time, so a sync/cache-freshness comparison is correct
+    regardless of which timezone the app happens to be deployed in. This
+    is the single display-only formatter for that raw string - reformats
+    to 12-hour clock with an explicit "UTC" label (real feedback,
+    2026-09-02: the UI never showed any timezone at all, e.g. "Last synced:
+    2026-09-02 16:55", genuinely ambiguous - AM/PM without a zone is worse
+    than useless). Does NOT change the stored format or how freshness
+    checks parse it (analysis/generate_maturity_data's STALE_AFTER_DAYS
+    check, every pricing cache's CACHE_MAX_AGE_HOURS check) - those all
+    keep parsing the raw 24-hour UTC string exactly as before; only what
+    the user sees changes."""
+    if not raw:
+        return fallback
+    try:
+        dt = datetime.strptime(raw.replace(" UTC", ""), "%Y-%m-%d %H:%M:%S")
+        return dt.strftime("%b %d, %Y, %I:%M %p UTC")
+    except ValueError:
+        return raw   # unexpected format - show the raw value rather than crash a caption over it.
 
 
 def _render_help_page_link(label: str):
@@ -963,7 +988,7 @@ def _manage_tenant_dialog(t, mode: str):
                 st.session_state["_tenant_mgmt_toast"] = "Sync schedule updated."
                 st.rerun()
 
-            st.caption(f"Last synced: {t.last_synced_at[:16] if t.last_synced_at else 'Never'}")
+            st.caption(f"Last synced: {_fmt_ts(t.last_synced_at)}")
 
             if st.button("Run sync now", icon=":material/bolt:", disabled=is_demo, key=f"mgmt_aws_run_sync_{t.id}", type="primary",
                          help="Only available for Production tenants." if is_demo else "Fetches live EC2/RDS inventory from this tenant right now."):
@@ -1183,7 +1208,7 @@ def _manage_tenant_dialog(t, mode: str):
             st.session_state["_tenant_mgmt_toast"] = "Sync schedule updated."
             st.rerun()
 
-        st.caption(f"Last synced: {t.last_synced_at[:16] if t.last_synced_at else 'Never'}")
+        st.caption(f"Last synced: {_fmt_ts(t.last_synced_at)}")
 
         if st.button("Run sync now", icon=":material/bolt:", disabled=is_demo, key=f"mgmt_run_sync_{t.id}", type="primary",
                      help="Only available for Production tenants." if is_demo else "Fetches live inventory, reservations, and savings plans from this tenant right now."):
@@ -1485,7 +1510,7 @@ def page_tenant_management():
                     st.badge("Inactive", icon=":material/radio_button_unchecked:", color="gray")
             cols[2].caption("Service principal" if is_azure else "IAM access key")
             cols[3].caption(str(fourth_col_value))
-            cols[4].caption(t.last_synced_at[:16] if t.last_synced_at else "Never")
+            cols[4].caption(_fmt_ts(t.last_synced_at))
             with cols[5]:
                 b1, b2 = st.columns(2)
                 if b1.button("Dash", icon=":material/open_in_new:", key=f"home_dash_{t.id}", width="stretch"):
