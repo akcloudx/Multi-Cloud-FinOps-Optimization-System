@@ -393,12 +393,17 @@ def _render_azure_connect_form(key_prefix: str, mode: str = "live"):
 
     if az_sub_btn:
         new_az = AzureCredentials(az_tenant, az_sub, az_client, az_sec)
-        if new_az.is_complete:
+        # Real feedback, 2026-09-02: a blank/auto-generated name makes
+        # tenants indistinguishable once more than one is connected - no
+        # longer silently falls back to "Azure Tenant", must be typed.
+        if new_az.is_complete and not az_name.strip():
+            st.error("Please enter a Tenant / Subscription Name so this tenant can be told apart from others.")
+        elif new_az.is_complete:
             save_credentials_to_env_file(new_az)
             with st.spinner("Testing connection & ingesting live inventory from Azure Tenant into Azure SQL DB..."):
                 tenant_db_id = upsert_tenant(
                     provider="Azure", mode=mode,
-                    tenant_name=az_name or "Azure Tenant",
+                    tenant_name=az_name.strip(),
                     tenant_id=az_tenant,
                     subscription_id=az_sub,
                     client_id=az_client,
@@ -606,18 +611,19 @@ def _render_aws_connect_form(key_prefix: str, mode: str = "live"):
     # this form had no name field at all - every AWS tenant got the same
     # auto-generated "AWS ({region})" label, with no way to tell two AWS
     # accounts apart by anything meaningful (e.g. "Prod AWS" vs "Dev AWS
-    # Sandbox") the way Azure tenants already could. Optional - falls back
-    # to the same auto-generated label as before if left blank, so this
-    # doesn't force a decision on anyone who doesn't care.
+    # Sandbox") the way Azure tenants already could. Required, not optional
+    # (2026-09-02 follow-up feedback) - an auto-generated label is exactly
+    # what makes multiple tenants hard to tell apart, so it's no longer a
+    # silent fallback here either, matching Azure's form (now also required).
     _render_help_page_link("New here? See the Getting Started guide")
     with st.form(f"{key_prefix}_aws_form"):
         col1, col2 = st.columns(2)
         with col1:
-            aws_name = st.text_input("Tenant Name (optional)", value="", placeholder="e.g. Prod AWS Account")
+            aws_name = st.text_input("Tenant Name", value="", placeholder="e.g. Prod AWS Account")
             aws_key = st.text_input("AWS Access Key ID", value="", placeholder="AKIAXXXXXXXXXXXXXXXX")
-            aws_reg = st.text_input("Default AWS Region", value="us-east-1", placeholder="us-east-1")
         with col2:
             aws_sec = st.text_input("AWS Secret Access Key", value="", type="password", autocomplete="new-password")
+            aws_reg = st.text_input("Default AWS Region", value="us-east-1", placeholder="us-east-1")
 
         c_btn1, c_btn2 = st.columns(2)
         with c_btn1:
@@ -639,10 +645,12 @@ def _render_aws_connect_form(key_prefix: str, mode: str = "live"):
 
     if aws_sub_btn:
         new_aws = AWSCredentials(aws_key, aws_sec, aws_reg)
-        if new_aws.is_complete:
+        if new_aws.is_complete and not aws_name.strip():
+            st.error("Please enter a Tenant Name so this AWS account can be told apart from others.")
+        elif new_aws.is_complete:
             save_aws_credentials_to_env_file(new_aws)
             tenant_db_id = upsert_tenant(
-                provider="AWS", mode=mode, tenant_name=aws_name.strip() or f"AWS ({aws_reg})",
+                provider="AWS", mode=mode, tenant_name=aws_name.strip(),
                 tenant_id=aws_reg, subscription_id=aws_reg,
                 client_id=aws_key, client_secret=aws_sec,
             )

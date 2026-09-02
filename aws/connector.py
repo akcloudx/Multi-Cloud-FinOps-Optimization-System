@@ -58,6 +58,14 @@ _ACCESS_DENIED_CODES = {"AccessDenied", "AccessDeniedException", "UnauthorizedOp
 # completely different (an account setting, not a policy) and the two
 # shouldn't look identical in the UI.
 _NOT_ACTIVATED_CODES = {"OptInRequired", "SubscriptionRequiredException"}
+# Real gap caught live 2026-09-02: Amazon Keyspaces doesn't use either code
+# above for this same "account never activated this service" condition -
+# it returns a plain AccessDeniedException whose MESSAGE literally says
+# "The AWS Access Key Id needs a subscription for the service" (confirmed
+# via a live AWS CLI call against a policy that already, correctly, granted
+# cassandra:Select). Matched on message text since the code alone can't
+# distinguish this from a real missing-permission denial for this service.
+_NOT_ACTIVATED_MESSAGE_MARKER = "needs a subscription for the service"
 
 
 # AWS Managed Policy names verified against official AWS docs (each policy's
@@ -191,11 +199,20 @@ REQUIRED_AWS_POLICIES = [
     # covers both inventory (DescribeDomains) and Reserved Instances
     # (DescribeReservedInstances) - same "Describe* wildcard already covers
     # RI too" pattern as EC2/RDS above.
+    # Real bug caught live 2026-09-02: the actual fetch (and this policy's
+    # own test probe) calls list_domain_names() FIRST to discover domain
+    # names, then batches them into describe_domains() - but only the
+    # describe_domains action was ever listed here, so the consolidated
+    # custom policy this app generates never granted es:ListDomainNames,
+    # and the live call failed with AccessDenied despite DescribeDomains
+    # being granted. Confirmed via AWS's own Service Authorization
+    # Reference that ListDomainNames is a distinct IAM action, not covered
+    # by DescribeDomains.
     {
-        "Policy / Action": "es:DescribeDomains / es:DescribeReservedInstances",
+        "Policy / Action": "es:ListDomainNames / es:DescribeDomains / es:DescribeReservedInstances",
         "AWS Managed Policy": "AmazonOpenSearchServiceReadOnlyAccess",
         "Required":        "Yes — For OpenSearch inventory + RI data",
-        "Purpose":         "Scan OpenSearch domains and read active Reserved Instances you own (real IAM action is es:Describe* despite the newer 'opensearch' boto3 client name)",
+        "Purpose":         "List domain names, then scan OpenSearch domains and read active Reserved Instances you own (real IAM action is es:* despite the newer 'opensearch' boto3 client name)",
     },
     # Added 2026-08-23 alongside SageMaker Endpoint/Notebook Instance
     # inventory - confirmed real (arn:aws:iam::aws:policy/AmazonSageMakerReadOnly),
@@ -230,11 +247,19 @@ REQUIRED_AWS_POLICIES = [
     # instance - AWS exposes zero OS-level memory metrics without it,
     # confirmed via AWS's own CloudWatch docs) - an instance without the
     # agent simply has no CWAgent data to return, not a permission problem.
+    # Real bug caught live 2026-09-02 (same class as the OpenSearch fix
+    # above): this app's own test probe - and the real future rightsizing
+    # fetch - both call list_metrics() as the free/cheap proxy call, which
+    # needs the DISTINCT action cloudwatch:ListMetrics, not GetMetricData.
+    # Confirmed via a real AWS CLI call against a policy that granted only
+    # GetMetricData: "AccessDenied... because no identity-based policy
+    # allows the cloudwatch:ListMetrics action" - ListMetrics was never in
+    # this app's generated consolidated policy at all until now.
     {
-        "Policy / Action": "cloudwatch:GetMetricData",
+        "Policy / Action": "cloudwatch:ListMetrics / cloudwatch:GetMetricData",
         "AWS Managed Policy": "CloudWatchReadOnlyAccess",
         "Required":        "Yes — For EC2 Rightsizing",
-        "Purpose":         "Read EC2 CPUUtilization (always available) and mem_used_percent (only if the CloudWatch Agent is installed on that instance) utilization metrics for rightsizing classification",
+        "Purpose":         "List then read EC2 CPUUtilization (always available) and mem_used_percent (only if the CloudWatch Agent is installed on that instance) utilization metrics for rightsizing classification",
     },
 ]
 
@@ -376,16 +401,27 @@ def check_aws_permissions(creds: AWSCredentials) -> dict:
             results.append({"action": action, "status": "ready", "detail": None})
         except ClientError as e:
             code = e.response.get("Error", {}).get("Code", "")
+            raw_msg = e.response.get("Error", {}).get("Message", "")
             if dry_run_convention and code == "DryRunOperation":
                 results.append({"action": action, "status": "ready", "detail": None})
-            elif code in _ACCESS_DENIED_CODES:
-                results.append({"action": action, "status": "missing", "detail": f"Access denied ({code})."})
-            elif code in _NOT_ACTIVATED_CODES:
+            elif code in _NOT_ACTIVATED_CODES or _NOT_ACTIVATED_MESSAGE_MARKER in raw_msg:
                 results.append({
                     "action": action, "status": "not_activated",
                     "detail": "This AWS account has never activated this service - not a permissions "
                               "problem. Harmless if you don't use it; the sync will just find nothing here.",
                 })
+            elif code in _ACCESS_DENIED_CODES:
+                # AWS's own denial message (not just the error code) says
+                # explicitly whether an identity policy or a Service
+                # Control Policy caused the denial - e.g. SCP denials
+                # include literal text like "with an explicit deny in a
+                # service control policy". Discarding it (as this used to)
+                # threw away the one piece of information that actually
+                # distinguishes those two cases; real gap caught live
+                # 2026-09-02 debugging an otherwise correctly-granted
+                # permission that still failed at runtime.
+                detail = f"Access denied ({code}): {raw_msg}" if raw_msg else f"Access denied ({code})."
+                results.append({"action": action, "status": "missing", "detail": detail[:400]})
             else:
                 results.append({"action": action, "status": "error", "detail": str(e)[:250]})
         except Exception as e:
@@ -455,7 +491,7 @@ def check_aws_permissions(creds: AWSCredentials) -> dict:
         lambda: session.client("ecs").list_clusters(maxResults=20),
     )
     _probe(
-        "es:DescribeDomains / es:DescribeReservedInstances",
+        "es:ListDomainNames / es:DescribeDomains / es:DescribeReservedInstances",
         lambda: session.client("opensearch").list_domain_names(),
     )
     _probe(
@@ -466,16 +502,17 @@ def check_aws_permissions(creds: AWSCredentials) -> dict:
         "neptune-graph:ListGraphs / neptune-graph:GetGraph",
         lambda: session.client("neptune-graph").list_graphs(maxResults=20),
     )
-    # cloudwatch:ListMetrics stands in for cloudwatch:GetMetricData here -
+    # Probes cloudwatch:ListMetrics rather than GetMetricData directly -
     # GetMetricData itself isn't free to probe cheaply (it always evaluates
     # at least one real metric query), while ListMetrics is a genuinely
-    # free, real, read-only call that CloudWatchReadOnlyAccess (the one
-    # managed policy REQUIRED_AWS_POLICIES actually recommends for this
-    # row) grants together with GetMetricData - same "closest free real
-    # proxy for the recommended managed policy" discipline as pricing:
-    # GetProducts above, not a literal 1:1 IAM-action check.
+    # free, real, read-only call. Both actions are now explicitly declared
+    # on this row's "Policy / Action" (real bug fixed 2026-09-02: ListMetrics
+    # was missing from the generated policy entirely, confirmed via a live
+    # AWS CLI AccessDenied naming that exact action) - CloudWatchReadOnlyAccess
+    # grants both together, same "closest free real proxy for the
+    # recommended managed policy" discipline as pricing:GetProducts above.
     _probe(
-        "cloudwatch:GetMetricData",
+        "cloudwatch:ListMetrics / cloudwatch:GetMetricData",
         lambda: session.client("cloudwatch").list_metrics(Namespace="AWS/EC2", MetricName="CPUUtilization"),
     )
 
