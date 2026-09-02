@@ -21,6 +21,7 @@ REQUIRED AWS IAM POLICY PERMISSIONS:
 """
 
 import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 import pandas as pd
@@ -614,6 +615,25 @@ def test_aws_connection(creds: AWSCredentials) -> dict:
 # group. Both calls are free (see check_aws_permissions()'s docstring for the
 # Cost Explorer contrast), so scanning every region costs nothing extra
 # beyond a little latency.
+#
+# That latency used to be paid sequentially, one region at a time - for a
+# standard account (~17 regions enabled by default) times ~14 services for
+# inventory plus another ~7 for RI/SP data, a full sync could take several
+# minutes of pure network wait with the CPU doing nothing. Real perf fix
+# 2026-09-02: fetch_live_inventory() and fetch_live_reservations() now scan
+# regions concurrently via ThreadPoolExecutor - these are independent,
+# read-only, per-region API calls with no ordering dependency between
+# regions, so there's no correctness cost to running them in parallel.
+# 8 workers is a starting point, not derived from a documented AWS rate
+# limit - most of these Describe*/List* APIs default to a generous ~20-100
+# req/sec per account (varies by service/region, confirmed via AWS's own
+# API throttling docs), so 8 concurrent regions is comfortably under that
+# even with several calls in flight per region at once; boto3's built-in
+# retry/backoff (already relied on implicitly everywhere else in this file)
+# absorbs any transient throttling regardless.
+_AWS_REGION_SCAN_WORKERS = 8
+
+
 def _discover_regions(session) -> list:
     """Regions enabled for this account only (not ALL AWS regions that
     exist) - confirmed via https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeRegions.html
@@ -832,10 +852,21 @@ def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
     account_id = session.client("sts").get_caller_identity().get("Account", "")
     regions = _discover_regions(session)
 
-    records = []
-
-    for region in regions:
+    def _scan_region(region: str) -> list:
+        """Runs entirely inside its own thread with its own private boto3
+        Session - boto3 Sessions are documented as NOT thread-safe to share
+        across threads (only individual clients are, once created), so each
+        region gets a fresh Session rather than reusing the outer one across
+        threads. Session construction itself makes no network call, so this
+        costs nothing - all the real latency is in the API calls below, which
+        now run concurrently across regions instead of one at a time."""
+        region_records = []
         try:
+            session = boto3.Session(
+                aws_access_key_id=creds.access_key_id,
+                aws_secret_access_key=creds.secret_access_key,
+                region_name=creds.region,
+            )
             ec2 = session.client("ec2", region_name=region)
             paginator = ec2.get_paginator("describe_instances")
             for page in paginator.paginate():
@@ -846,7 +877,7 @@ def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
                             continue   # gone, not a resource that still exists - matches how Resource Graph never returns deleted Azure resources either.
                         tags = {t.get("Key"): t.get("Value") for t in inst.get("Tags", [])}
                         instance_id = inst.get("InstanceId", "")
-                        records.append({
+                        region_records.append({
                             "Resource ID":             instance_id,
                             "Resource Name":           tags.get("Name") or instance_id,
                             # Renamed from the generic "Compute" to "Amazon EC2"
@@ -897,7 +928,7 @@ def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
             paginator = rds.get_paginator("describe_db_instances")
             for page in paginator.paginate():
                 for db in page.get("DBInstances", []):
-                    records.append({
+                    region_records.append({
                         "Resource ID":             db.get("DBInstanceArn") or db.get("DBInstanceIdentifier", ""),
                         "Resource Name":           db.get("DBInstanceIdentifier", ""),
                         "Resource Type":           map_rds_engine(db.get("Engine", ""), db.get("LicenseModel"), db.get("DBInstanceClass")),
@@ -966,7 +997,7 @@ def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
                 for db in page.get("DBInstances", []):
                     min_capacity = serverless_min_capacity.get(db.get("DBClusterIdentifier", ""))
                     is_serverless = min_capacity is not None
-                    records.append({
+                    region_records.append({
                         "Resource ID":             db.get("DBInstanceArn") or db.get("DBInstanceIdentifier", ""),
                         "Resource Name":           db.get("DBInstanceIdentifier", ""),
                         "Resource Type":           "Amazon DocumentDB Serverless" if is_serverless else "Amazon DocumentDB",
@@ -1021,7 +1052,7 @@ def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
                 for db in page.get("DBInstances", []):
                     min_capacity = serverless_min_capacity.get(db.get("DBClusterIdentifier", ""))
                     is_serverless = min_capacity is not None
-                    records.append({
+                    region_records.append({
                         "Resource ID":             db.get("DBInstanceArn") or db.get("DBInstanceIdentifier", ""),
                         "Resource Name":           db.get("DBInstanceIdentifier", ""),
                         "Resource Type":           "Amazon Neptune Serverless" if is_serverless else "Amazon Neptune",
@@ -1087,7 +1118,7 @@ def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
                     capacity = graph.get("provisionedMemory")
                     if capacity is None:
                         continue   # shouldn't happen for a real graph, but never fabricate a SKU from a missing value.
-                    records.append({
+                    region_records.append({
                         "Resource ID":             graph.get("arn") or graph.get("id", ""),
                         "Resource Name":           graph.get("name", ""),
                         "Resource Type":           "Amazon Neptune Analytics",
@@ -1125,7 +1156,7 @@ def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
             paginator = dms.get_paginator("describe_replication_instances")
             for page in paginator.paginate():
                 for ri in page.get("ReplicationInstances", []):
-                    records.append({
+                    region_records.append({
                         "Resource ID":             ri.get("ReplicationInstanceArn") or ri.get("ReplicationInstanceIdentifier", ""),
                         "Resource Name":           ri.get("ReplicationInstanceIdentifier", ""),
                         "Resource Type":           "AWS DMS Replication Instance",
@@ -1176,7 +1207,7 @@ def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
                     status = status_by_config_arn.get(config_arn, "")
                     is_running = status.lower() in ("running", "starting")
                     is_multi_az = bool(compute.get("MultiAZ"))
-                    records.append({
+                    region_records.append({
                         "Resource ID":             config_arn or cfg.get("ReplicationConfigIdentifier", ""),
                         "Resource Name":           cfg.get("ReplicationConfigIdentifier", ""),
                         "Resource Type":           "AWS DMS Serverless",
@@ -1222,7 +1253,7 @@ def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
                 wcu = throughput.get("WriteCapacityUnits") or 0
                 if not rcu and not wcu:
                     continue   # on-demand table - no provisioned capacity to price.
-                records.append({
+                region_records.append({
                     "Resource ID":             desc.get("TableArn") or name,
                     "Resource Name":           name,
                     "Resource Type":           "Amazon DynamoDB",
@@ -1254,7 +1285,7 @@ def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
                             continue   # pay-per-request table - no provisioned capacity to price, same as DynamoDB on-demand above.
                         rcu = cap.get("readCapacityUnits") or 0
                         wcu = cap.get("writeCapacityUnits") or 0
-                        records.append({
+                        region_records.append({
                             "Resource ID":             table.get("resourceArn") or f"{keyspace_name}.{table_name}",
                             "Resource Name":           f"{keyspace_name}.{table_name}",
                             "Resource Type":           "Amazon Keyspaces",
@@ -1310,7 +1341,7 @@ def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
                             platform_family = (task.get("platformFamily") or "").upper()
                             os_ = "Windows" if "WINDOWS" in platform_family else "Linux"
                             task_id = (task.get("taskArn") or "").rsplit("/", 1)[-1]
-                            records.append({
+                            region_records.append({
                                 "Resource ID":             task.get("taskArn") or task_id,
                                 "Resource Name":           task_id,
                                 "Resource Type":           "AWS Fargate",
@@ -1367,7 +1398,7 @@ def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
                     # pricing lookup unchanged rather than needing a new
                     # count-aware variant.
                     for node_idx in range(instance_count):
-                        records.append({
+                        region_records.append({
                             "Resource ID":             f"{domain_arn}#node{node_idx}",
                             "Resource Name":           f"{domain_name}-node-{node_idx}" if instance_count > 1 else domain_name,
                             "Resource Type":           "Amazon OpenSearch",
@@ -1400,7 +1431,7 @@ def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
             paginator = ec.get_paginator("describe_cache_clusters")
             for page in paginator.paginate():
                 for cc in page.get("CacheClusters", []):
-                    records.append({
+                    region_records.append({
                         "Resource ID":             cc.get("ARN") or cc.get("CacheClusterId", ""),
                         "Resource Name":           cc.get("CacheClusterId", ""),
                         "Resource Type":           map_elasticache_engine(cc.get("Engine", "")),
@@ -1424,7 +1455,7 @@ def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
             paginator = rs.get_paginator("describe_clusters")
             for page in paginator.paginate():
                 for cl in page.get("Clusters", []):
-                    records.append({
+                    region_records.append({
                         "Resource ID":             cl.get("ClusterNamespaceArn") or cl.get("ClusterIdentifier", ""),
                         "Resource Name":           cl.get("ClusterIdentifier", ""),
                         "Resource Type":           "Amazon Redshift",
@@ -1479,7 +1510,7 @@ def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
                     for shard in cluster.get("Shards", []):
                         for node in shard.get("Nodes", []):
                             node_name = node.get("Name", "")
-                            records.append({
+                            region_records.append({
                                 "Resource ID":             f"{cluster_arn}#{node_name}",
                                 "Resource Name":           f"{node_name or cluster_name} ({engine_label.rsplit(' ', 1)[-1]})",
                                 "Resource Type":           "Amazon MemoryDB",
@@ -1536,7 +1567,7 @@ def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
                             instance_count = variant.get("InitialInstanceCount") or 1
                             variant_name = variant.get("VariantName", "")
                             for node_idx in range(instance_count):
-                                records.append({
+                                region_records.append({
                                     "Resource ID":             f"{ep.get('EndpointArn') or ep_name}#{variant_name}#{node_idx}",
                                     "Resource Name":           f"{ep_name}-{variant_name}" if instance_count == 1 else f"{ep_name}-{variant_name}-{node_idx}",
                                     "Resource Type":           "Amazon SageMaker Endpoint",
@@ -1561,7 +1592,7 @@ def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
             for page in sm.get_paginator("list_notebook_instances").paginate():
                 for nb in page.get("NotebookInstances", []):
                     nb_name = nb.get("NotebookInstanceName", "")
-                    records.append({
+                    region_records.append({
                         "Resource ID":             nb.get("NotebookInstanceArn") or nb_name,
                         "Resource Name":           nb_name,
                         "Resource Type":           "Amazon SageMaker Notebook Instance",
@@ -1579,7 +1610,16 @@ def fetch_live_inventory(creds: AWSCredentials) -> pd.DataFrame:
                     })
         except (ClientError, BotoCoreError):
             pass
+        return region_records
 
+    records = []
+    with ThreadPoolExecutor(max_workers=_AWS_REGION_SCAN_WORKERS) as executor:
+        futures = [executor.submit(_scan_region, region) for region in regions]
+        for future in futures:
+            try:
+                records.extend(future.result())
+            except Exception:
+                pass
     return pd.DataFrame(records)
 
 
@@ -1806,15 +1846,23 @@ def fetch_live_reservations(creds: AWSCredentials) -> pd.DataFrame:
     # on why this app doesn't restrict matching by it).
     account_id = session.client("sts").get_caller_identity().get("Account", "")
     regions = _discover_regions(session)
-    records = []
 
-    for region in regions:
+    def _scan_region(region: str) -> list:
+        """See fetch_live_inventory()'s identical helper for why each
+        region gets its own private Session instead of sharing one across
+        threads."""
+        region_records = []
         try:
+            session = boto3.Session(
+                aws_access_key_id=creds.access_key_id,
+                aws_secret_access_key=creds.secret_access_key,
+                region_name=creds.region,
+            )
             ec2 = session.client("ec2", region_name=region)
             for ri in ec2.describe_reserved_instances().get("ReservedInstances", []):
                 if ri.get("State") != "active":
                     continue   # expired/retired/pending purchases aren't real current coverage - matches how the inventory scan skips "terminated" instances.
-                records.append({
+                region_records.append({
                     "service":               "EC2",
                     "reserved_instance_id":  ri.get("ReservedInstancesId", ""),
                     "instance_type":         ri.get("InstanceType", ""),
@@ -1843,7 +1891,7 @@ def fetch_live_reservations(creds: AWSCredentials) -> pd.DataFrame:
             for ri in rds.describe_reserved_db_instances().get("ReservedDBInstances", []):
                 if ri.get("State") != "active":
                     continue
-                records.append({
+                region_records.append({
                     "service":               "RDS",
                     "reserved_instance_id":  ri.get("ReservedDBInstanceId", ""),
                     "instance_type":         ri.get("DBInstanceClass", ""),
@@ -1872,7 +1920,7 @@ def fetch_live_reservations(creds: AWSCredentials) -> pd.DataFrame:
             for ri in ec.describe_reserved_cache_nodes().get("ReservedCacheNodes", []):
                 if ri.get("State") != "active":
                     continue
-                records.append({
+                region_records.append({
                     "service":               "ElastiCache",
                     "reserved_instance_id":  ri.get("ReservedCacheNodeId", ""),
                     "instance_type":         ri.get("CacheNodeType", ""),
@@ -1901,7 +1949,7 @@ def fetch_live_reservations(creds: AWSCredentials) -> pd.DataFrame:
             for ri in rs.describe_reserved_nodes().get("ReservedNodes", []):
                 if ri.get("State") != "active":
                     continue
-                records.append({
+                region_records.append({
                     "service":               "Redshift",
                     "reserved_instance_id":  ri.get("ReservedNodeId", ""),
                     "instance_type":         ri.get("NodeType", ""),
@@ -1937,7 +1985,7 @@ def fetch_live_reservations(creds: AWSCredentials) -> pd.DataFrame:
             for ri in aos_ri.describe_reserved_instances().get("ReservedInstances", []):
                 if ri.get("State") != "active":
                     continue
-                records.append({
+                region_records.append({
                     "service":               "OpenSearch",
                     "reserved_instance_id":  ri.get("ReservedInstanceId", ""),
                     "instance_type":         ri.get("InstanceType", ""),
@@ -1974,7 +2022,7 @@ def fetch_live_reservations(creds: AWSCredentials) -> pd.DataFrame:
             for ri in mdb_ri.describe_reserved_nodes().get("ReservedNodes", []):
                 if ri.get("State") != "active":
                     continue
-                records.append({
+                region_records.append({
                     "service":               "MemoryDB",
                     "reserved_instance_id":  ri.get("ReservationId", ""),
                     "instance_type":         ri.get("NodeType", ""),
@@ -1997,6 +2045,16 @@ def fetch_live_reservations(creds: AWSCredentials) -> pd.DataFrame:
                 })
         except (ClientError, BotoCoreError):
             pass
+        return region_records
+
+    records = []
+    with ThreadPoolExecutor(max_workers=_AWS_REGION_SCAN_WORKERS) as executor:
+        futures = [executor.submit(_scan_region, region) for region in regions]
+        for future in futures:
+            try:
+                records.extend(future.result())
+            except Exception:
+                pass
 
     df = pd.DataFrame(records)
     if not df.empty:
