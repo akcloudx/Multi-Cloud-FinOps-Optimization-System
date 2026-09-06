@@ -8,7 +8,7 @@ Every diagram and claim below is verified directly against the current codebase,
 
 ## 1. System Architecture
 
-![System architecture](docs/images/architecture.png)
+![System architecture](docs/images/architecture.svg)
 
 Both entry points — the web app (on-demand sync) and the Function App (hourly, automatic) — call into the **same** `data/sync_pipeline.py` orchestrator, so there is exactly one code path for "how inventory gets into the database," regardless of what triggered it. The dashboard's own reads never trigger a live cloud API call; a sync must have already populated the database, which keeps normal browsing fast and free of provider rate limits.
 
