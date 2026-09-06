@@ -769,6 +769,14 @@ if ($signedInUser -and $depsOk -and (Test-Path $grantScriptPath)) {
         # 1433 instead, no amount of waiting fixes it - falls through to the
         # manual Query editor instructions either way, same as before.
         Start-Sleep -Seconds 15
+        # A connection error/Python traceback right below this line on the
+        # first attempt is common and already expected, not a sign anything
+        # is broken - it just means this attempt landed before the firewall
+        # rule above had fully propagated. grant_managed_identity_access.py
+        # prints its own traceback on that failure (normal Python behavior
+        # for an unhandled exception), but this wrapper is watching the exit
+        # code, not the text, and will retry once below regardless.
+        Write-Host "        (a connection error/traceback here on the first try is expected - retrying handles it)" -ForegroundColor DarkGray
         & $venvPython $grantScriptPath $SqlServerFqdn $SqlDbName $WebAppName $FunctionAppName
         if ($LASTEXITCODE -eq 0) {
             $grantAutomated = $true
