@@ -163,6 +163,23 @@ if ($missingTools.Count -gt 0) {
 }
 Write-Host "        [OK] az, python, and func v4 ($funcVersionRaw) are all available." -ForegroundColor Green
 
+# Azure CLI dynamically installs certain command groups' extensions on first
+# use (log-analytics, application-insights among them) rather than bundling
+# them by default - if not pre-configured, the FIRST time one of those
+# commands runs it can print an interactive "Do you want to install this
+# extension now? (Y/n)" prompt and then wait for a keypress. That prompt was
+# seen live NOT rendering visibly in Cloud Shell's browser-based terminal
+# even though the underlying process was still correctly waiting on stdin
+# for a response - from the outside this looked exactly like a silent hang
+# with zero output, and only typing "y" blind (no visible prompt to confirm
+# against) unblocked it. Setting this once, up front, tells az to always
+# auto-install any required extension silently and continue - the standard,
+# documented fix for unattended/scripted az CLI usage (Microsoft's own
+# recommendation for CI/automation contexts) - so this class of prompt can
+# never appear again, for this or any future az command in this script that
+# happens to need a dynamically-installed extension.
+az config set extension.use_dynamic_install=yes_without_prompt -o none
+
 # Cloud Shell auto-authenticates you as whichever account is signed into the
 # Azure Portal, so this should basically always succeed - kept as a defensive
 # check anyway (e.g. a session that's been open long enough for a token to
@@ -433,7 +450,35 @@ if (-not $appInsightsExists) {
     if ($LASTEXITCODE -ne 0) { Fail "Creating Application Insights '$AppInsightsName'" }
 }
 Write-Host "        Connecting Application Insights to the Function App..." -ForegroundColor Yellow
-az monitor app-insights component connect-function --app $AppInsightsName --function $FunctionAppName --resource-group $ResourceGroupName -o none
+# Retried, not fire-and-forget, and with a real exit-code check - unlike
+# every other az call in this script, this one previously had neither. A
+# real (ResourceNotFound) was seen live right after a fresh App Insights
+# component was created: ARM's control plane hadn't finished propagating the
+# just-created resource before this connect call read it back - the same
+# class of ARM eventual-consistency delay this script already works around
+# elsewhere (see "ARM Resilient" in the header, and the SQL grant's own
+# retry-with-wait a few steps down). Without an exit-code check here, that
+# failure just printed to console and the script sailed past it, so
+# "DEPLOYMENT COMPLETE!" printed even though this one step silently never
+# happened. Non-critical either way - App Insights only affects Function
+# diagnostics, not the app's actual functionality - so this warns and moves
+# on rather than calling Fail() if all retries are exhausted.
+$appInsightsConnected = $false
+for ($i = 1; $i -le 3; $i++) {
+    az monitor app-insights component connect-function --app $AppInsightsName --function $FunctionAppName --resource-group $ResourceGroupName -o none 2>$null
+    if ($LASTEXITCODE -eq 0) { $appInsightsConnected = $true; break }
+    if ($i -lt 3) {
+        Write-Host "        Not propagated yet - waiting 15s and retrying ($i/3)..." -ForegroundColor DarkYellow
+        Start-Sleep -Seconds 15
+    }
+}
+if ($appInsightsConnected) {
+    Write-Host "        [OK] Application Insights connected." -ForegroundColor Green
+} else {
+    Write-Host "        [WARNING] Could not connect Application Insights to the Function App after 3 attempts -" -ForegroundColor DarkYellow
+    Write-Host "        non-critical (only affects Function diagnostics, not app functionality). Retry manually with:" -ForegroundColor DarkYellow
+    Write-Host "          az monitor app-insights component connect-function --app $AppInsightsName --function $FunctionAppName --resource-group $ResourceGroupName" -ForegroundColor White
+}
 
 # Managed Identity (passwordless) - no DATABASE_URL / secret app setting at
 # all. AZURE_SQL_SERVER/AZURE_SQL_DATABASE are plain identifiers, not
