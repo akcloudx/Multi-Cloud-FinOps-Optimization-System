@@ -67,16 +67,24 @@
   <path d="M660,90 L660,155 L826,155 L826,198" fill="none" stroke="#64748B" stroke-width="1.75" marker-end="url(#arrow)"/>
   <path d="M700,90 L700,140 L1062,140 L1062,198" fill="none" stroke="#64748B" stroke-width="1.75" marker-end="url(#arrow)"/>
 
-  <!-- context-only notes, no real edge - Credentials/Auth and cache_admin.py -->
+  <!-- Context notes, deliberately NOT wired into the arrow flow above -
+       both share one identical style (tinted fill, no accent bar, same
+       solid border) so that shared style itself reads as "this is a note,
+       not a pipeline step," rather than the two notes looking arbitrarily
+       different from each other the way they did before this fix
+       (Credentials/Auth was solid-bordered, cache_admin.py was dashed,
+       with nothing on the diagram explaining what that difference meant). -->
   <g filter="url(#shadow)">
-    <rect x="10" y="330" width="451" height="60" rx="12" fill="#FFF3DE" stroke="#FBE1B8" stroke-width="1"/>
+    <rect x="10" y="330" width="451" height="68" rx="12" fill="#FFF3DE" stroke="#FBE1B8" stroke-width="1"/>
   </g>
-  <text x="235" y="356" font-size="12" font-weight="700" fill="#B36B00" text-anchor="middle">Credentials / Auth</text>
-  <text x="235" y="375" font-size="10.5" fill="#B36B00" text-anchor="middle">Service Principal (Azure) · IAM Role (AWS) — used by both connectors above</text>
+  <text x="235" y="350" font-size="12" font-weight="700" fill="#B36B00" text-anchor="middle">Credentials / Auth</text>
+  <text x="235" y="366" font-size="10" fill="#B36B00" text-anchor="middle">Service Principal (Azure) · IAM Role (AWS) — used by both connectors above</text>
+  <text x="235" y="384" font-size="9" font-style="italic" fill="#C18A3D" text-anchor="middle">note — not a call in the diagram above</text>
 
   <g filter="url(#shadow)">
-    <rect x="482" y="330" width="688" height="60" rx="12" fill="#EAF7EE" stroke="#BFE9CE" stroke-width="1" stroke-dasharray="4,3"/>
+    <rect x="482" y="330" width="688" height="68" rx="12" fill="#EAF7EE" stroke="#BFE9CE" stroke-width="1"/>
   </g>
-  <text x="826" y="356" font-size="12" font-weight="700" fill="#1F7A4D" text-anchor="middle">cache_admin.py</text>
-  <text x="826" y="375" font-size="10.5" fill="#1F7A4D" text-anchor="middle">pricing/ — manual cache refresh utility (ops-only, not on the regular sync path)</text>
+  <text x="826" y="350" font-size="12" font-weight="700" fill="#1F7A4D" text-anchor="middle">cache_admin.py</text>
+  <text x="826" y="366" font-size="10" fill="#1F7A4D" text-anchor="middle">pricing/ — manual cache refresh utility (ops-only, not on the regular sync path)</text>
+  <text x="826" y="384" font-size="9" font-style="italic" fill="#4C9C6F" text-anchor="middle">note — not a call in the diagram above</text>
 </svg>
