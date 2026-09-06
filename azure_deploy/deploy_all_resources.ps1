@@ -13,8 +13,9 @@
 #    at the plan-creation step for the one open risk (Oryx remote build behavior not yet verified on F1).
 #    Passwordless DB auth: both apps connect to Azure SQL via System-Assigned Managed Identity
 #    (mssql-python driver) - no password/connection-string secret is ever stored anywhere. Step 7
-#    grants both identities DB access automatically (falls back to printing a one-time manual
-#    T-SQL grant for the Portal Query editor if the local venv isn't available).
+#    grants both identities DB access automatically, self-provisioning the one-time local venv +
+#    packages it needs to do so (falls back to printing a manual T-SQL grant for the Portal Query
+#    editor only if that self-provisioning itself fails).
 
 # SqlAdminPassword has no default on purpose - it used to be a hardcoded
 # real password here (found and fixed 2026-08, alongside the same
@@ -759,29 +760,53 @@ $grantScriptPath = Join-Path $PSScriptRoot "grant_managed_identity_access.py"
 # hardcoding the Windows layout here silently made Test-Path always false on
 # every other platform, so step 7's automation never even attempted to run
 # there, regardless of whether a working venv actually existed.
+$venvPath = Join-Path $parentPath "venv"
 $venvPython = if ($IsWindows -or $null -eq $IsWindows) {
-    Join-Path $parentPath "venv\Scripts\python.exe"
+    Join-Path $venvPath "Scripts\python.exe"
 } else {
-    Join-Path $parentPath "venv/bin/python"
+    Join-Path $venvPath "bin/python"
 }
 $grantAutomated   = $false
+
+# Self-provisioned rather than just documented - a clone with no venv set up
+# yet used to just fall back to the manual T-SQL every time, even though the
+# only thing missing was 2 pip packages. `python -m venv` writes the correct
+# native layout on its own (Scripts\ on Windows, bin/ elsewhere), so this one
+# call is already cross-platform without needing the $IsWindows branch above.
+# Non-fatal either way: any failure here (venv creation, pip install) just
+# leaves $depsOk false below, same as before, and the script falls back to
+# the manual T-SQL exactly as it always has - this never blocks the deploy.
+if (-not (Test-Path $venvPython)) {
+    Write-Host "        No venv yet at '$venvPython' - creating one automatically ..." -ForegroundColor Yellow
+    python -m venv $venvPath 2>$null
+    if (Test-Path $venvPython) {
+        Write-Host "        Installing mssql_python and azure-identity into it ..." -ForegroundColor Yellow
+        & $venvPython -m pip install --quiet mssql_python azure-identity 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "        [WARNING] pip install failed - falling back to manual instructions below." -ForegroundColor DarkYellow
+        }
+    } else {
+        Write-Host "        [WARNING] venv creation failed - falling back to manual instructions below." -ForegroundColor DarkYellow
+    }
+}
+
 # Checked BEFORE attempting the grant, not just that venvPython exists -
 # grant_managed_identity_access.py imports mssql_python and azure.identity
-# (line ~23-24), and a venv that exists but predates those being added to
-# requirements.txt (or was never fully `pip install -r`'d) would otherwise
-# only fail deep into the attempt below, AFTER the 10s AD-admin-propagation
-# wait, the firewall rule round-trip, and (on failure) a 30s retry wait -
-# ~45+ seconds spent on a path that a 1-line import check up front rules
-# out instantly. Import failures print to stderr (2>$null'd here since this
-# is a presence check, not a diagnostic) and are surfaced via the message
-# below instead, with the exact pip command to fix it.
+# (line ~23-24), and a venv that's missing those (whether pre-existing or the
+# auto-install above just failed) would otherwise only fail deep into the
+# attempt below, AFTER the 10s AD-admin-propagation wait, the firewall rule
+# round-trip, and (on failure) a 30s retry wait - ~45+ seconds spent on a
+# path that a 1-line import check up front rules out instantly. Import
+# failures print to stderr (2>$null'd here since this is a presence check,
+# not a diagnostic) and are surfaced via the message below instead, with the
+# exact pip command to fix it.
 $depsOk = $false
 if (Test-Path $venvPython) {
     & $venvPython -c "import mssql_python, azure.identity" 2>$null
     $depsOk = ($LASTEXITCODE -eq 0)
     if (-not $depsOk) {
-        Write-Host "        [WARNING] venv found at '$venvPython' but it's missing mssql_python and/or" -ForegroundColor DarkYellow
-        Write-Host "        azure-identity - falling back to manual instructions below. Fix with:" -ForegroundColor DarkYellow
+        Write-Host "        [WARNING] venv at '$venvPython' is still missing mssql_python and/or azure-identity -" -ForegroundColor DarkYellow
+        Write-Host "        falling back to manual instructions below. Fix with:" -ForegroundColor DarkYellow
         Write-Host "          $venvPython -m pip install mssql_python azure-identity" -ForegroundColor White
     }
 }
@@ -818,15 +843,11 @@ if ($signedInUser -and $depsOk -and (Test-Path $grantScriptPath)) {
     } else {
         Write-Host "        [WARNING] Could not detect this machine's public IP - falling back to manual instructions below." -ForegroundColor DarkYellow
     }
-} elseif (-not (Test-Path $venvPython)) {
-    Write-Host "        [INFO] Local venv ($venvPython) not found - falling back to manual instructions below." -ForegroundColor DarkYellow
-} elseif (-not $depsOk) {
-    # Already printed the specific "venv found but missing packages" warning
-    # (with the pip fix command) right after the import check above - nothing
-    # more to say here, just don't also claim the venv itself is missing.
 } elseif (-not $signedInUser) {
     Write-Host "        [INFO] No signed-in user resolved (see warning above) - falling back to manual instructions below." -ForegroundColor DarkYellow
 }
+# (If venv creation/pip install failed, or deps are still missing, the
+# messages printed above already explain why - nothing more to add here.)
 
 if (-not $grantAutomated) {
     # Guarded with IF NOT EXISTS, not plain CREATE USER/ALTER ROLE - the

@@ -34,8 +34,9 @@
 #    fine for intermittent demo/test use, not sustained traffic.
 #    Passwordless DB auth: both apps connect to Azure SQL via System-Assigned Managed Identity
 #    (mssql-python driver) - no password/connection-string secret is ever stored anywhere. Step 7
-#    grants both identities DB access automatically (falls back to printing a one-time manual
-#    T-SQL grant for the Portal Query editor if the local venv isn't available).
+#    grants both identities DB access automatically, self-provisioning the one-time local venv +
+#    packages it needs to do so (falls back to printing a manual T-SQL grant for the Portal Query
+#    editor only if that self-provisioning itself fails).
 
 # SqlAdminPassword has no default on purpose - see deploy_all_resources.ps1's
 # matching comment for the full history. Typed as [SecureString] so
@@ -708,33 +709,52 @@ $grantScriptPath = Join-Path $PSScriptRoot "grant_managed_identity_access.py"
 # Cloud Shell's PowerShell always runs on a Linux container underneath, so
 # unlike the local-machine script there's no Windows/POSIX branch to pick
 # between here - it's always venv/bin/python.
-$venvPython = Join-Path $parentPath "venv/bin/python"
+$venvPath = Join-Path $parentPath "venv"
+$venvPython = Join-Path $venvPath "bin/python"
 $grantAutomated = $false
+
+# Self-provisioned rather than just documented - a fresh Cloud Shell session
+# never has this venv (nothing persists outside the clouddrive-backed $HOME
+# mount between container recycles unless something explicitly put it
+# there), and manually creating a venv + pip installing 2 packages just to
+# avoid a manual SQL step defeats the point of this being the low-friction
+# Cloud Shell path in the first place. Created under $parentPath (the repo
+# root - which sits on the persistent $HOME mount if cloned there per this
+# script's own repo-presence-check instructions), so this setup cost is
+# genuinely one-time: it survives to every later session too, not just this
+# run. Failures here (venv creation, pip install) are non-fatal - they just
+# leave $depsOk false, same as before, and the script falls back to the
+# manual T-SQL exactly as it always has.
+if (-not (Test-Path $venvPython)) {
+    Write-Host "        No venv yet at '$venvPython' - creating one automatically ..." -ForegroundColor Yellow
+    python -m venv $venvPath 2>$null
+    if (Test-Path $venvPython) {
+        Write-Host "        Installing mssql_python and azure-identity into it ..." -ForegroundColor Yellow
+        & $venvPython -m pip install --quiet mssql_python azure-identity 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "        [WARNING] pip install failed - falling back to manual instructions below." -ForegroundColor DarkYellow
+        }
+    } else {
+        Write-Host "        [WARNING] venv creation failed - falling back to manual instructions below." -ForegroundColor DarkYellow
+    }
+}
+
 # Checked BEFORE attempting the grant, not just that venvPython exists -
 # grant_managed_identity_access.py imports mssql_python and azure.identity,
-# and a venv that exists but is missing those would otherwise only fail deep
-# into the attempt below, AFTER the 10s AD-admin-propagation wait, the
-# firewall rule round-trip, and (on failure) a 30s retry wait - ~45+ seconds
-# spent on a path a 1-line import check up front rules out instantly.
+# and a venv that's missing those (whether pre-existing or the auto-install
+# above just failed) would otherwise only fail deep into the attempt below,
+# AFTER the 10s AD-admin-propagation wait, the firewall rule round-trip, and
+# (on failure) a 30s retry wait - ~45+ seconds spent on a path a 1-line
+# import check up front rules out instantly.
 $depsOk = $false
 if (Test-Path $venvPython) {
     & $venvPython -c "import mssql_python, azure.identity" 2>$null
     $depsOk = ($LASTEXITCODE -eq 0)
     if (-not $depsOk) {
-        Write-Host "        [WARNING] venv found at '$venvPython' but it's missing mssql_python and/or" -ForegroundColor DarkYellow
-        Write-Host "        azure-identity - falling back to manual instructions below. Fix with:" -ForegroundColor DarkYellow
+        Write-Host "        [WARNING] venv at '$venvPython' is still missing mssql_python and/or azure-identity -" -ForegroundColor DarkYellow
+        Write-Host "        falling back to manual instructions below. Fix with:" -ForegroundColor DarkYellow
         Write-Host "          $venvPython -m pip install mssql_python azure-identity" -ForegroundColor White
     }
-} else {
-    # Expected on a fresh Cloud Shell session - a venv here has never been
-    # created yet, so step 7 will fall back to the manual T-SQL below. If you
-    # want the automation instead, create it ONCE under `$HOME (Cloud Shell's
-    # persistent clouddrive mount, e.g. `$HOME/Multi-Cloud-FinOps-Optimization-System`)
-    # so it survives this session ending - a venv created under /tmp instead
-    # is wiped the moment the container recycles:
-    #   python -m venv venv && ./venv/bin/pip install mssql_python azure-identity
-    Write-Host "        [INFO] No venv yet at '$venvPython' - see this script's comment here for a" -ForegroundColor DarkYellow
-    Write-Host "        one-time setup command if you want the grant automated instead of manual." -ForegroundColor DarkYellow
 }
 if ($signedInUser -and $depsOk -and (Test-Path $grantScriptPath)) {
     Write-Host "        Attempting automated grant ..." -ForegroundColor Yellow
