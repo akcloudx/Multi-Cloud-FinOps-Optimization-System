@@ -1,6 +1,6 @@
 # Multi-Cloud FinOps Optimization System — Architecture Reference
 
-This is the deeper technical reference behind the project [README](README.md) — internal component structure, data flow, and data model, for anyone extending the codebase or defending its design decisions. For "how do I deploy this," see the README's [Deployment](README.md#deployment) section instead; this document assumes the system is already running and explains how it's built.
+This is the deeper technical reference behind the project [README](README.md) — internal component structure, data flow, and data model, for anyone extending the codebase or defending its design decisions. For "how do I deploy this," see the [README](README.md#deploy) or [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) instead; this document assumes the system is already running and explains how it's built.
 
 Every diagram and claim below is verified directly against the current codebase, not aspirational — if a design element here doesn't match what's in the code, the code is right and this document is stale (please open an issue).
 
@@ -8,37 +8,7 @@ Every diagram and claim below is verified directly against the current codebase,
 
 ## 1. System Architecture
 
-```
-                              ┌───────────────────┐
-                              │   User (Browser)   │
-                              └──────────┬──────────┘
-                                         │ HTTPS
-                                         ▼
-                          ┌───────────────────────────────┐        ┌──────────────────────────┐
-                          │   Streamlit Web Application     │        │     Azure Function App    │
-                          │   Azure App Service, Linux, F1   │        │  Consumption plan (Y1) -   │
-                          └───────────────┬─────────────────┘        │  hourly timerTrigger       │
-                                          │ on-demand sync            └─────────────┬──────────────┘
-                     ┌────────────────────┴─────────────────┐                       │ hourly sync
-                     ▼                                      │                       │
-        ┌─────────────────────────────┐                     │                       │
-        │   Application / Pipeline     │◄────────────────────┴───────────────────────┘
-        │   Layer (Python)              │
-        │   ─────────────────────────   │
-        │   Azure Connector              │──┐
-        │   AWS Connector                 │  │
-        │   Pricing Engine                 │  │  External Cloud Provider APIs
-        │   Analysis Engine                 │  │  ─────────────────────────
-        └─────────────────────────────┘  ├─►│ Azure Resource Graph (KQL, 9 query groups)
-                     │                       ├─►│ Azure Monitor (VM CPU/memory metrics)
-                     │  SQLAlchemy ORM        ├─►│ AWS SDK (boto3) — EC2, RDS, IAM, CloudWatch, etc.
-                     ▼  (all pipeline modules) └─►│ Azure Retail Prices API / AWS Price List API
-        ┌─────────────────────────────┐
-        │      Azure SQL Database       │◄── dashboard reads (no live API calls)
-        │  General Purpose, Serverless,  │
-        │  auto-pause                     │
-        └─────────────────────────────┘
-```
+![System architecture](docs/images/architecture.png)
 
 Both entry points — the web app (on-demand sync) and the Function App (hourly, automatic) — call into the **same** `data/sync_pipeline.py` orchestrator, so there is exactly one code path for "how inventory gets into the database," regardless of what triggered it. The dashboard's own reads never trigger a live cloud API call; a sync must have already populated the database, which keeps normal browsing fast and free of provider rate limits.
 
@@ -50,43 +20,19 @@ The Application/Pipeline Layer above expands into 16 real Python modules across 
 
 ### 2a. UI Layer and its direct callees
 
-```
-UI Layer - app.py (Streamlit)
-Home | Inventory | Rightsizing | Savings Plan Analysis | RI Coverage | Recommendations | Maturity Assessment
-   │
-   ├── triggers sync ──► data/sync_pipeline.py
-   ├── reads inventory ► data/inventory_loader.py     (read-only — never triggers a live sync)
-   ├── renders analysis► analysis/engine.py           (cost waterfall, SP/RI coverage, recommendations)
-   ├──────────────────► analysis/rightsizing.py       (CPU/memory classification)
-   └──────────────────► analysis/ri_eligibility.py / sp_eligibility.py (per-provider eligibility rules)
-```
+![UI layer component diagram](docs/images/component-ui.png)
 
 `inventory_loader.py` is deliberately a separate module from `sync_pipeline.py` so a page render can never accidentally trigger a live sync.
 
 ### 2b. Sync Pipeline — provider connectors and pricing
 
-```
-data/sync_pipeline.py
-   ├──► azure_conn/connector.py    (Resource Graph, 9 KQL query groups)
-   ├──► aws/connector.py           (14+ resource types, every enabled region)
-   ├──► pricing/azure_retail_api.py    (enrich pricing)
-   ├──► pricing/aws_price_list.py
-   └──► pricing/commitment_pricing.py  (RI / SP retail rates)
+![Sync pipeline component diagram](docs/images/component-ingestion.png)
 
-   Credentials/Auth: Service Principal (Azure) · IAM Role (AWS)
-   pricing/cache_admin.py: manual cache refresh utility (ops-only, not on the sync path)
-```
+`pricing/cache_admin.py` is a manual cache-refresh utility (ops-only, not on the regular sync path).
 
 ### 2c. Persistence layer
 
-```
-sync_pipeline.py ──persist──► db/schema.py
-inventory_loader.py ──read (dashed)──► db/schema.py
-pricing/{azure_retail_api,aws_price_list,commitment_pricing}.py ──read (dashed)──► db/schema.py
-
-db/schema.py (SQLAlchemy models: CloudInventory, RetailPrice, ReservationPurchase, SavingsPlan)
-   alongside: Tenants/Users tables (multi-tenant isolation) · Sessions/Auth tables (login, roles)
-```
+![Persistence layer component diagram](docs/images/component-persistence.png)
 
 No module writes to the database directly outside `db/schema.py`.
 
@@ -94,52 +40,13 @@ The Analysis layer is intentionally split into three modules by concern rather t
 
 ## 3. Data Flow (one sync cycle)
 
-```
-Azure Tenant ──┐
-               ├─resource data─► 1.0 Ingest Live Inventory ──raw inventory──► D1 CloudInventory
-AWS Account ───┘                        │  ▲                                        │
-                                         │  └───────────────── read ─────────────────┘
-                                         ▼
-                              2.0 Enrich with Retail Pricing ◄──cache──► D3 RetailPrice Cache
-                                         │ priced inventory
-                                         ▼
-                              3.0 Match RI / SP Commitments ◄──owned RI/SP──  D2 Commitment Tables
-                                         │ coverage-matched
-                                         ▼
-                              4.0 Analyse & Recommend  ──dashboard/recommendations──► FinOps User
-                                         ▲
-                                         └── utilisation history (read directly from D1, for rightsizing)
-```
+![Level 1 data flow diagram](docs/images/data-flow.png)
 
 Pricing enrichment (2.0) and commitment matching (3.0) are separate processes rather than one combined step, because the two facts are independent in reality: a resource can have a known on-demand price with no commitment coverage, known coverage with no priceable on-demand rate, or both.
 
 ## 4. Data Model (core tables)
 
-```
-CloudTenant                     RetailPrice
-  PK id                           PK id
-  provider, mode, tenant_name     provider, region, sku
-  tenant_id, subscription_id      effective_hourly_rate_usd
-  last_synced_at                  fetched_at
-  sync_interval_hours             (NOT tenant-scoped — shared cache, matched
-       │ 1                         at query time by provider+region+SKU,
-       │                           no FK to CloudTenant)
-       │ N
-       ▼
-  CloudInventory              ReservationPurchase           SavingsPlan
-    PK id                       PK id                         PK id
-    FK tenant_id                FK tenant_id                  FK tenant_id
-    resource_id, resource_type  commitment_id, scope_sku       commitment_id
-    region, sku, resource_state term, expiry_date               hourly_usd_commitment
-    payg_hourly_cost_usd        hourly_usd_commitment            term
-
-User                             UserSession
-  PK id                            PK token
-  email, role                      FK user_id
-  created_at, last_login_at        expires_at
-     │ 1
-     └──────N──────────────────────────┘
-```
+![Entity-relationship diagram](docs/images/data-model.png)
 
 `CloudTenant` is the root of the tenant-scoped side of the schema — every `CloudInventory`, `ReservationPurchase`, and `SavingsPlan` row carries a `tenant_id` foreign key, so all data for one connected account can be deleted or re-synced independently of every other tenant. `RetailPrice` is deliberately **not** tenant-scoped: it's a shared, provider/region/SKU-keyed cache reused across every tenant of that provider, matched at query time rather than joined by a database relationship — the alternative (a price row per tenant) would mean re-fetching an identical retail rate once per tenant instead of once per SKU/region.
 
@@ -147,7 +54,22 @@ User                             UserSession
 
 ## 5. Repository Map
 
-See the README's [Repository Structure](README.md#repository-structure) for the top-level layout. Module-level detail:
+```
+app.py                    Streamlit entry point / UI
+ui/                       Page-level UI components
+data/sync_pipeline.py     Shared ingestion orchestrator (web app + Function App)
+azure_conn/connector.py   Azure Resource Graph, Monitor metrics, IAM checks
+aws/connector.py          AWS multi-region inventory, CloudWatch metrics, IAM checks
+pricing/                  Retail pricing + commitment pricing enrichment
+analysis/                 Rightsizing, RI/SP eligibility, recommendations, maturity scoring
+commitments/              Commitment (RI/SP) matching logic
+db/                       SQLAlchemy models, engine factory, crypto, seed/demo data
+azure_function/           Azure Function App (hourly cron worker)
+azure_deploy/             Deployment scripts (see docs/DEPLOYMENT.md)
+.github/workflows/        GitHub Actions CI/CD for code-only redeploys
+```
+
+Module-level detail:
 
 | Module | Role |
 |---|---|
@@ -166,7 +88,7 @@ See the README's [Repository Structure](README.md#repository-structure) for the 
 | `db/crypto.py` | Fernet encryption for tenant client secrets at rest |
 | `db/seed.py`, `db/aws_seed.py` | Demo-mode seed data |
 | `azure_function/function_app.py` | Azure Function App entry point — hourly `timerTrigger` calling `sync_pipeline.py` |
-| `azure_deploy/` | Deployment scripts — see the README |
+| `azure_deploy/` | Deployment scripts — see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) |
 
 ## 6. Design Decisions Worth Knowing
 
@@ -178,4 +100,4 @@ See the README's [Repository Structure](README.md#repository-structure) for the 
 
 ---
 
-For deployment instructions, configuration, security model, and troubleshooting, see the [README](README.md).
+For deployment instructions and configuration, see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). For the security model and quick overview, see the [README](README.md).
