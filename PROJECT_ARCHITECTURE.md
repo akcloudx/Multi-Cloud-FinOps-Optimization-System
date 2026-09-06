@@ -20,19 +20,19 @@ The Application/Pipeline Layer above expands into 16 real Python modules across 
 
 ### 2a. UI Layer and its direct callees
 
-![UI layer component diagram](docs/images/component-ui.png)
+![UI layer component diagram](docs/images/component-ui.svg)
 
 `inventory_loader.py` is deliberately a separate module from `sync_pipeline.py` so a page render can never accidentally trigger a live sync.
 
 ### 2b. Sync Pipeline — provider connectors and pricing
 
-![Sync pipeline component diagram](docs/images/component-ingestion.png)
+![Sync pipeline component diagram](docs/images/component-ingestion.svg)
 
 `pricing/cache_admin.py` is a manual cache-refresh utility (ops-only, not on the regular sync path).
 
 ### 2c. Persistence layer
 
-![Persistence layer component diagram](docs/images/component-persistence.png)
+![Persistence layer component diagram](docs/images/component-persistence.svg)
 
 No module writes to the database directly outside `db/schema.py`.
 
@@ -40,13 +40,13 @@ The Analysis layer is intentionally split into three modules by concern rather t
 
 ## 3. Data Flow (one sync cycle)
 
-![Level 1 data flow diagram](docs/images/data-flow.png)
+![Level 1 data flow diagram](docs/images/data-flow.svg)
 
 Pricing enrichment (2.0) and commitment matching (3.0) are separate processes rather than one combined step, because the two facts are independent in reality: a resource can have a known on-demand price with no commitment coverage, known coverage with no priceable on-demand rate, or both.
 
 ## 4. Data Model (core tables)
 
-![Entity-relationship diagram](docs/images/data-model.png)
+![Entity-relationship diagram](docs/images/data-model.svg)
 
 `CloudTenant` is the root of the tenant-scoped side of the schema — every `CloudInventory`, `ReservationPurchase`, and `SavingsPlan` row carries a `tenant_id` foreign key, so all data for one connected account can be deleted or re-synced independently of every other tenant. `RetailPrice` is deliberately **not** tenant-scoped: it's a shared, provider/region/SKU-keyed cache reused across every tenant of that provider, matched at query time rather than joined by a database relationship — the alternative (a price row per tenant) would mean re-fetching an identical retail rate once per tenant instead of once per SKU/region.
 

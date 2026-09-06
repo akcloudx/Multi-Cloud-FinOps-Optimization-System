@@ -1,0 +1,133 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 560" width="1600" height="560" font-family="Arial, Helvetica, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#64748B"/>
+    </marker>
+    <marker id="arrowTeal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#0E7490"/>
+    </marker>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#1A202C" flood-opacity="0.12"/>
+    </filter>
+  </defs>
+  <rect x="0" y="0" width="1600" height="560" fill="#F7F8FA"/>
+
+  <!-- ============ External entities (sharp rectangles, gray) ============ -->
+  <g filter="url(#shadow)">
+    <rect x="20" y="130" width="170" height="56" fill="#EEF1F5" stroke="#94A3B8" stroke-width="1.5"/>
+  </g>
+  <text x="105" y="163" font-size="12.5" font-weight="700" fill="#334155" text-anchor="middle">Azure Tenant</text>
+
+  <g filter="url(#shadow)">
+    <rect x="20" y="230" width="170" height="56" fill="#EEF1F5" stroke="#94A3B8" stroke-width="1.5"/>
+  </g>
+  <text x="105" y="263" font-size="12.5" font-weight="700" fill="#334155" text-anchor="middle">AWS Account</text>
+
+  <!-- starts at x=1400, well clear of 4.0's right edge at x=1350 -->
+  <g filter="url(#shadow)">
+    <rect x="1400" y="180" width="170" height="56" fill="#EEF1F5" stroke="#94A3B8" stroke-width="1.5"/>
+  </g>
+  <text x="1485" y="204" font-size="12" font-weight="700" fill="#334155" text-anchor="middle">FinOps User</text>
+  <text x="1485" y="220" font-size="9.5" fill="#64748B" text-anchor="middle">(the dashboard viewer)</text>
+
+  <!-- ============ Processes (rounded, teal, numbered) ============ -->
+  <g filter="url(#shadow)">
+    <rect x="260" y="160" width="220" height="90" rx="45" fill="#0E7490"/>
+  </g>
+  <text x="370" y="198" font-size="13" font-weight="700" fill="#FFFFFF" text-anchor="middle">1.0 Ingest Live</text>
+  <text x="370" y="216" font-size="13" font-weight="700" fill="#FFFFFF" text-anchor="middle">Inventory</text>
+
+  <g filter="url(#shadow)">
+    <rect x="560" y="160" width="220" height="90" rx="45" fill="#0E7490"/>
+  </g>
+  <text x="670" y="198" font-size="13" font-weight="700" fill="#FFFFFF" text-anchor="middle">2.0 Enrich with</text>
+  <text x="670" y="216" font-size="13" font-weight="700" fill="#FFFFFF" text-anchor="middle">Retail Pricing</text>
+
+  <g filter="url(#shadow)">
+    <rect x="860" y="160" width="220" height="90" rx="45" fill="#0E7490"/>
+  </g>
+  <text x="970" y="198" font-size="13" font-weight="700" fill="#FFFFFF" text-anchor="middle">3.0 Match RI / SP</text>
+  <text x="970" y="216" font-size="13" font-weight="700" fill="#FFFFFF" text-anchor="middle">Commitments</text>
+
+  <g filter="url(#shadow)">
+    <rect x="1130" y="160" width="220" height="90" rx="45" fill="#0E7490"/>
+  </g>
+  <text x="1240" y="198" font-size="13" font-weight="700" fill="#FFFFFF" text-anchor="middle">4.0 Analyse &amp;</text>
+  <text x="1240" y="216" font-size="13" font-weight="700" fill="#FFFFFF" text-anchor="middle">Recommend</text>
+
+  <!-- ============ Data stores (open rectangle: top+bottom+left only) ============ -->
+  <!-- D1 CloudInventory, below 1.0 -->
+  <g filter="url(#shadow)">
+    <path d="M290,380 L290,430 L510,430 L510,380" fill="#FFFFFF" stroke="none"/>
+    <line x1="290" y1="380" x2="290" y2="430" stroke="#334155" stroke-width="2"/>
+    <line x1="290" y1="380" x2="510" y2="380" stroke="#334155" stroke-width="2"/>
+    <line x1="290" y1="430" x2="510" y2="430" stroke="#334155" stroke-width="2"/>
+  </g>
+  <text x="305" y="399" font-size="10.5" font-weight="700" fill="#334155">D1</text>
+  <text x="400" y="399" font-size="11.5" font-weight="700" fill="#1A202C" text-anchor="middle">CloudInventory</text>
+  <text x="400" y="417" font-size="9.5" fill="#64748B" text-anchor="middle">(the synced resource table)</text>
+
+  <!-- D3 RetailPrice Cache, above 2.0 -->
+  <g filter="url(#shadow)">
+    <line x1="590" y1="30" x2="590" y2="80" stroke="#334155" stroke-width="2"/>
+    <line x1="590" y1="30" x2="810" y2="30" stroke="#334155" stroke-width="2"/>
+    <line x1="590" y1="80" x2="810" y2="80" stroke="#334155" stroke-width="2"/>
+  </g>
+  <text x="605" y="49" font-size="10.5" font-weight="700" fill="#334155">D3</text>
+  <text x="700" y="49" font-size="11.5" font-weight="700" fill="#1A202C" text-anchor="middle">RetailPrice Cache</text>
+  <text x="700" y="67" font-size="9.5" fill="#64748B" text-anchor="middle">(shared, not tenant-scoped)</text>
+
+  <!-- D2 Commitment Tables, below 3.0 -->
+  <g filter="url(#shadow)">
+    <line x1="860" y1="380" x2="860" y2="430" stroke="#334155" stroke-width="2"/>
+    <line x1="860" y1="380" x2="1080" y2="380" stroke="#334155" stroke-width="2"/>
+    <line x1="860" y1="430" x2="1080" y2="430" stroke="#334155" stroke-width="2"/>
+  </g>
+  <text x="875" y="399" font-size="10.5" font-weight="700" fill="#334155">D2</text>
+  <text x="970" y="399" font-size="11.5" font-weight="700" fill="#1A202C" text-anchor="middle">Commitment Tables</text>
+  <text x="970" y="417" font-size="9.5" fill="#64748B" text-anchor="middle">(owned RI / SP)</text>
+
+  <!-- ============ Flow arrows ============ -->
+  <!-- entities -> 1.0 -->
+  <path d="M190,158 L260,195" fill="none" stroke="#64748B" stroke-width="1.75" marker-end="url(#arrow)"/>
+  <path d="M190,258 L260,215" fill="none" stroke="#64748B" stroke-width="1.75" marker-end="url(#arrow)"/>
+  <text x="196" y="185" font-size="10.5" fill="#64748B">resource data</text>
+
+  <!-- 1.0 -> D1 (write) -->
+  <path d="M350,250 L350,378" fill="none" stroke="#334155" stroke-width="1.75" marker-end="url(#arrow)"/>
+  <text x="358" y="330" font-size="10.5" fill="#334155" font-weight="600">write: raw inventory</text>
+
+  <!-- D1 -> 2.0 (read) -->
+  <path d="M480,380 L480,320 L670,320 L670,252" fill="none" stroke="#94A3B8" stroke-width="1.75" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+  <text x="486" y="314" font-size="10.5" fill="#64748B">read</text>
+
+  <!-- 2.0 <-> D3 (cache, bidirectional) -->
+  <path d="M655,158 L655,82" fill="none" stroke="#94A3B8" stroke-width="1.75" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+  <path d="M685,82 L685,158" fill="none" stroke="#94A3B8" stroke-width="1.75" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+  <text x="695" y="120" font-size="10.5" fill="#64748B">cache</text>
+
+  <!-- 2.0 -> 3.0 - label sits above the box row (baseline y=150, box tops
+       at y=160) so it never overlaps 3.0's own title text at y=198. -->
+  <line x1="780" y1="205" x2="858" y2="205" stroke="#334155" stroke-width="1.75" marker-end="url(#arrow)"/>
+  <text x="819" y="150" font-size="10.5" fill="#334155" font-weight="600" text-anchor="middle">priced inventory</text>
+
+  <!-- 3.0 <-> D2 (owned RI/SP, read) -->
+  <path d="M955,380 L955,252" fill="none" stroke="#94A3B8" stroke-width="1.75" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+  <text x="963" y="330" font-size="10.5" fill="#64748B">owned RI / SP</text>
+
+  <!-- 3.0 -> 4.0 - same above-the-row treatment; the 50px gap between the
+       boxes is too narrow for "coverage-matched" to sit inline without
+       overlapping 3.0's title text, as it did before this fix. -->
+  <line x1="1080" y1="205" x2="1128" y2="205" stroke="#334155" stroke-width="1.75" marker-end="url(#arrow)"/>
+  <text x="1104" y="150" font-size="10.5" fill="#334155" font-weight="600" text-anchor="middle">coverage-matched</text>
+
+  <!-- 4.0 -> FinOps User: starts at 4.0's right edge (1350), ends at
+       FinOps User's left edge (1400), pointing right - correct direction. -->
+  <line x1="1350" y1="205" x2="1398" y2="205" stroke="#334155" stroke-width="1.75" marker-end="url(#arrow)"/>
+  <text x="1355" y="199" font-size="9.5" fill="#334155" font-weight="600">dashboard /</text>
+  <text x="1355" y="235" font-size="9.5" fill="#334155" font-weight="600">recommendations</text>
+
+  <!-- D1 -> 4.0 direct (utilisation history) - routed along the bottom, below D1/D2 -->
+  <path d="M400,432 L400,500 L1240,500 L1240,252" fill="none" stroke="#0E7490" stroke-width="1.75" stroke-dasharray="5,4" marker-end="url(#arrowTeal)"/>
+  <text x="700" y="516" font-size="10.5" fill="#0E7490">utilisation history — read directly from D1, for rightsizing</text>
+</svg>

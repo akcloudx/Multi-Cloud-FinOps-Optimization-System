@@ -1,0 +1,123 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 380" width="1180" height="380" font-family="Arial, Helvetica, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#64748B"/>
+    </marker>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#1A202C" flood-opacity="0.12"/>
+    </filter>
+    <!-- One clip per box: rounds only the corners that coincide with the
+         box's own rounded outline, so a header band drawn inside it never
+         needs its own arc math - its bottom edge is a plain straight line
+         (it doesn't reach the container's rounded bottom corners), and its
+         top corners come out rounded for free because the clip is. -->
+    <clipPath id="clipAppUser"><rect x="20" y="20" width="210" height="112" rx="10"/></clipPath>
+    <clipPath id="clipCloudTenant"><rect x="460" y="20" width="260" height="112" rx="10"/></clipPath>
+    <clipPath id="clipRetailPrice"><rect x="950" y="20" width="210" height="112" rx="10"/></clipPath>
+    <clipPath id="clipAppSession"><rect x="20" y="230" width="210" height="112" rx="10"/></clipPath>
+    <clipPath id="clipCloudInventory"><rect x="250" y="230" width="200" height="112" rx="10"/></clipPath>
+    <clipPath id="clipReservationPurchase"><rect x="470" y="230" width="215" height="112" rx="10"/></clipPath>
+    <clipPath id="clipSavingsPlanPurchase"><rect x="705" y="230" width="225" height="112" rx="10"/></clipPath>
+  </defs>
+  <rect x="0" y="0" width="1180" height="380" fill="#F7F8FA"/>
+
+  <!-- ============ Top row: 3 independent roots ============ -->
+  <!-- AppUser (x20-230) -->
+  <g filter="url(#shadow)">
+    <rect x="20" y="20" width="210" height="112" rx="10" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.5"/>
+    <g clip-path="url(#clipAppUser)"><rect x="20" y="20" width="210" height="28" fill="#4A3F8B"/></g>
+  </g>
+  <text x="125" y="38" font-size="13.5" font-weight="700" fill="#FFFFFF" text-anchor="middle">AppUser</text>
+  <text x="125" y="64" font-size="9.5" font-style="italic" fill="#94A3B8" text-anchor="middle">app_users</text>
+  <line x1="34" y1="72" x2="216" y2="72" stroke="#EDEBF7" stroke-width="1.5"/>
+  <text x="34" y="88" font-size="11" fill="#1A202C">id <tspan fill="#4A3F8B" font-weight="700">— PK</tspan></text>
+  <text x="34" y="104" font-size="11" fill="#334155">username</text>
+
+  <!-- CloudTenant (hub, x460-720) -->
+  <g filter="url(#shadow)">
+    <rect x="460" y="20" width="260" height="112" rx="10" fill="#F3EDFB" stroke="#4A3F8B" stroke-width="2"/>
+    <g clip-path="url(#clipCloudTenant)"><rect x="460" y="20" width="260" height="28" fill="#4A3F8B"/></g>
+  </g>
+  <text x="590" y="38" font-size="14.5" font-weight="700" fill="#FFFFFF" text-anchor="middle">CloudTenant</text>
+  <text x="590" y="64" font-size="9.5" font-style="italic" fill="#7A6FB0" text-anchor="middle">cloud_tenants — the root</text>
+  <line x1="474" y1="72" x2="706" y2="72" stroke="#D9D4F0" stroke-width="1.5"/>
+  <text x="474" y="88" font-size="11" fill="#1A202C">id <tspan fill="#4A3F8B" font-weight="700">— PK</tspan></text>
+  <text x="474" y="104" font-size="11" fill="#334155">provider · tenant_name</text>
+
+  <!-- RetailPrice (x950-1160) -->
+  <g filter="url(#shadow)">
+    <rect x="950" y="20" width="210" height="112" rx="10" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.5"/>
+    <g clip-path="url(#clipRetailPrice)"><rect x="950" y="20" width="210" height="28" fill="#4A3F8B"/></g>
+  </g>
+  <text x="1055" y="38" font-size="13.5" font-weight="700" fill="#FFFFFF" text-anchor="middle">RetailPrice</text>
+  <text x="1055" y="64" font-size="9.5" font-style="italic" fill="#94A3B8" text-anchor="middle">retail_prices</text>
+  <line x1="964" y1="72" x2="1146" y2="72" stroke="#EDEBF7" stroke-width="1.5"/>
+  <text x="964" y="88" font-size="11" fill="#1A202C">id <tspan fill="#4A3F8B" font-weight="700">— PK</tspan></text>
+  <text x="964" y="104" font-size="11" fill="#334155">sku · region · provider</text>
+  <text x="964" y="120" font-size="9.5" font-style="italic" fill="#94A3B8">shared — no FK to any tenant</text>
+
+  <!-- ============ Ownership arrows: CloudTenant → its 3 children (bend
+       heights staggered 160/176/192 so the horizontal segments never
+       cross each other) ============ -->
+  <path d="M590,132 L590,160 L350,160 L350,230" fill="none" stroke="#64748B" stroke-width="1.75" marker-end="url(#arrow)"/>
+  <path d="M590,132 L590,176 L577,176 L577,230" fill="none" stroke="#64748B" stroke-width="1.75" marker-end="url(#arrow)"/>
+  <path d="M590,132 L590,192 L818,192 L818,230" fill="none" stroke="#64748B" stroke-width="1.75" marker-end="url(#arrow)"/>
+  <text x="598" y="146" font-size="10.5" fill="#334155" font-weight="600">1</text>
+  <text x="332" y="224" font-size="10.5" fill="#334155" font-weight="600">N</text>
+  <text x="559" y="224" font-size="10.5" fill="#334155" font-weight="600">N</text>
+  <text x="800" y="224" font-size="10.5" fill="#334155" font-weight="600">N</text>
+
+  <!-- AppUser → AppSession -->
+  <line x1="125" y1="132" x2="125" y2="228" stroke="#64748B" stroke-width="1.75" marker-end="url(#arrow)"/>
+  <text x="133" y="150" font-size="10.5" fill="#334155" font-weight="600">1</text>
+  <text x="133" y="222" font-size="10.5" fill="#334155" font-weight="600">N</text>
+
+  <!-- ============ Bottom row: children ============ -->
+  <!-- AppSession (x20-230) -->
+  <g filter="url(#shadow)">
+    <rect x="20" y="230" width="210" height="112" rx="10" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.5"/>
+    <g clip-path="url(#clipAppSession)"><rect x="20" y="230" width="210" height="28" fill="#4A3F8B"/></g>
+  </g>
+  <text x="125" y="248" font-size="13.5" font-weight="700" fill="#FFFFFF" text-anchor="middle">AppSession</text>
+  <text x="125" y="274" font-size="9.5" font-style="italic" fill="#94A3B8" text-anchor="middle">app_sessions</text>
+  <line x1="34" y1="282" x2="216" y2="282" stroke="#EDEBF7" stroke-width="1.5"/>
+  <text x="34" y="298" font-size="11" fill="#1A202C">token <tspan fill="#4A3F8B" font-weight="700">— PK</tspan></text>
+  <text x="34" y="314" font-size="11" fill="#1A202C">user_id <tspan fill="#64748B" font-weight="700">— FK</tspan></text>
+  <text x="34" y="330" font-size="11" fill="#334155">mode (demo | live)</text>
+
+  <!-- CloudInventory (x250-450) -->
+  <g filter="url(#shadow)">
+    <rect x="250" y="230" width="200" height="112" rx="10" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.5"/>
+    <g clip-path="url(#clipCloudInventory)"><rect x="250" y="230" width="200" height="28" fill="#4A3F8B"/></g>
+  </g>
+  <text x="350" y="248" font-size="13" font-weight="700" fill="#FFFFFF" text-anchor="middle">CloudInventory</text>
+  <text x="350" y="274" font-size="9.5" font-style="italic" fill="#94A3B8" text-anchor="middle">cloud_inventory</text>
+  <line x1="264" y1="282" x2="436" y2="282" stroke="#EDEBF7" stroke-width="1.5"/>
+  <text x="264" y="298" font-size="10.5" fill="#1A202C">resource_id <tspan fill="#4A3F8B" font-weight="700">— PK</tspan></text>
+  <text x="264" y="314" font-size="10.5" fill="#1A202C">tenant_id <tspan fill="#64748B" font-weight="700">— FK</tspan></text>
+  <text x="264" y="330" font-size="10.5" fill="#334155">resource_type · region</text>
+
+  <!-- ReservationPurchase (x470-685) -->
+  <g filter="url(#shadow)">
+    <rect x="470" y="230" width="215" height="112" rx="10" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.5"/>
+    <g clip-path="url(#clipReservationPurchase)"><rect x="470" y="230" width="215" height="28" fill="#4A3F8B"/></g>
+  </g>
+  <text x="577" y="248" font-size="12.5" font-weight="700" fill="#FFFFFF" text-anchor="middle">ReservationPurchase</text>
+  <text x="577" y="274" font-size="9.5" font-style="italic" fill="#94A3B8" text-anchor="middle">reservation_purchases</text>
+  <line x1="484" y1="282" x2="671" y2="282" stroke="#EDEBF7" stroke-width="1.5"/>
+  <text x="484" y="298" font-size="10.5" fill="#1A202C">id <tspan fill="#4A3F8B" font-weight="700">— PK</tspan></text>
+  <text x="484" y="314" font-size="10.5" fill="#1A202C">tenant_id <tspan fill="#64748B" font-weight="700">— FK</tspan></text>
+  <text x="484" y="330" font-size="10.5" fill="#334155">reservation_id · sku_name</text>
+
+  <!-- SavingsPlanPurchase (x705-930) -->
+  <g filter="url(#shadow)">
+    <rect x="705" y="230" width="225" height="112" rx="10" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.5"/>
+    <g clip-path="url(#clipSavingsPlanPurchase)"><rect x="705" y="230" width="225" height="28" fill="#4A3F8B"/></g>
+  </g>
+  <text x="817" y="248" font-size="12.5" font-weight="700" fill="#FFFFFF" text-anchor="middle">SavingsPlanPurchase</text>
+  <text x="817" y="274" font-size="9.5" font-style="italic" fill="#94A3B8" text-anchor="middle">savings_plan_purchases</text>
+  <line x1="719" y1="282" x2="916" y2="282" stroke="#EDEBF7" stroke-width="1.5"/>
+  <text x="719" y="298" font-size="10.5" fill="#1A202C">id <tspan fill="#4A3F8B" font-weight="700">— PK</tspan></text>
+  <text x="719" y="314" font-size="10.5" fill="#1A202C">tenant_id <tspan fill="#64748B" font-weight="700">— FK</tspan></text>
+  <text x="719" y="330" font-size="10.5" fill="#334155">commitment_amount · term</text>
+</svg>

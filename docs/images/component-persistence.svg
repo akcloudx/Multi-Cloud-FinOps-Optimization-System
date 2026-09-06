@@ -1,0 +1,101 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 450" width="1180" height="450" font-family="Arial, Helvetica, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#64748B"/>
+    </marker>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#1A202C" flood-opacity="0.12"/>
+    </filter>
+  </defs>
+  <rect x="0" y="0" width="1180" height="450" fill="#F7F8FA"/>
+
+  <!-- Row of 5 sources, same column grid as 2b: centers 118,354,590,826,1062 (width 215/216, gap ~21) -->
+  <!-- sync_pipeline.py - same white+accent-bar treatment as every other
+       source box here, NOT the solid-fill "hub" styling it got in 2b -
+       db/schema.py is the hub of this diagram, not sync_pipeline.py, which
+       is just one of five sources feeding it. -->
+  <g filter="url(#shadow)">
+    <rect x="10" y="20" width="215" height="86" rx="12" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.5"/>
+    <rect x="10" y="20" width="215" height="6" rx="3" fill="#1E2761"/>
+  </g>
+  <text x="118" y="54" font-size="12.5" font-weight="700" fill="#1A202C" text-anchor="middle">sync_pipeline.py</text>
+  <text x="118" y="73" font-size="10" fill="#64748B" text-anchor="middle">data/ — writes on sync</text>
+  <text x="118" y="90" font-size="9" fill="#94A3B8" text-anchor="middle" font-style="italic">continued from 2a / 2b</text>
+
+  <!-- inventory_loader.py -->
+  <g filter="url(#shadow)">
+    <rect x="246" y="20" width="215" height="86" rx="12" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.5"/>
+    <rect x="246" y="20" width="215" height="6" rx="3" fill="#1E2761"/>
+  </g>
+  <text x="354" y="58" font-size="12.5" font-weight="700" fill="#1A202C" text-anchor="middle">inventory_loader.py</text>
+  <text x="354" y="78" font-size="10" fill="#64748B" text-anchor="middle">data/ — reads for UI</text>
+
+  <!-- azure_retail_api.py -->
+  <g filter="url(#shadow)">
+    <rect x="482" y="20" width="215" height="86" rx="12" fill="#FFFFFF" stroke="#BFE9CE" stroke-width="1.5"/>
+    <rect x="482" y="20" width="215" height="6" rx="3" fill="#1F7A4D"/>
+  </g>
+  <text x="590" y="58" font-size="12.5" font-weight="700" fill="#1A202C" text-anchor="middle">azure_retail_api.py</text>
+  <text x="590" y="78" font-size="10" fill="#64748B" text-anchor="middle">pricing/</text>
+
+  <!-- aws_price_list.py -->
+  <g filter="url(#shadow)">
+    <rect x="718" y="20" width="215" height="86" rx="12" fill="#FFFFFF" stroke="#BFE9CE" stroke-width="1.5"/>
+    <rect x="718" y="20" width="215" height="6" rx="3" fill="#1F7A4D"/>
+  </g>
+  <text x="826" y="58" font-size="12.5" font-weight="700" fill="#1A202C" text-anchor="middle">aws_price_list.py</text>
+  <text x="826" y="78" font-size="10" fill="#64748B" text-anchor="middle">pricing/</text>
+
+  <!-- commitment_pricing.py -->
+  <g filter="url(#shadow)">
+    <rect x="954" y="20" width="216" height="86" rx="12" fill="#FFFFFF" stroke="#BFE9CE" stroke-width="1.5"/>
+    <rect x="954" y="20" width="216" height="6" rx="3" fill="#1F7A4D"/>
+  </g>
+  <text x="1062" y="58" font-size="12.5" font-weight="700" fill="#1A202C" text-anchor="middle">commitment_pricing.py</text>
+  <text x="1062" y="78" font-size="10" fill="#64748B" text-anchor="middle">pricing/</text>
+
+  <!-- arrows into db/schema.py (box spans x=300-700, top y=218) - entry
+       points spread evenly across the box top (340,420,500,580,660, 80px
+       apart) and bend heights staggered (175,185,195,205,215, all above
+       the box top) so no two horizontal segments sit at the same y and
+       cross each other. Solid = persist (write); dashed = read - see the
+       legend below rather than repeating a label on every dashed line. -->
+  <path d="M118,106 L118,175 L340,175 L340,218" fill="none" stroke="#64748B" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="150" y="169" font-size="11" fill="#334155" font-weight="600">persist</text>
+
+  <path d="M354,106 L354,185 L420,185 L420,218" fill="none" stroke="#94A3B8" stroke-width="1.75" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+  <path d="M590,106 L590,195 L500,195 L500,218" fill="none" stroke="#94A3B8" stroke-width="1.75" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+  <path d="M826,106 L826,205 L580,205 L580,218" fill="none" stroke="#94A3B8" stroke-width="1.75" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+  <path d="M1062,106 L1062,215 L660,215 L660,218" fill="none" stroke="#94A3B8" stroke-width="1.75" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+
+  <!-- db/schema.py -->
+  <g filter="url(#shadow)">
+    <rect x="300" y="222" width="400" height="110" rx="14" fill="#4A3F8B"/>
+  </g>
+  <text x="500" y="256" font-size="16" font-weight="700" fill="#FFFFFF" text-anchor="middle">db/schema.py</text>
+  <text x="500" y="278" font-size="11" fill="#D9D4F0" text-anchor="middle">SQLAlchemy models</text>
+  <text x="500" y="296" font-size="10.5" fill="#C7C0E8" text-anchor="middle">CloudInventory · RetailPrice</text>
+  <text x="500" y="312" font-size="10.5" fill="#C7C0E8" text-anchor="middle">ReservationPurchase · SavingsPlan</text>
+
+  <!-- context-only notes beside db/schema.py, no real edge -->
+  <g filter="url(#shadow)">
+    <rect x="740" y="222" width="210" height="52" rx="12" fill="#F3EDFB" stroke="#D9D4F0" stroke-width="1"/>
+  </g>
+  <text x="845" y="244" font-size="11.5" font-weight="700" fill="#4A3F8B" text-anchor="middle">Tenants / Users tables</text>
+  <text x="845" y="262" font-size="10" fill="#4A3F8B" text-anchor="middle">multi-tenant isolation</text>
+
+  <g filter="url(#shadow)">
+    <rect x="740" y="290" width="210" height="52" rx="12" fill="#F3EDFB" stroke="#D9D4F0" stroke-width="1"/>
+  </g>
+  <text x="845" y="312" font-size="11.5" font-weight="700" fill="#4A3F8B" text-anchor="middle">Sessions / Auth tables</text>
+  <text x="845" y="330" font-size="10" fill="#4A3F8B" text-anchor="middle">login, roles</text>
+
+  <text x="500" y="380" font-size="11.5" fill="#64748B" text-anchor="middle">No module writes to the database directly outside db/schema.py.</text>
+
+  <!-- legend - both arrow styles repeat 4-5 times above, so a one-time key
+       is clearer than labeling every individual line. -->
+  <line x1="388" y1="410" x2="424" y2="410" stroke="#64748B" stroke-width="2"/>
+  <text x="432" y="414" font-size="10.5" fill="#334155">persist (write)</text>
+  <line x1="560" y1="410" x2="596" y2="410" stroke="#94A3B8" stroke-width="1.75" stroke-dasharray="5,4"/>
+  <text x="604" y="414" font-size="10.5" fill="#334155">read</text>
+</svg>
