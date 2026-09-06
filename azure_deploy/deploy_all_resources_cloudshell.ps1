@@ -81,9 +81,19 @@ param (
 # Converted once, right here, to the plain string az CLI actually needs -
 # the SecureString above exists only to get PowerShell's built-in masked
 # prompt; nothing downstream should reference $SqlAdminPassword directly.
-$SqlAdminPasswordPlain = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
-    [Runtime.InteropServices.Marshal]::SecureStringToBSTR($SqlAdminPassword)
-)
+# Uses ConvertFrom-SecureString -AsPlainText (PowerShell 6+ only) rather than
+# the Marshal/BSTR conversion the Windows-targeted deploy_all_resources.ps1
+# needs for PowerShell 5.1 compatibility - Cloud Shell's PowerShell is always
+# 7+, so there's no reason to carry that legacy path here. This matters, not
+# just style: [Marshal]::SecureStringToBSTR + PtrToStringAuto is a known-
+# unreliable combination on .NET Core/non-Windows (dotnet/runtime has open
+# issues on PtrToStringAuto's cross-platform behavior) and can silently
+# truncate or corrupt the recovered string - the exact symptom of a real
+# password being rejected as "too short" by Azure SQL no matter how strong
+# it actually was when typed, because what reached `az` wasn't what was
+# typed. ConvertFrom-SecureString -AsPlainText is the native, guaranteed-
+# correct way to do this on any PS7+ host.
+$SqlAdminPasswordPlain = ConvertFrom-SecureString -SecureString $SqlAdminPassword -AsPlainText
 
 function Fail([string]$msg) {
     Write-Host ""
