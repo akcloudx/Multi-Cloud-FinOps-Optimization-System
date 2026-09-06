@@ -1,189 +1,181 @@
-# Multi-Cloud FinOps Optimization System
-## Complete System Architecture & Mentor Defense Guide
+# Multi-Cloud FinOps Optimization System — Architecture Reference
 
-This document serves as the authoritative architectural blueprint and technical defense reference for the **Multi-Cloud FinOps Optimization System** (Azure & AWS).
+This is the deeper technical reference behind the project [README](README.md) — internal component structure, data flow, and data model, for anyone extending the codebase or defending its design decisions. For "how do I deploy this," see the README's [Deployment](README.md#deployment) section instead; this document assumes the system is already running and explains how it's built.
 
----
-
-## 🏛️ System Architecture & Ingestion Data Flow
-
-Per the Capstone Design Architecture, the system decouples API extraction from UI presentation through an automated **24-Hour Ingestion Pipeline**:
-
-```
-┌─────────────────────────┐       Data Extraction       ┌─────────────────────────────────┐
-│  AWS & Azure Cloud APIs │ ──────────────────────────► │ Azure Function (Python Script)  │
-│  (OIDC / SP Credentials)│                             │ (24-Hour Cron TimerTrigger)     │
-└─────────────────────────┘                             └────────────────┬────────────────┘
-                                                                         │ Ingest & Normalize
-                                                                         ▼
-┌─────────────────────────┐         Data Flow           ┌─────────────────────────────────┐
-│    Streamlit Portal     │ ◄────────────────────────── │ Relational Data Repository (DB) │
-│  (UI Dashboard app.py)  │                             │ (Star Schema: Azure SQL / DB)   │
-└─────────────────────────┘                             └─────────────────────────────────┘
-```
-
-### Architectural Data Flow Steps:
-1. **API Ingestion (Extraction Layer):** Azure Resource Graph and AWS Cost APIs are queried using Service Principal / IAM credentials.
-2. **Automated Cron Pipeline (`azure_function/function_app.py`):** An Azure Function running a Python Timer Trigger (`0 0 0 * * *`) executes every 24 hours at 00:00 UTC to extract, transform, and normalize raw cloud payload into the FOCUS schema.
-3. **Star Schema Repository (`db/schema.py`):** Normalized data is ingested into the relational database (`CloudInventory`, `Commitment`, `ReconciliationLog`, `SyncLog` tables). Supports both SQLite for local portability and **Azure SQL (Free Tier)** for production.
-4. **Streamlit UI Portal (`app.py`):** The dashboard queries the normalized Star Schema database (not live API loops), ensuring instant page loads, zero API rate limiting, and 24-hour historical consistency.
+Every diagram and claim below is verified directly against the current codebase, not aspirational — if a design element here doesn't match what's in the code, the code is right and this document is stale (please open an issue).
 
 ---
 
-## 📁 File-by-File Breakdown & Source Code Reference
+## 1. System Architecture
 
-### 1. `app.py` — Streamlit Web Application Interface
-- **Role:** Presentation and decision support portal.
-- **Key Responsibilities:**
-  - Provides top navigation, cloud provider toggle (`Azure` vs `AWS`), and environment mode selection (`Demo / Benchmark Mode` vs `Live Cloud API`).
-  - Implements strict live API state validation: displays empty state alerts if live mode is selected without valid credentials rather than silently returning mock data.
-  - Dynamically renders provider-specific titles, icons, metric cards, inventory tables, and policy coverage expanders.
-  - Displays **24-Hour Cron Sync Status** and provides a manual trigger button to execute `data/sync_pipeline.py`.
+```
+                              ┌───────────────────┐
+                              │   User (Browser)   │
+                              └──────────┬──────────┘
+                                         │ HTTPS
+                                         ▼
+                          ┌───────────────────────────────┐        ┌──────────────────────────┐
+                          │   Streamlit Web Application     │        │     Azure Function App    │
+                          │   Azure App Service, Linux, F1   │        │  Consumption plan (Y1) -   │
+                          └───────────────┬─────────────────┘        │  hourly timerTrigger       │
+                                          │ on-demand sync            └─────────────┬──────────────┘
+                     ┌────────────────────┴─────────────────┐                       │ hourly sync
+                     ▼                                      │                       │
+        ┌─────────────────────────────┐                     │                       │
+        │   Application / Pipeline     │◄────────────────────┴───────────────────────┘
+        │   Layer (Python)              │
+        │   ─────────────────────────   │
+        │   Azure Connector              │──┐
+        │   AWS Connector                 │  │
+        │   Pricing Engine                 │  │  External Cloud Provider APIs
+        │   Analysis Engine                 │  │  ─────────────────────────
+        └─────────────────────────────┘  ├─►│ Azure Resource Graph (KQL, 9 query groups)
+                     │                       ├─►│ Azure Monitor (VM CPU/memory metrics)
+                     │  SQLAlchemy ORM        ├─►│ AWS SDK (boto3) — EC2, RDS, IAM, CloudWatch, etc.
+                     ▼  (all pipeline modules) └─►│ Azure Retail Prices API / AWS Price List API
+        ┌─────────────────────────────┐
+        │      Azure SQL Database       │◄── dashboard reads (no live API calls)
+        │  General Purpose, Serverless,  │
+        │  auto-pause                     │
+        └─────────────────────────────┘
+```
 
-### 2. `db/schema.py` — Multi-Cloud Database Schema & Engine Router
-- **Role:** Database layer definition using SQLAlchemy ORM (aligned with FOCUS specifications).
-- **Key Models:**
-  - `CloudInventory`: Asset registry storing resource metadata, state, region, OS, SKU, PAYG rates, and orphan flags.
-  - `Commitment`: Active RI and Savings Plan contract positions ($/hr commitment, reserved quantities, expiry).
-  - `ReconciliationLog`: Output log for hourly waterfall evaluation.
-  - `Recommendation`: Actionable FinOps directives with severity levels and financial impacts.
-  - `SyncLog`: Ingestion audit log capturing timestamp, status, and records synced by the 24h cron pipeline.
-- **Multi-DB Engine Factory:** `get_engine(provider)` routes queries to `azure_finops.db` or `aws_finops.db` (or Azure SQL via ODBC string).
+Both entry points — the web app (on-demand sync) and the Function App (hourly, automatic) — call into the **same** `data/sync_pipeline.py` orchestrator, so there is exactly one code path for "how inventory gets into the database," regardless of what triggered it. The dashboard's own reads never trigger a live cloud API call; a sync must have already populated the database, which keeps normal browsing fast and free of provider rate limits.
 
-### 3. `azure_function/function_app.py` — Azure Function 24h Cron Worker
-- **Role:** Azure Function v2 Python Timer Trigger (`schedule="0 0 0 * * *"`).
-- **Functionality:** Runs automatically every 24 hours at 00:00 UTC to extract cloud API data and populate the Azure SQL Star Schema database.
+The **Azure Connector** and **AWS Connector** are the only two modules that ever talk to an external cloud provider directly; every downstream module (Pricing Engine, Analysis Engine) works against the normalized, provider-agnostic row shape those connectors produce — a new resource type, or even a third provider, only ever needs a new connector, not changes to pricing or analysis.
 
-### 4. `data/sync_pipeline.py` — Ingestion Engine Pipeline
-- **Role:** Core pipeline logic invoked by both the Azure Function and Streamlit manual trigger button.
+## 2. Component / Module Design
 
-### 5. `db/seed.py` — Azure Mock Data & Policy Matrix
-- **Role:** Generates realistic Azure infrastructure inventory and commitments in Star Schema format.
-- **Scope:** 14 resources across Azure VMs, SQL Database, SQL Managed Instance, PostgreSQL, MySQL, Cosmos DB, Blob Storage, Files, Redis, Synapse, Databricks, and Disk Storage.
+The Application/Pipeline Layer above expands into 16 real Python modules across five concerns. Presented here as three linked diagrams rather than one dense one, since each showing the real import/call relationships from the codebase, not idealized ones.
 
-### 6. `db/aws_seed.py` — AWS Mock Data & Policy Matrix
-- **Role:** Generates realistic AWS infrastructure inventory and commitments in Star Schema format.
-- **Scope:** EC2 instances (`m5.large`, `c5.xlarge`, `t3.medium`), RDS PostgreSQL/MySQL, Amazon Aurora, DynamoDB, ElastiCache, Redshift, and OpenSearch.
+### 2a. UI Layer and its direct callees
+
+```
+UI Layer - app.py (Streamlit)
+Home | Inventory | Rightsizing | Savings Plan Analysis | RI Coverage | Recommendations | Maturity Assessment
+   │
+   ├── triggers sync ──► data/sync_pipeline.py
+   ├── reads inventory ► data/inventory_loader.py     (read-only — never triggers a live sync)
+   ├── renders analysis► analysis/engine.py           (cost waterfall, SP/RI coverage, recommendations)
+   ├──────────────────► analysis/rightsizing.py       (CPU/memory classification)
+   └──────────────────► analysis/ri_eligibility.py / sp_eligibility.py (per-provider eligibility rules)
+```
+
+`inventory_loader.py` is deliberately a separate module from `sync_pipeline.py` so a page render can never accidentally trigger a live sync.
+
+### 2b. Sync Pipeline — provider connectors and pricing
+
+```
+data/sync_pipeline.py
+   ├──► azure_conn/connector.py    (Resource Graph, 9 KQL query groups)
+   ├──► aws/connector.py           (14+ resource types, every enabled region)
+   ├──► pricing/azure_retail_api.py    (enrich pricing)
+   ├──► pricing/aws_price_list.py
+   └──► pricing/commitment_pricing.py  (RI / SP retail rates)
+
+   Credentials/Auth: Service Principal (Azure) · IAM Role (AWS)
+   pricing/cache_admin.py: manual cache refresh utility (ops-only, not on the sync path)
+```
+
+### 2c. Persistence layer
+
+```
+sync_pipeline.py ──persist──► db/schema.py
+inventory_loader.py ──read (dashed)──► db/schema.py
+pricing/{azure_retail_api,aws_price_list,commitment_pricing}.py ──read (dashed)──► db/schema.py
+
+db/schema.py (SQLAlchemy models: CloudInventory, RetailPrice, ReservationPurchase, SavingsPlan)
+   alongside: Tenants/Users tables (multi-tenant isolation) · Sessions/Auth tables (login, roles)
+```
+
+No module writes to the database directly outside `db/schema.py`.
+
+The Analysis layer is intentionally split into three modules by concern rather than kept as one file: `engine.py` owns cross-cutting analysis (cost waterfall, SP/RI coverage, the combined recommendations engine), `rightsizing.py` owns utilisation-based classification, and `ri_eligibility.py` / `sp_eligibility.py` own each provider's separate, real eligibility rules — a change to AWS Savings Plan eligibility logic cannot accidentally affect Azure Reservation eligibility logic, because they're different modules.
+
+## 3. Data Flow (one sync cycle)
+
+```
+Azure Tenant ──┐
+               ├─resource data─► 1.0 Ingest Live Inventory ──raw inventory──► D1 CloudInventory
+AWS Account ───┘                        │  ▲                                        │
+                                         │  └───────────────── read ─────────────────┘
+                                         ▼
+                              2.0 Enrich with Retail Pricing ◄──cache──► D3 RetailPrice Cache
+                                         │ priced inventory
+                                         ▼
+                              3.0 Match RI / SP Commitments ◄──owned RI/SP──  D2 Commitment Tables
+                                         │ coverage-matched
+                                         ▼
+                              4.0 Analyse & Recommend  ──dashboard/recommendations──► FinOps User
+                                         ▲
+                                         └── utilisation history (read directly from D1, for rightsizing)
+```
+
+Pricing enrichment (2.0) and commitment matching (3.0) are separate processes rather than one combined step, because the two facts are independent in reality: a resource can have a known on-demand price with no commitment coverage, known coverage with no priceable on-demand rate, or both.
+
+## 4. Data Model (core tables)
+
+```
+CloudTenant                     RetailPrice
+  PK id                           PK id
+  provider, mode, tenant_name     provider, region, sku
+  tenant_id, subscription_id      effective_hourly_rate_usd
+  last_synced_at                  fetched_at
+  sync_interval_hours             (NOT tenant-scoped — shared cache, matched
+       │ 1                         at query time by provider+region+SKU,
+       │                           no FK to CloudTenant)
+       │ N
+       ▼
+  CloudInventory              ReservationPurchase           SavingsPlan
+    PK id                       PK id                         PK id
+    FK tenant_id                FK tenant_id                  FK tenant_id
+    resource_id, resource_type  commitment_id, scope_sku       commitment_id
+    region, sku, resource_state term, expiry_date               hourly_usd_commitment
+    payg_hourly_cost_usd        hourly_usd_commitment            term
+
+User                             UserSession
+  PK id                            PK token
+  email, role                      FK user_id
+  created_at, last_login_at        expires_at
+     │ 1
+     └──────N──────────────────────────┘
+```
+
+`CloudTenant` is the root of the tenant-scoped side of the schema — every `CloudInventory`, `ReservationPurchase`, and `SavingsPlan` row carries a `tenant_id` foreign key, so all data for one connected account can be deleted or re-synced independently of every other tenant. `RetailPrice` is deliberately **not** tenant-scoped: it's a shared, provider/region/SKU-keyed cache reused across every tenant of that provider, matched at query time rather than joined by a database relationship — the alternative (a price row per tenant) would mean re-fetching an identical retail rate once per tenant instead of once per SKU/region.
+
+`User`/`UserSession` are entirely separate from the `CloudTenant` subtree — a session represents who is logged into this application, not a cloud provider identity, and carries no relationship to any tenant, since one logged-in user can connect several tenants across both providers.
+
+## 5. Repository Map
+
+See the README's [Repository Structure](README.md#repository-structure) for the top-level layout. Module-level detail:
+
+| Module | Role |
+|---|---|
+| `app.py` | Streamlit entry point, routing, and the seven top-level pages |
+| `ui/` | Page-level UI components rendered by `app.py` |
+| `data/sync_pipeline.py` | Shared ingestion orchestrator — called by both the web app and the Function App |
+| `data/inventory_loader.py` | Read-only inventory queries for the dashboard |
+| `azure_conn/connector.py` | Azure Resource Graph queries, Azure Monitor utilisation metrics, IAM permission checks |
+| `aws/connector.py` | Multi-region AWS inventory (parallelized via `ThreadPoolExecutor`), CloudWatch metrics, IAM permission checks |
+| `pricing/` | Retail pricing enrichment (Azure Retail Prices API, AWS Price List API) and commitment (RI/SP) pricing |
+| `analysis/engine.py` | Cost waterfall, RI/SP coverage analysis, combined recommendations engine |
+| `analysis/rightsizing.py` | CPU/memory utilisation classification (Underutilized/Overutilized/Optimal) |
+| `analysis/ri_eligibility.py`, `analysis/sp_eligibility.py` | Per-provider commitment eligibility rules |
+| `commitments/` | RI/SP scope-matching logic (subscription/resource-group scope for Azure, Zonal/Regional for AWS) |
+| `db/schema.py` | SQLAlchemy models and the multi-tenant/multi-provider engine factory |
+| `db/crypto.py` | Fernet encryption for tenant client secrets at rest |
+| `db/seed.py`, `db/aws_seed.py` | Demo-mode seed data |
+| `azure_function/function_app.py` | Azure Function App entry point — hourly `timerTrigger` calling `sync_pipeline.py` |
+| `azure_deploy/` | Deployment scripts — see the README |
+
+## 6. Design Decisions Worth Knowing
+
+- **Passwordless database auth.** Both compute resources use System-Assigned Managed Identity against Azure SQL. No `DATABASE_URL`, password, or connection string is stored in app settings or code. See `db/schema.py::get_engine()`.
+- **Hourly sync, not daily.** The Function App runs on an hourly `timerTrigger`, independent of whether a user has the web app open — commitment coverage and rightsizing data stay current without manual action.
+- **F1 (Free) App Service tier by default.** Chosen deliberately to fit a free/student subscription — 60 CPU-min/day cap, cold-starts after ~20 minutes idle. Fine for demo/evaluation traffic; change the SKU for production load.
+- **Named Consumption plan for the Function App.** `az functionapp create --consumption-plan-location` alone auto-generates an unnamed plan; the deploy scripts explicitly name it via a lower-level ARM resource create, since Azure CLI's plan-creation commands don't support the Y1/Dynamic tier directly.
+- **Provider-agnostic core, provider-specific edges.** Only the two connector modules know about Azure/AWS API shapes; everything past that point (pricing, analysis, persistence) works against one normalized row shape.
 
 ---
 
-## 🚀 Complete Azure Live Production Deployment Guide
-
-The complete architecture consists of **3 Azure Resources**:
-1. **Azure SQL Database (Basic / Free Tier)** $\rightarrow$ Relational Star Schema Data Repository.
-2. **Azure Function App (Consumption Plan)** $\rightarrow$ 24-Hour Automated Cron Ingestion Worker.
-3. **Azure App Service (Linux Web App B1)** $\rightarrow$ Streamlit Dashboard UI.
-
----
-
-### Option A: Automated Provisioning Script (Recommended)
-
-Run the automated PowerShell deployment script located at [`azure_deploy/deploy_all_resources.ps1`](file:///d:/Aakif/Capstone%20Project/files/azure_deploy/deploy_all_resources.ps1):
-
-```powershell
-az login
-.\azure_deploy\deploy_all_resources.ps1
-```
-
-This single command provisions the Azure SQL Server, Database, Function App (24h Cron), and Web App automatically!
-
----
-
-### Option B: Step-by-Step Azure CLI Deployment Guide
-
-#### Step 1: Login & Create Resource Group
-```bash
-az login
-az group create --name "rg-finops-optimizer" --location "eastus"
-```
-
-#### Step 2: Provision Azure SQL Database (Star Schema Repository)
-```bash
-# Create Azure SQL Server
-az sql server create \
-  --name "finops-sql-server-2026" \
-  --resource-group "rg-finops-optimizer" \
-  --location "eastus" \
-  --admin-user "finopsadmin" \
-  --admin-password "<YOUR_STRONG_PASSWORD>"   # never hardcode a real password here or commit one
-
-# Allow Azure Services firewall access
-az sql server firewall-rule create \
-  --resource-group "rg-finops-optimizer" \
-  --server "finops-sql-server-2026" \
-  --name "AllowAzureServices" \
-  --start-ip-address "0.0.0.0" \
-  --end-ip-address "0.0.0.0"
-
-# Create Azure SQL Database (Basic Tier)
-az sql db create \
-  --resource-group "rg-finops-optimizer" \
-  --server "finops-sql-server-2026" \
-  --name "finops-sqldb" \
-  --service-objective Basic
-```
-
-#### Step 3: Provision & Deploy Azure Function App (24h Cron Worker)
-```bash
-# Create Storage Account
-az storage account create \
-  --name "stfinops2026" \
-  --location "eastus" \
-  --resource-group "rg-finops-optimizer" \
-  --sku Standard_LRS
-
-# Create Azure Function App
-az functionapp create \
-  --resource-group "rg-finops-optimizer" \
-  --consumption-plan-location "eastus" \
-  --runtime python \
-  --runtime-version 3.11 \
-  --functions-version 4 \
-  --name "finops-cron-func" \
-  --storage-account "stfinops2026" \
-  --os-type Linux
-
-# Publish Function Code
-cd azure_function
-func azure functionapp publish finops-cron-func --python
-cd ..
-```
-
-#### Step 4: Provision & Deploy Azure App Service (Streamlit Dashboard)
-```bash
-# Create App Service Plan
-az appservice plan create \
-  --name "finops-plan" \
-  --resource-group "rg-finops-optimizer" \
-  --sku B1 \
-  --is-linux
-
-# Create Web App
-az webapp create \
-  --resource-group "rg-finops-optimizer" \
-  --plan "finops-plan" \
-  --name "finops-optimizer-app" \
-  --runtime "PYTHON:3.11"
-
-# Configure Startup Command & Azure SQL Connection String
-az webapp config set \
-  --resource-group "rg-finops-optimizer" \
-  --name "finops-optimizer-app" \
-  --startup-file "python -m streamlit run app.py --server.port 8000 --server.address 0.0.0.0"
-
-az webapp config appsettings set \
-  --resource-group "rg-finops-optimizer" \
-  --name "finops-optimizer-app" \
-  --settings DATABASE_URL="mssql+pyodbc://finopsadmin:<YOUR_STRONG_PASSWORD>@finops-sql-server-2026.database.windows.net/finops-sqldb?driver=ODBC+Driver+18+for+SQL+Server"
-
-# Deploy Web App Code
-az webapp up \
-  --resource-group "rg-finops-optimizer" \
-  --name "finops-optimizer-app" \
-  --runtime "PYTHON:3.11"
-```
-
-Once completed, your complete enterprise environment will be live:
-- **Streamlit Web Portal:** `https://finops-optimizer-app.azurewebsites.net`
-- **Azure SQL Database:** `finops-sql-server-2026.database.windows.net/finops-sqldb`
-- **Azure Function 24h Cron:** `finops-cron-func` (Runs automatically every night at 00:00 UTC)
+For deployment instructions, configuration, security model, and troubleshooting, see the [README](README.md).

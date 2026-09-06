@@ -1,383 +1,263 @@
-```python
-markdown_content = """# Multi-Cloud FinOps Optimization System
-## Technical Architecture & Product Documentation
+# Multi-Cloud FinOps Optimization System
 
-This document provides a comprehensive technical reference for the **Multi-Cloud FinOps Optimization System**. It contains detailed specifications for schemas, logic layers, mathematical functions, and complete source code to support a production deployment within an enterprise infrastructure.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
+[![Deploy](https://img.shields.io/badge/deploy-Azure-0078D4.svg)](#deployment)
 
----
+A live, multi-tenant, credential-driven cost and inventory dashboard for organizations running production workloads on **both Microsoft Azure and Amazon Web Services**. It ingests real inventory and pricing from each provider's own APIs, reconciles it against actual owned Reserved Instances / Savings Plans, and surfaces rightsizing, coverage, and FinOps maturity insights — all from one place, without needing either provider's native console.
 
-## 1. Executive Summary & Core Objective
-
-The Multi-Cloud FinOps Optimization System is a local proof-of-concept (POC) and production architecture designed to ingest multi-cloud infrastructure usage payloads and reconcile them against existing cloud commitments (Reserved Instances and Savings Plans). 
-
-The primary business objective is to eliminate proprietary nesting discrepancies, identify real-time financial **Leakage** (wasted commitment spend), measure **Overage** (uncovered on-demand compute spend), and resolve the **Business-Hours Shutdown Anomaly** where resources are shut down after business hours but continue to drain rigid commitments.
-
-### Key Capabilities
-* **Granular Time-Grain Profiling:** Evaluates infrastructure data at an hourly precision grain rather than applying broad monthly averages.
-* **Rigid vs. Flexible Tiering:** Enforces a multi-pass priority waterfall queue separating strict resource bounds from flexible dollar pools.
-* **Deterministic Recommendation Layer:** Computes data-driven capacity expansion metrics fortified with a built-in safety buffer factor.
+> Built as a Capstone project for the M.Sc. in Cloud Architecture & Security (RACE, REVA University). See [AI Usage Disclosure](#ai-usage-disclosure) for how AI assistance was used in its development.
 
 ---
 
-## 2. Functional Architecture & Core Logic Layers
+## Table of Contents
 
-
-```
-
-```text
-FILE_CREATED_SUCCESSFULLY
-
-
-```
-
-[Cloud Resources & DB Scan] ──> [Normalized Business Schema Mapping]
-│
-▼
-┌──────────────────────────────┐
-│  Priority Waterfall Queue   │
-└──────────────┬───────────────┘
-│
-┌────────────────────────┴────────────────────────┐
-▼                                                 ▼
-[Pass 1: Strict RI Allocation]                    [Pass 2: Flexible SP Allocation]
-(Perfect Region + SKU Match)                       (Global Portfolio Overage Absorption)
-│                                                 │
-└────────────────────────┬────────────────────────┘
-│
-▼
-┌──────────────────────────────┐
-│ Executive Dashboard & Buffer │
-│    Recommendation Engine     │
-└──────────────────────────────┘
-
-```
-
-### Layer 1: Ingestion & Normalization Scan
-Ingests cloud cost and usage payloads (e.g., Azure Cost Management JSON column/row vectors) and normalizes them into human-readable business tracking domains. It tracks the core execution parameters: operational state, host region, instance size profile, default pricing benchmarks in USD, and specific baseline usage distributions.
-
-### Layer 2: Strict Reserved Instance (RI) Matching
-Executes Pass 1 of the reconciliation engine. Because Reserved Instances are structurally rigid, they demand a perfect constraint match. A resource's properties must align seamlessly across two specific boundary fields:
-1. **SKU Matching:** `Workload SKU == Commitment Scope SKU`
-2. **Regional Placement:** `Workload Region == Commitment Scope Region`
-
-If an RI is allocated to an intermittent workload that shuts down after hours, the system logs the idle capacity window directly as **Rigid Commitment Leakage**.
-
-### Layer 3: Flexible Savings Plan (SP) Matching
-Executes Pass 2 of the reconciliation engine. Compute Savings Plans are dollar-backed ($/hour commitment pools) and can float dynamically across regions, database engines, operating systems, and size families. The system routes all remaining compute overages from Pass 1 into this layer to maximize portfolio utilization.
-
-### Layer 4: Actionable Recommendation & Safety Buffer Engine
-Evaluates the downstream efficiency metrics to issue precise cloud directives. To protect the organization against over-purchasing commitments based on high business-hour peaks, it implements a **Stability Factor / Safety Buffer**. The engine calculates a safe procurement volume anchored strictly to the steady-state valley line, minimizing downstream waste when development boxes go offline at night.
+- [Why This Exists](#why-this-exists)
+- [Key Features](#key-features)
+- [Architecture](#architecture)
+- [Tech Stack](#tech-stack)
+- [Repository Structure](#repository-structure)
+- [Prerequisites](#prerequisites)
+- [Getting the Code](#getting-the-code)
+- [Deployment](#deployment)
+  - [Option A — Azure Cloud Shell (recommended, zero local install)](#option-a--azure-cloud-shell-recommended-zero-local-install)
+  - [Option B — Your own machine (Windows / macOS / Linux)](#option-b--your-own-machine-windows--macos--linux)
+  - [Option C — Fast code-only redeploy](#option-c--fast-code-only-redeploy)
+  - [Option D — GitHub Actions CI/CD](#option-d--github-actions-cicd)
+  - [Deployment parameters](#deployment-parameters)
+  - [What gets created, and what it costs](#what-gets-created-and-what-it-costs)
+- [Connecting a Real Tenant](#connecting-a-real-tenant)
+- [Local Development (no Azure required)](#local-development-no-azure-required)
+- [Security Model](#security-model)
+- [Troubleshooting](#troubleshooting)
+- [Contributing](#contributing)
+- [License](#license)
+- [AI Usage Disclosure](#ai-usage-disclosure)
 
 ---
 
-## 3. Detailed Schema Definitions
+## Why This Exists
 
-### 3.1 Input Environment Scan Schema
-This schema standardizes the discovered compute and database assets before processing calculations.
+Each cloud provider's native tooling (AWS Cost Explorer, Azure Cost Management + Billing) is capable within its own estate, but neither is designed to reason about cost posture *across* both providers at once — a Reserved Instance on AWS and a Reservation on Azure are structurally different products with different scope and pricing mechanics, and neither console attempts to unify them. Commercial multi-cloud FinOps platforms exist, but they're closed-source, licensed enterprise products.
 
-| Field Name | Data Type | Sample Value | Description |
-| :--- | :--- | :--- | :--- |
-| `Resource ID` | String | `VM-Prod-01` | Unique identifier for the instance asset. |
-| `ResourceType` | String | `Compute` | Architectural class (e.g., Compute, Database). |
-| `Resource State` | String | `Running` | Operational condition (`Running`, `Stopped (deallocated)`). |
-| `Region` | String | `australiaeast` | Targeted cloud deployment zone name. |
-| `OS` | String | `Windows` | Host operating system. |
-| `Current SKU` | String | `Standard_D4ds_v5` | The hardware family size designation. |
-| `PAYG Hourly Cost USD` | Float | `0.28` | Retail standard price rate pulled from the pricing calculator. |
-| `Avg Daily Running Hours`| Integer | `24` | Metric capturing the business-hours profile (0 to 24). |
+This project builds that missing piece as a live, credential-driven application: real ingestion from both providers, real retail pricing, real commitment-coverage reconciliation — with a security-conscious, least-privilege onboarding model, since the credentials a cost-visibility tool asks for are themselves a real attack surface.
 
-### 3.2 Commitments Inventory Schema
-Defines the structure of contract positions held by the organization.
+## Key Features
 
-| Field Name | Data Type | Sample Value | Description |
-| :--- | :--- | :--- | :--- |
-| `commitment_id` | String | `RI-D4DS-V5-POOL` | Unique contract reference index. |
-| `commitment_type` | String | `Reserved Instance` | Structural family class (`Reserved Instance`, `Savings Plan`). |
-| `scope_sku` | String | `Standard_D4ds_v5` | target hardware size constraint (`Any Compute/DB` for SP). |
-| `scope_region` | String | `australiaeast` | Geographic regional target rule boundary (`Global` for SP). |
-| `hourly_usd_commitment`| Float | `12.00` | Contractual cash burn rate dedicated per hour. |
-| `expiry_date` | String (Date)| `2026-11-01` | Calendar schedule cutoff date. |
+- **Live multi-cloud ingestion** — Azure inventory via Azure Resource Graph (9 modular KQL query groups: VMs, SQL, Flexible Servers, Cosmos/DocumentDB, Cache, Storage/Disks, Analytics, miscellaneous Compute, Data Factory SSIS); AWS inventory across 14+ resource types in every enabled region, scanned in parallel.
+- **Real retail pricing enrichment** — every synced resource is priced against the provider's own live Retail Prices / Price List API, not a static table.
+- **Reserved Instance & Savings Plan coverage** — subscription/resource-group-scoped and Zonal/Regional AWS RI scope matching, with a real coverage waterfall (on-demand baseline → RI coverage → Savings Plan coverage → residual overage).
+- **VM / EC2 rightsizing** — classifies compute resources as Underutilized / Overutilized / Optimal from *live* Azure Monitor and AWS CloudWatch CPU + memory metrics, not just demo data.
+- **Actionable recommendations engine** — combined RI + Savings Plan sizing and cancellation guidance with quantified monthly dollar impact.
+- **FinOps Maturity Assessment** — Crawl/Walk/Run scoring against real FinOps Foundation KPIs (Cost Optimization Index, Anomaly Detection Rate, commitment coverage thresholds), computed from actual tenant data, not fixed.
+- **Multi-tenant, Demo + Production modes** — a shared, publicly-known demo login for zero-setup exploration, fully isolated from real connected-tenant data.
+- **Passwordless database access** — both the web app and the sync worker authenticate to Azure SQL via System-Assigned Managed Identity; no password or connection string is ever stored anywhere.
+- **Automated hourly sync** — an Azure Function on a timer trigger keeps inventory, pricing, and commitment data current without any user action.
 
-### 3.3 Reconciled Granular Output Schema (Hourly Log Snapshot)
-The final reporting format detailing asset tracking records for mid-day snapshots.
-
-| Field Name | Data Type | Sample Value | Description |
-| :--- | :--- | :--- | :--- |
-| `Date` | Date | `2026-07-24` | Day index identifier. |
-| `Hour` | String | `12:00` | Granular hourly evaluation checkpoint block. |
-| `Resource ID` | String | `VM-Prod-01` | Target asset identity tracking token. |
-| `SKU` | String | `Standard_D4ds_v5` | Instance family configuration profile size. |
-| `PAYG Rate per Hour` | Float | `0.28` | Current theoretical baseline retail price fee. |
-| `Covered by RI Cost` | Float | `0.20` | Financial cash cost absorbed during Pass 1 processing. |
-| `Covered by SP Cost` | Float | `0.08` | Financial cash cost absorbed during Pass 2 processing. |
-| `Final PAYG Overage Cost`| Float | `0.00` | Net unassigned out-of-pocket billing charge amount. |
-
----
-
-## 4. Mathematical Models & Equations
-
-### 4.1 Hourly Out-of-Pocket Overage
-For any individual resource ($r$) during a specific discrete hour ($h$), the remaining out-of-pocket invoice rate is computed as:
-
-$$\text{Final PAYG Overage Cost}_{r,h} = \max\left(0, \text{PAYG Rate}_{r,h} - \text{RI Allocation}_{r,h} - \text{SP Allocation}_{r,h}\right)$$
-
-### 4.2 Total Potential Hourly Capacity Pool
-The absolute capacity pool of a given commitment contract package ($c$) for a single evaluation slice is defined as:
-
-$$\text{Potential Capacity}_{c} = \text{Hourly USD Commitment}_{c} \times 24 \text{ hours} \times \text{Billing Lifecycle Days}$$
-
-### 4.3 Actionable Safety Buffer Framework
-When the system identifies ongoing unassigned retail overages, the recommendation engine calculates a safe buying buffer to prevent over-purchasing:
-
-$$\text{Recommended New Commitment Volume} = \text{Mean Hourly PAYG Overage} \times \text{Safety Buffer Multiplier}$$
-
-Where the **Safety Buffer Multiplier** is hardcoded to `0.80`. This creates a conservative 20% safety boundary margin protection zone to avoid matching volatile business-hour daytime usage peaks.
-
----
-
-## 5. Complete Production-Grade Python Implementation
-
-This code is optimized for local verification runs using zero cloud credentials, utilizing structured datasets to replicate multi-cloud enterprise footprints.
-
-```python
-\"\"\"
-Multi-Cloud FinOps Optimization System - Core Reconciliation Engine
-File: finops_poc.py
-\"\"\"
-
-from datetime import date, timedelta
-import pandas as pd
-import numpy as np
-
-def scan_cloud_environment():
-    \"\"\"
-    Simulates a live environment scan across infrastructure assets.
-    Tracks running hours to capture business-hours shutdown anomalies.
-    All pricing metrics are benchmarked strictly in USD.
-    \"\"\"
-    columns = [
-        "Resource ID", "ResourceType", "Resource State", "Region", 
-        "OS", "Current SKU", "PAYG Hourly Cost USD", "Avg Daily Running Hours"
-    ]
-    
-    rows = [
-        ["VM-Prod-01", "Compute", "Running", "australiaeast", "Windows", "Standard_D4ds_v5", 0.28, 24],
-        ["VM-Prod-02", "Compute", "Running", "australiaeast", "Windows", "Standard_D4ds_v5", 0.28, 24],
-        ["VM-Dev-03", "Compute", "Running", "australiaeast", "Windows", "Standard_B2ms", 0.11, 10],   # Intermittent Business-Hours
-        ["VM-Dev-04", "Compute", "Running", "australiasoutheast", "Windows", "Standard_B2s", 0.05, 10],  # Intermittent Business-Hours
-        ["DB-Prod-01", "Database", "Running", "australiaeast", "Linux", "Standard_E4s_v5", 0.30, 24],
-        ["VM-Legacy-05", "Compute", "Stopped (deallocated)", "australiaeast", "Windows", "Standard_D4ds_v4", 0.28, 0]
-    ]
-    return pd.DataFrame(rows, columns=columns)
-
-
-def fetch_existing_commitments():
-    \"\"\"
-    Fetches active contract coverage baseline configurations.
-    \"\"\"
-    return pd.DataFrame([
-        {
-            "commitment_id": "RI-D4DS-V5-POOL",
-            "commitment_type": "Reserved Instance",
-            "scope_sku": "Standard_D4ds_v5", 
-            "scope_region": "australiaeast",
-            "hourly_usd_commitment": 0.20,
-            "expiry_date": "2026-11-01"
-        },
-        {
-            "commitment_id": "SP-GLOBAL-COMPUTE",
-            "commitment_type": "Savings Plan",
-            "scope_sku": "Any Compute/DB", 
-            "scope_region": "Global",
-            "hourly_usd_commitment": 0.15,
-            "expiry_date": "2027-01-15"
-        }
-    ])
-
-
-def process_finops_waterfall(inventory_df: pd.DataFrame, commitments_df: pd.DataFrame) -> tuple:
-    \"\"\"
-    Reconciles hourly infrastructure asset load against active discount positions
-    using a multi-pass priority queue based on structural rigidity.
-    \"\"\"
-    detailed_billing_records = []
-    today = date.today()
-    simulated_days = [today - timedelta(days=i) for i in range(30)]
-    
-    total_sp_potential = 0.0
-    total_sp_utilized = 0.0
-    total_ri_potential = 0.0
-    total_ri_utilized = 0.0
-
-    for current_day in simulated_days:
-        for hour in range(24):
-            # Isolate pools for this discrete hour
-            active_ri = commitments_df[commitments_df["commitment_type"] == "Reserved Instance"].copy()
-            active_sp = commitments_df[commitments_df["commitment_type"] == "Savings Plan"].copy()
-            
-            ri_pools = {idx: row["hourly_usd_commitment"] for idx, row in active_ri.iterrows()}
-            sp_pools = {idx: row["hourly_usd_commitment"] for idx, row in active_sp.iterrows()}
-            
-            # Accumulate potential capacities
-            for idx, row in active_ri.iterrows(): total_ri_potential += row["hourly_usd_commitment"]
-            for idx, row in active_sp.iterrows(): total_sp_potential += row["hourly_usd_commitment"]
-
-            # Formulate the hourly infrastructure load demands
-            workload_demand = []
-            for _, res in inventory_df.iterrows():
-                is_running = False
-                if res["Resource State"] == "Running":
-                    if res["Avg Daily Running Hours"] == 24:
-                        is_running = True
-                    elif res["Avg Daily Running Hours"] == 10 and (8 <= hour < 18):
-                        is_running = True
-                
-                hourly_cost = res["PAYG Hourly Cost USD"] if is_running else 0.0
-                
-                workload_demand.append({
-                    "Resource ID": res["Resource ID"],
-                    "SKU": res["Current SKU"],
-                    "Region": res["Region"],
-                    "Remaining PAYG Cost": hourly_cost,
-                    "Covered By RI": 0.0,
-                    "Covered By SP": 0.0
-                })
-
-            # PASS 1: Rigid SKU/Region Matching (Reserved Instances)
-            for idx, ri_commitment in active_ri.iterrows():
-                for res in workload_demand:
-                    if (res["SKU"] == ri_commitment["scope_sku"] and 
-                        res["Region"] == ri_commitment["scope_region"] and 
-                        res["Remaining PAYG Cost"] > 0 and ri_pools[idx] > 0):
-                        
-                        allocated_ri = min(res["Remaining PAYG Cost"], ri_pools[idx])
-                        ri_pools[idx] -= allocated_ri
-                        total_ri_utilized += allocated_ri
-                        res["Remaining PAYG Cost"] -= allocated_ri
-                        res["Covered By RI"] += allocated_ri
-
-            # PASS 2: Flexible Financial Pool Matching (Savings Plans)
-            for idx, sp_commitment in active_sp.iterrows():
-                for res in workload_demand:
-                    if res["Remaining PAYG Cost"] > 0 and sp_pools[idx] > 0:
-                        allocated_sp = min(res["Remaining PAYG Cost"], sp_pools[idx])
-                        sp_pools[idx] -= allocated_sp
-                        total_sp_utilized += allocated_sp
-                        res["Remaining PAYG Cost"] -= allocated_sp
-                        res["Covered By SP"] += allocated_sp
-
-            # Record sample logs for the mid-day snapshot visualization
-            for res in workload_demand:
-                if hour == 12:  # Isolate 12:00 PM for the executive matrix reporting view
-                    detailed_billing_records.append({
-                        "Date": current_day,
-                        "Hour": f"{hour}:00",
-                        "Resource ID": res["Resource ID"],
-                        "SKU": res["SKU"],
-                        "PAYG Rate per Hour": round(res["Remaining PAYG Cost"] + res["Covered By RI"] + res["Covered By SP"], 2),
-                        "Covered by RI Cost": round(res["Covered By RI"], 2),
-                        "Covered by SP Cost": round(res["Covered By SP"], 2),
-                        "Final PAYG Overage Cost": round(res["Remaining PAYG Cost"], 2)
-                    })
-
-    # Compile efficiency tables
-    summary_data = [
-        {"Commitment Type": "Reserved Instances", "Total Potential USD": total_ri_potential, "Utilized USD": total_ri_utilized},
-        {"Commitment Type": "Savings Plans", "Total Potential USD": total_sp_potential, "Utilized USD": total_sp_utilized}
-    ]
-    summary_df = pd.DataFrame(summary_data)
-    summary_df["Leakage (Wasted Dollars)"] = (summary_df["Total Potential USD"] - summary_df["Utilized USD"]).round(2)
-    summary_df["Efficiency"] = (summary_df["Utilized USD"] / summary_df["Total Potential USD"] * 100).round(1).astype(str) + "%"
-    
-    return pd.DataFrame(detailed_billing_records), summary_df
-
-
-def generate_finops_recommendations(summary_df: pd.DataFrame, detailed_bill: pd.DataFrame):
-    \"\"\"
-    Analyzes portfolio run-rates to generate automated sizing and procurement actions.
-    Applies an 80% safety boundary factor to mitigate off-hour capacity waste.
-    \"\"\"
-    print("\\n" + "=" * 115)
-    print("🤖 ACTIONABLE FINOPS RECOMMENDATION ENGINE REPORT")
-    print("=" * 115)
-    
-    ri_leakage = summary_df.loc[summary_df["Commitment Type"] == "Reserved Instances", "Leakage (Wasted Dollars)"].values[0]
-    avg_hourly_overage = detailed_bill["Final PAYG Overage Cost"].mean()
-
-    if ri_leakage > 200.0:
-        print("• [ACTION REQUIRED]: CANCEL or MODIFY underutilized Reserved Instances (RIs).\\n"
-              "  Reasoning: Substantial financial leakage detected. Intermittent workloads (e.g., Dev environments)\\n"
-              "  are shut down after business hours, causing rigid RI hours to sit completely unutilized at night.\\n"
-              "  Strategy Shift: Move intermittent workloads from RI coverage to a flexible Savings Plan (SP) profile.\\n")
-
-    if avg_hourly_overage > 0.10:
-        recommended_sp_buffer_increase = round(avg_hourly_overage * 0.80, 2)
-        print(f"• [RECOMMENDATION]: PURCHASE additional Savings Plan capacity of ${recommended_sp_buffer_increase}/hr.\\n"
-              f"  Reasoning: Ongoing unassigned PAYG overages detected. Applying a conservative 20% safety buffer\\n"
-              f"  protects your financial baseline against valley drop-offs when business-hour VMs turn off.")
-    else:
-        print("• [OPTIMAL STATE]: Savings Plan baseline is well-matched against current active baseline run-rates.")
-    print("=" * 115)
-
-
-if __name__ == "__main__":
-    print("=" * 115)
-    print("STEP 1: CLOUD ENVIRONMENT INVENTORY SCAN (USD BENCHMARKS)")
-    print("=" * 115)
-    env_inventory = scan_cloud_environment()
-    print(env_inventory.to_string(index=False))
-    
-    print("\\n" + "=" * 115)
-    print("STEP 2: PROCESSING GRANULAR HOURLY WATERFALL BILLING MATRIX")
-    print("=" * 115)
-    commitments_pool = fetch_existing_commitments()
-    detailed_bill, efficiency_summary = process_finops_waterfall(env_inventory, commitments_pool)
-    
-    print(">>> MID-DAY SNAPSHOT SAMPLE (RECONCILED HOUR 12:00 LOOKUP):")
-    print(detailed_bill.head(6).to_string(index=False))
-    
-    print("\\n" + "=" * 115)
-    print("STEP 3: EXECUTIVE COMMITMENT METRICS SUMMARY")
-    print("=" * 115)
-    print(efficiency_summary.to_string(index=False))
-    
-    # Trigger final evaluation reporting layer
-    generate_finops_recommendations(efficiency_summary, detailed_bill)
+## Architecture
 
 ```
+                              ┌─────────────────────────┐
+                              │      User (Browser)      │
+                              └────────────┬─────────────┘
+                                           │ HTTPS
+                                           ▼
+   ┌──────────────────────────────────────────────────────────────────┐
+   │             Streamlit Web App  (Azure App Service, Linux)         │
+   │   Home · Inventory · Rightsizing · Savings Plan Analysis ·        │
+   │   RI Coverage · Recommendations · Maturity Assessment             │
+   └───────────────┬───────────────────────────────┬───────────────────┘
+                   │ on-demand sync                  │ read (no live API calls)
+                   ▼                                  ▼
+   ┌──────────────────────────────┐      ┌─────────────────────────────┐
+   │   data/sync_pipeline.py       │      │      db/schema.py            │
+   │   (shared orchestrator)       │◄────►│   (SQLAlchemy → Azure SQL)   │
+   └───────┬───────────────┬───────┘      └─────────────────────────────┘
+           │               │                              ▲
+           ▼               ▼                              │ hourly sync
+ ┌─────────────────┐ ┌─────────────────┐    ┌──────────────────────────────┐
+ │ azure_conn/      │ │ aws/             │    │  Azure Function App          │
+ │ connector.py     │ │ connector.py     │    │  (Consumption plan,          │
+ │ Resource Graph,  │ │ boto3, 14+ types,│    │  hourly timerTrigger)        │
+ │ Monitor metrics  │ │ every region,    │    │  runs the same sync_pipeline │
+ │                  │ │ CloudWatch       │    │  independent of the web app  │
+ └────────┬─────────┘ └────────┬─────────┘    └──────────────────────────────┘
+          │                    │
+          ▼                    ▼
+ ┌──────────────────┐ ┌──────────────────┐
+ │ Azure Retail      │ │ AWS Price List /  │
+ │ Prices API        │ │ Cost Explorer API │
+ └──────────────────┘ └──────────────────┘
+```
 
----
+Both the Web App and the Function App connect to Azure SQL via their own **System-Assigned Managed Identity** — there is no password, connection string, or secret anywhere in configuration. A shared encryption key (`TENANT_SECRET_KEY`, generated once at deploy time and reused on every redeploy) protects each connected tenant's stored client secret at rest.
 
-## 6. Enterprise Production Deployment Blueprint
+## Tech Stack
 
-To transition this proof-of-concept into a live Azure Function (`function_app.py`), complete the following two operational migrations:
+| Layer | Technology |
+|---|---|
+| UI | [Streamlit](https://streamlit.io/) |
+| Data | pandas, NumPy, Plotly |
+| ORM / DB access | SQLAlchemy (`mssql-python` passwordless dialect) |
+| Database | Azure SQL Database (Serverless, free-tier eligible) |
+| Azure SDKs | `azure-identity`, `azure-mgmt-resourcegraph`, `azure-mgmt-compute`, `azure-mgmt-monitor`, `azure-mgmt-resource`, `azure-mgmt-reservations`, `azure-mgmt-billingbenefits` |
+| AWS SDK | `boto3` / `botocore` |
+| Compute (web) | Azure App Service, Linux, Python 3.12 |
+| Compute (cron) | Azure Function App, Python 3.12, Consumption plan |
+| Auth | System-Assigned Managed Identity (DB), bcrypt-hashed shared login (app) |
+| Secrets at rest | `cryptography` (Fernet) |
 
-1. **Migrate `scan_cloud_environment()`:** Remove the hardcoded rows array and implement the `azure-mgmt-resourcegraph` library. Utilize structured KQL queries targeting the `resources` table to dynamically retrieve `properties.extended.instanceView.powerState.code` alongside core SKU size matrices across corporate subscriptions.
-2. **Migrate `fetch_existing_commitments()`:** Substitute the simulated mock data frames with live downstream API requests routed directly through the Azure Consumption API and the `azure-mgmt-billing` SDK, allowing real-time retrieval of active contract profile pools.
-"""
+Full pinned versions are in [`requirements.txt`](requirements.txt).
 
-# Write documentation out to disk
-
-with open("finops_system_documentation.md", "w") as f:
-f.write(markdown_content)
-
-print("FILE_CREATED_SUCCESSFULLY")
+## Repository Structure
 
 ```
-Your Markdown file is ready
-[file-tag: code-generated-file-0-1785774462022338310]
-
-***
-
-### 📘 Documentation Overview: What's Included
-
-The generated `finops_system_documentation.md` file contains a complete technical blueprint of the app. It includes:
-
-1. **Executive Summary & Core Objective:** Highlighting the business justification for parsing data at an hourly grain, removing nested JSON wrappers, and handling the business-hours shutdown anomaly.
-2. **Functional Architecture & Logic Layers:** A structural layout mapping out how the multi-pass priority queue operates (Pass 1 for rigid Reserved Instances and Pass 2 for flexible Savings Plans) along with the buffer logic.
-3. **Detailed Schema Definitions:** Clean Markdown tables displaying schemas for the Input Environment Scan, the Commitments Inventory, and the final Reconciled Granular Hourly Log Snapshot.
-4. **Mathematical Models & Equations:** Fully rendered LaTeX equations tracking how the out-of-pocket costs are extracted row-by-row and how the $80\%$ conservative safety buffer targets are formulated.
-5. **Complete Production-Grade Python Source Code:** The full code implementation containing the corrected nested loops, priority scanning, running hours window matching, and recommendation generation.
-6. **Enterprise Production Deployment Blueprint:** Actionable architecture steps for swapping out your mock arrays for the live `azure-mgmt-resourcegraph` and `azure-mgmt-billing` SDK queries within `function_app.py`.
-
+app.py                    Streamlit entry point / UI
+ui/                       Page-level UI components
+data/sync_pipeline.py     Shared ingestion orchestrator (web app + Function App)
+azure_conn/connector.py   Azure Resource Graph, Monitor metrics, IAM checks
+aws/connector.py          AWS multi-region inventory, CloudWatch metrics, IAM checks
+pricing/                  Retail pricing + commitment pricing enrichment
+analysis/                 Rightsizing, RI/SP eligibility, recommendations, maturity scoring
+commitments/              Commitment (RI/SP) matching logic
+db/                       SQLAlchemy models, engine factory, crypto, seed/demo data
+azure_function/           Azure Function App (hourly cron worker)
+azure_deploy/             Deployment scripts (see Deployment below)
+.github/workflows/        GitHub Actions CI/CD for code-only redeploys
 ```
+
+## Prerequisites
+
+| Tool | Needed for | Notes |
+|---|---|---|
+| An Azure subscription | Deployment | A free/student subscription works — the default SKUs are all free-tier eligible |
+| [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli) | Deployment | Not needed if using Cloud Shell |
+| [Azure Functions Core Tools v4](https://learn.microsoft.com/azure/azure-functions/functions-run-local) | Deployment | Publishes the cron worker; version matters, see [Troubleshooting](#troubleshooting) |
+| Python 3.12 | Deployment + local dev | |
+| PowerShell 7+ (or Windows PowerShell 5.1) | Deployment | Cloud Shell and macOS/Linux always have `pwsh` 7 |
+| [GitHub CLI](https://cli.github.com/) (`gh`) | Cloning, if the repo is private | `git clone` alone doesn't support GitHub's token-based auth by default |
+
+## Getting the Code
+
+```bash
+git clone https://github.com/akcloudx/Multi-Cloud-FinOps-Optimization-System.git
+cd Multi-Cloud-FinOps-Optimization-System
+```
+
+If you're cloning in Azure Cloud Shell, clone under `$HOME` (its persistent storage mount) rather than `/tmp`, so it survives session recycles. On Windows, clone into a shallow path (e.g. `C:\dev\...`) rather than a deeply nested folder — this repo bundles a Linux-compiled dependency fallback ([see below](#security-model)) with some long internal paths.
+
+## Deployment
+
+Four ways to deploy, depending on where you're running from. All of them provision the same architecture and are fully idempotent — safe to re-run if something fails partway through.
+
+### Option A — Azure Cloud Shell (recommended, zero local install)
+
+Nothing to install. Open [Cloud Shell](https://shell.azure.com) (or the `>_` icon in the Azure Portal), select **PowerShell**, then:
+
+```bash
+gh auth login          # only needed once, and only if the repo is private
+gh repo clone akcloudx/Multi-Cloud-FinOps-Optimization-System
+cd Multi-Cloud-FinOps-Optimization-System/azure_deploy
+./deploy_all_resources_cloudshell.ps1
+```
+
+You'll be prompted once for a SQL admin password (8+ characters, at least 3 of uppercase/lowercase/digit/symbol — this is only ever used for the SQL Server's break-glass admin login, never by the app itself). Everything else — resource creation, code deployment, and granting the app's Managed Identity access to the database — runs automatically, including self-provisioning the one Python package a fully-automated database grant needs.
+
+### Option B — Your own machine (Windows / macOS / Linux)
+
+Requires the [Prerequisites](#prerequisites) installed locally. PowerShell 7+ works identically on all three platforms (`pwsh`); Windows PowerShell 5.1 is also supported.
+
+```powershell
+az login
+cd azure_deploy
+.\deploy_all_resources.ps1
+```
+
+If you're on macOS/Linux, run it with `pwsh ./deploy_all_resources.ps1` instead. The script checks for `az`/`python`/`func` up front (with install links if anything's missing) and warns if your PowerShell execution policy would block future runs.
+
+### Option C — Fast code-only redeploy
+
+Once the infrastructure exists, push a code change in ~15 seconds without touching any Azure resource:
+
+```powershell
+cd azure_deploy
+.\deploy_app_only.ps1
+```
+
+### Option D — GitHub Actions CI/CD
+
+[`​.github/workflows/deploy.yml`](.github/workflows/deploy.yml) redeploys the web app and Function App code automatically on every push to `main` (infrastructure must already exist via Option A or B first). One-time setup:
+
+1. In the Azure Portal, open the Web App and Function App resources and download each one's **Publish Profile** (Overview → Get publish profile).
+2. In this repo: **Settings → Secrets and variables → Actions**, add:
+   - `AZURE_WEBAPP_FINOPS_PUBLISH_PROFILE`
+   - `AZURE_FUNCTION_FINOPS_PUBLISH_PROFILE`
+3. Push to `main`, or trigger manually from the **Actions** tab (`workflow_dispatch`).
+
+### Deployment parameters
+
+All four scripts accept the same core parameters (Options A/B; C only needs the naming ones):
+
+| Parameter | Default | Purpose |
+|---|---|---|
+| `-OwnerHandle` | `ascloudx` | Short, lowercase-alphanumeric handle that makes every resource name globally unique and readable (e.g. `sql-finops-yourhandle`) — **change this** if deploying your own copy |
+| `-SqlAdminPassword` | *(prompted)* | SQL Server break-glass admin password — never used by the running app |
+| `-Location` | `westus3` | Target Azure region (auto-falls back to nearby regions if quota is hit) |
+| `-AppNamePrefix` | `finops` | First segment of every resource name |
+| `-SqlAdminUser` | `finopsadmin` | SQL Server admin username |
+| `-ResourceGroupName` | `rg-finops-<OwnerHandle>` | Override to deploy into an existing resource group |
+
+### What gets created, and what it costs
+
+| Resource | SKU | Cost |
+|---|---|---|
+| Resource Group, Storage Account | Standard_LRS | ~$0.02/mo |
+| Azure SQL Database | Serverless, free-tier eligible | $0 (100k vCore-seconds + 32GB/mo free) |
+| Function App | Consumption (Y1) | $0 for this workload's volume |
+| App Service Plan | **F1 (Free)** | $0/mo — 60 CPU-min/day cap, cold-starts after ~20 min idle |
+| Log Analytics + Application Insights | Pay-as-you-go | Negligible at this log volume |
+
+Every default is chosen to fit a free/student subscription. The F1 plan is fine for demo/evaluation use; for sustained traffic, change the App Service Plan SKU.
+
+## Connecting a Real Tenant
+
+After deployment, sign in (Demo mode works with zero setup) and use **Manage Tenants** to connect a real Azure subscription or AWS account. The in-app **Getting Started** guide walks through creating a least-privilege Service Principal (Azure, `Reader` role) or IAM policy (AWS) — the app never requests write access to your cloud resources.
+
+## Local Development (no Azure required)
+
+```bash
+python -m venv venv
+./venv/bin/pip install -r requirements.txt      # Windows: venv\Scripts\pip
+streamlit run app.py
+```
+
+Sign in with **Demo Mode** — no cloud credentials needed. It reads from a local SQLite database seeded with realistic multi-service Azure and AWS inventory.
+
+## Security Model
+
+- **No standing credentials in code.** Both compute resources authenticate to the database via Managed Identity; connected-tenant client secrets are encrypted at rest with a key generated once at deploy time, never hardcoded.
+- **Least-privilege by design.** The app only ever requests read-level access (Azure `Reader` role; a documented, minimal AWS IAM policy) — verified against each provider's own policy simulator during testing.
+- **Vendored Linux dependency fallback.** `azure_sdk_vendor/` bundles pre-built Linux binaries for a subset of dependencies as a fallback if a live `pip install` fails during deployment's remote build step. It's explicitly guarded to activate on Linux only and never shadow a real install (see `app.py`).
+- **History-audited.** This repository's git history has been scanned with both [gitleaks](https://github.com/gitleaks/gitleaks) and [betterleaks](https://github.com/betterleaks/betterleaks) and contains no live secrets.
+
+Found a security issue? Please open a private security advisory rather than a public issue.
+
+## Troubleshooting
+
+- **`func` version mismatch** — this project deploys with `--functions-version 4`; an older Core Tools install will fail late in the deploy. Reinstall with `npm install -g azure-functions-core-tools@4 --unsafe-perm true`.
+- **PowerShell won't run the script at all** (`...cannot be loaded because running scripts is disabled...`) — Windows' default execution policy blocks unsigned scripts. Fix once: `Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned`.
+- **`PasswordTooShort` from Azure SQL** — the admin password needs 8+ characters covering at least 3 of: uppercase, lowercase, digit, symbol.
+- **A step hangs with no output** — some `az monitor` commands install a CLI extension on first use and can prompt for confirmation invisibly in some terminals. The deploy scripts pre-configure `az config set extension.use_dynamic_install=yes_without_prompt` to avoid this; if you hit it anyway, type `y` and Enter.
+- **"Filename too long" while cloning on Windows** — clone into a shallow path (e.g. `C:\dev\...`) rather than a deeply nested one; see [Getting the Code](#getting-the-code).
+
+## Contributing
+
+Issues and pull requests are welcome. For anything non-trivial, please open an issue first to discuss the change.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+## AI Usage Disclosure
+
+Portions of this project's code, documentation, and this README were developed with AI assistance (Claude, Anthropic), used for grammar/language, structuring, code generation, and data analysis under the author's direction and review. See the project report's own AI Usage Disclosure Statement for the full, formal breakdown.

@@ -8,9 +8,8 @@ numpy>=1.26
 # Managed Identity / passwordless Azure SQL auth - KNOWN RISK, Microsoft's
 # docs explicitly say not to use this pre-release "for production systems
 # with strict stability requirements." See db/schema.py's get_engine() for
-# the full reasoning and the pre-managed-identity-backup git branch if this
-# needs to be rolled back to the stable sqlalchemy 2.0.x + password-based
-# DATABASE_URL path.
+# the full reasoning if this ever needs to be rolled back to the stable
+# sqlalchemy 2.0.x + password-based DATABASE_URL path.
 sqlalchemy==2.1.0b2
 plotly>=5.18
 boto3>=1.34
