@@ -55,13 +55,11 @@
   <text x="1240" y="198" font-size="13" font-weight="700" fill="#FFFFFF" text-anchor="middle">4.0 Analyse &amp;</text>
   <text x="1240" y="216" font-size="13" font-weight="700" fill="#FFFFFF" text-anchor="middle">Recommend</text>
 
-  <!-- ============ Data stores (open rectangle: top+bottom+left only) ============ -->
+  <!-- ============ Data stores (closed rectangle, distinguished from process
+       boxes by square corners + white fill instead of teal fill) ============ -->
   <!-- D1 CloudInventory, below 1.0 -->
   <g filter="url(#shadow)">
-    <path d="M290,380 L290,430 L510,430 L510,380" fill="#FFFFFF" stroke="none"/>
-    <line x1="290" y1="380" x2="290" y2="430" stroke="#334155" stroke-width="2"/>
-    <line x1="290" y1="380" x2="510" y2="380" stroke="#334155" stroke-width="2"/>
-    <line x1="290" y1="430" x2="510" y2="430" stroke="#334155" stroke-width="2"/>
+    <rect x="290" y="380" width="220" height="50" fill="#FFFFFF" stroke="#334155" stroke-width="2"/>
   </g>
   <text x="305" y="399" font-size="10.5" font-weight="700" fill="#334155">D1</text>
   <text x="400" y="399" font-size="11.5" font-weight="700" fill="#1A202C" text-anchor="middle">CloudInventory</text>
@@ -69,9 +67,7 @@
 
   <!-- D3 RetailPrice Cache, above 2.0 -->
   <g filter="url(#shadow)">
-    <line x1="590" y1="30" x2="590" y2="80" stroke="#334155" stroke-width="2"/>
-    <line x1="590" y1="30" x2="810" y2="30" stroke="#334155" stroke-width="2"/>
-    <line x1="590" y1="80" x2="810" y2="80" stroke="#334155" stroke-width="2"/>
+    <rect x="590" y="30" width="220" height="50" fill="#FFFFFF" stroke="#334155" stroke-width="2"/>
   </g>
   <text x="605" y="49" font-size="10.5" font-weight="700" fill="#334155">D3</text>
   <text x="700" y="49" font-size="11.5" font-weight="700" fill="#1A202C" text-anchor="middle">RetailPrice Cache</text>
@@ -79,9 +75,7 @@
 
   <!-- D2 Commitment Tables, below 3.0 -->
   <g filter="url(#shadow)">
-    <line x1="860" y1="380" x2="860" y2="430" stroke="#334155" stroke-width="2"/>
-    <line x1="860" y1="380" x2="1080" y2="380" stroke="#334155" stroke-width="2"/>
-    <line x1="860" y1="430" x2="1080" y2="430" stroke="#334155" stroke-width="2"/>
+    <rect x="860" y="380" width="220" height="50" fill="#FFFFFF" stroke="#334155" stroke-width="2"/>
   </g>
   <text x="875" y="399" font-size="10.5" font-weight="700" fill="#334155">D2</text>
   <text x="970" y="399" font-size="11.5" font-weight="700" fill="#1A202C" text-anchor="middle">Commitment Tables</text>
@@ -122,10 +116,13 @@
   <text x="1104" y="150" font-size="10.5" fill="#334155" font-weight="600" text-anchor="middle">coverage-matched</text>
 
   <!-- 4.0 -> FinOps User: starts at 4.0's right edge (1350), ends at
-       FinOps User's left edge (1400), pointing right - correct direction. -->
+       FinOps User's left edge (1400), pointing right - correct direction.
+       The 48px gap is too narrow for a two-line label without spilling
+       into the FinOps User box, so - same fix as the two inline labels
+       above - the label sits above the row instead, centered on the
+       arrow's midpoint. -->
   <line x1="1350" y1="205" x2="1398" y2="205" stroke="#334155" stroke-width="1.75" marker-end="url(#arrow)"/>
-  <text x="1355" y="199" font-size="9.5" fill="#334155" font-weight="600">dashboard /</text>
-  <text x="1355" y="235" font-size="9.5" fill="#334155" font-weight="600">recommendations</text>
+  <text x="1374" y="150" font-size="10.5" fill="#334155" font-weight="600" text-anchor="middle">dashboard / recommendations</text>
 
   <!-- D1 -> 4.0 direct (utilisation history) - routed along the bottom, below D1/D2 -->
   <path d="M400,432 L400,500 L1240,500 L1240,252" fill="none" stroke="#0E7490" stroke-width="1.75" stroke-dasharray="5,4" marker-end="url(#arrowTeal)"/>
