@@ -1,57 +1,64 @@
-# azure_deploy/deploy_all_resources.ps1
-# Multi-Cloud FinOps Optimization System  Azure Production Deployment Script
+# azure_deploy/deploy_all_resources_cloudshell.ps1
+# Multi-Cloud FinOps Optimization System - Azure Production Deployment Script
+# CLOUD SHELL VARIANT
 #
-# TARGETED FOR: Windows PowerShell 5.1, PowerShell 7, Azure Cloud Shell
-# FEATURES:
+# TARGETED FOR: Azure Cloud Shell, "PowerShell" environment (shell.azure.com,
+# or the >_ icon in the Azure Portal). This is a leaner sibling of
+# azure_deploy/deploy_all_resources.ps1, not a rewrite - every actual
+# deployment step (resource creation, naming, quota fallback, Managed
+# Identity, DB grant) is identical between the two files by design, so they
+# never drift apart. The ONLY things removed here are checks that are
+# meaningless inside Cloud Shell:
+#   - Windows execution policy / Zone.Identifier checks - Cloud Shell has no
+#     Windows execution-policy concept at all (its "PowerShell" option still
+#     runs on a Linux container underneath) and no NTFS alternate-data-stream
+#     concept either, so both checks would just be permanent no-ops here.
+#   - The local `az login` prompt - Cloud Shell auto-authenticates you as
+#     whichever account is signed into the Azure Portal, so there's no
+#     separate login step to walk through.
+# One thing ADDED here that the local-machine script doesn't need: a
+# repo-presence check, since a fresh Cloud Shell session starts with nothing
+# cloned - see immediately after the Fail() function below.
+#
+# If you're running this from your own Windows/Mac/Linux machine instead of
+# Cloud Shell, use azure_deploy/deploy_all_resources.ps1 - it has the
+# equivalent local-machine checks (execution policy, tool installs, venv
+# path per OS) that don't apply here.
+#
+# FEATURES (shared with the local-machine variant):
 #    Full Architecture: Azure SQL Server + Function App + Streamlit App Service
-#    PowerShell 5.1 Compatible: Uses dual-argument Join-Path calls and ASCII output.
 #    ARM Resilient: Pauses briefly after app creation to ensure ARM Control Plane propagation.
 #    Smart Quota Fallback: Automatically tests candidate regions if student subscription has 0 quota in the primary region.
-#    App Service Plan: F1 (Free tier, $0/month) - switched from B1 2026-08 to fit a limited student
-#    subscription budget. 60 CPU-min/day cap, no "Always On" (idles out after ~20 min, cold-starts on
-#    next request) - fine for intermittent demo/test use, not sustained traffic. See the inline note
-#    at the plan-creation step for the one open risk (Oryx remote build behavior not yet verified on F1).
+#    App Service Plan: F1 (Free tier, $0/month) - fits a limited student subscription budget.
+#    60 CPU-min/day cap, no "Always On" (idles out after ~20 min, cold-starts on next request) -
+#    fine for intermittent demo/test use, not sustained traffic.
 #    Passwordless DB auth: both apps connect to Azure SQL via System-Assigned Managed Identity
 #    (mssql-python driver) - no password/connection-string secret is ever stored anywhere. Step 7
 #    grants both identities DB access automatically (falls back to printing a one-time manual
 #    T-SQL grant for the Portal Query editor if the local venv isn't available).
 
-# SqlAdminPassword has no default on purpose - it used to be a hardcoded
-# real password here (found and fixed 2026-08, alongside the same
-# credential duplicated in db/schema.py and azure_deploy/seed_azure_sql.py).
-# Typed as [SecureString] (not [string]) specifically so PowerShell prompts
-# for it itself, masked, whenever it's omitted - a Mandatory SecureString
-# parameter gets this behavior built in, no separate Read-Host dance needed:
-#   .\deploy_all_resources.ps1
-# (PowerShell will then prompt "SqlAdminPassword: " with masked input). Still
-# scriptable non-interactively if needed, e.g. from CI:
-#   .\deploy_all_resources.ps1 -SqlAdminPassword (ConvertTo-SecureString $env:SQL_ADMIN_PW -AsPlainText -Force)
+# SqlAdminPassword has no default on purpose - see deploy_all_resources.ps1's
+# matching comment for the full history. Typed as [SecureString] so
+# PowerShell prompts for it itself, masked, whenever it's omitted:
+#   ./deploy_all_resources_cloudshell.ps1
+# Still scriptable non-interactively if needed:
+#   ./deploy_all_resources_cloudshell.ps1 -SqlAdminPassword (ConvertTo-SecureString $env:SQL_ADMIN_PW -AsPlainText -Force)
 #
-# NOTE 2026-08: SqlAdminUser/SqlAdminPassword are ONLY used to create the SQL
+# NOTE: SqlAdminUser/SqlAdminPassword are ONLY used to create the SQL
 # Server's own break-glass admin login (Azure SQL requires some admin
 # credential at server-creation time) - the app itself no longer uses them
 # at all. Both the Web App and Function App now connect via their own
 # System-Assigned Managed Identity (passwordless, no secret anywhere) - see
 # db/schema.py's get_engine() and the "Managed Identity setup" step below.
-# NAMING CONVENTION (2026-08-30 redesign - real feedback: the old scheme
-# suffixed almost every resource with the first 8 hex characters of the
-# SUBSCRIPTION ID (e.g. "finops-app-e0b96fd6") - unreadable, and not
-# something you ever see or choose. That suffix existed for a real reason
-# (Storage Accounts, Web Apps, Function Apps, and SQL Servers all need
-# GLOBALLY unique names across ALL of Azure, since they get public DNS
-# names like *.azurewebsites.net - a plain "finops-app" would very likely
-# already be taken by someone else worldwide), but the source of the
-# uniqueness doesn't need to be an opaque hash - $OwnerHandle below is an
-# explicit, human-chosen replacement for it.
 #
-# Every resource now follows Microsoft's own Cloud Adoption Framework
-# convention (<resource-type-abbreviation>-<app-name>-<owner-handle>,
+# NAMING CONVENTION - every resource follows Microsoft's own Cloud Adoption
+# Framework convention (<resource-type-abbreviation>-<app-name>-<owner-handle>,
 # lowercase alphanumeric-only with no hyphens for Storage Accounts, which
 # don't allow them):
 #   rg-finops-<OwnerHandle>      Resource Group      (not globally unique - no suffix strictly required, kept for consistency with everything else)
 #   stfinops<OwnerHandle>        Storage Account      (globally unique - REQUIRES this)
 #   sql-finops-<OwnerHandle>     SQL Server           (globally unique - REQUIRES this)
-#   finops-db                    SQL Database         (scoped under the server, not globally unique - unchanged, was already clean)
+#   finops-db                    SQL Database         (scoped under the server, not globally unique)
 #   func-finops-<OwnerHandle>    Function App         (globally unique - REQUIRES this)
 #   app-finops-<OwnerHandle>     Web App              (globally unique - REQUIRES this)
 #   plan-finops-<OwnerHandle>    App Service Plan     (not globally unique - no suffix strictly required, kept for consistency)
@@ -62,8 +69,8 @@ param (
     [Parameter(Mandatory = $true)]
     [SecureString]$SqlAdminPassword,
     [string]$AppNamePrefix     = "finops",
-    # Your own short, memorable handle - the readable replacement for the
-    # old subscription-ID hash. Lowercase alphanumeric only (Storage
+    # Your own short, memorable handle - the readable replacement for an
+    # opaque subscription-ID hash. Lowercase alphanumeric only (Storage
     # Account naming's strictest constraint applies to the whole scheme,
     # so every resource stays consistent) - sanitized below regardless of
     # what's passed in, so stray punctuation/casing can't silently produce
@@ -86,78 +93,58 @@ function Fail([string]$msg) {
     exit 1
 }
 
-# Checked before anything else, including the tool checks below: Windows
-# defaults to the "Restricted" execution policy, which blocks a .ps1 from
-# running AT ALL with a raw "cannot be loaded because running scripts is
-# disabled on this system" error - raised by PowerShell itself before a
-# single line of this script executes. That means this script can never
-# detect/report THAT failure from the inside (a well-known PowerShell
-# limitation - if you're reading this comment, this run already got past
-# it, e.g. via a one-off `-ExecutionPolicy Bypass` flag). What CAN be
-# checked once we're already executing is whether a FUTURE plain
-# `.\deploy_all_resources.ps1` run (this or another machine) would hit that
-# same wall, and separately, whether this exact file is still flagged
-# "downloaded from the internet" (a Zone.Identifier alternate data stream
-# Windows adds to browser/zip downloads - blocks execution independently of
-# execution policy, and survives a policy fix).
-$effectivePolicy = Get-ExecutionPolicy -Scope CurrentUser
-if ($effectivePolicy -in @('Restricted', 'AllSigned', 'Default', 'Undefined')) {
+# Cloud-Shell-specific: a fresh session has nothing cloned yet, unlike a
+# local machine where the repo is presumably already sitting on disk. This
+# script needs its sibling files (create_zip.py, grant_managed_identity_
+# access.py) AND the whole app tree one level up (create_zip.py's own item
+# list: app.py, ui/, pricing/, data/, db/, azure_conn/, aws/, commitments/,
+# analysis/, azure_sdk_vendor/, .streamlit/, requirements.txt) - checked here
+# so a missing clone surfaces as one clear instruction instead of a string of
+# unrelated "path not found" errors scattered through steps 5 and 6.
+Write-Host "  Checking repository is present ..." -ForegroundColor Yellow
+$parentPath = Join-Path $PSScriptRoot ".."
+$repoAppPy  = Join-Path $parentPath "app.py"
+if (-not (Test-Path $repoAppPy)) {
     Write-Host ""
-    Write-Host "  [WARNING] PowerShell's CurrentUser execution policy is '$effectivePolicy'." -ForegroundColor DarkYellow
-    Write-Host "  This run may only be working because of a one-off bypass flag - a plain" -ForegroundColor DarkYellow
-    Write-Host "  '.\deploy_all_resources.ps1' could otherwise fail with:" -ForegroundColor DarkYellow
-    Write-Host "    ...cannot be loaded because running scripts is disabled on this system." -ForegroundColor DarkYellow
-    Write-Host "  Fix once, permanently, for your own account (no admin rights needed):" -ForegroundColor DarkYellow
-    Write-Host "    Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned" -ForegroundColor White
+    Write-Host "  [ERROR] app.py not found next to this script - the repository doesn't" -ForegroundColor Red
+    Write-Host "  look fully cloned yet. In this Cloud Shell session, run:" -ForegroundColor Red
     Write-Host ""
+    Write-Host "    git clone https://github.com/akcloudx/Multi-Cloud-FinOps-Optimization-System.git" -ForegroundColor White
+    Write-Host "    cd Multi-Cloud-FinOps-Optimization-System" -ForegroundColor White
+    Write-Host "    ./azure_deploy/deploy_all_resources_cloudshell.ps1" -ForegroundColor White
+    Write-Host ""
+    Write-Host "  Tip: clone under `$HOME (Cloud Shell's persistent clouddrive mount), not /tmp -" -ForegroundColor Yellow
+    Write-Host "  anything outside `$HOME is wiped when this session recycles." -ForegroundColor Yellow
+    Write-Host ""
+    exit 1
 }
-try {
-    if (Get-Item -Path $PSCommandPath -Stream Zone.Identifier -ErrorAction Stop) {
-        Write-Host "  [WARNING] This script file is still marked 'downloaded from the internet'," -ForegroundColor DarkYellow
-        Write-Host "  which can block it even under a permissive execution policy. Fix with:" -ForegroundColor DarkYellow
-        Write-Host "    Unblock-File -Path `"$PSCommandPath`"" -ForegroundColor White
-        Write-Host ""
-    }
-} catch {
-    # No Zone.Identifier stream - file isn't flagged as downloaded (e.g. a
-    # plain git clone). Nothing to warn about; this is the expected case.
-}
+Write-Host "        [OK] Repository found." -ForegroundColor Green
 
-# Checked up front, before touching any Azure resource - a missing tool
-# discovered mid-script (e.g. at the Function App publish step) leaves
-# whatever got created so far in a half-finished state, and PowerShell's own
-# "command not found" error for a genuinely-missing executable is a raw,
-# unfriendly `CommandNotFoundException`, not a clean message. This matters
-# for running this script on a DIFFERENT machine than the one it was
-# developed on (a mentor's/examiner's laptop, a fresh clone) - `az` and
-# `python` were already implicitly required, `func` (Azure Functions Core
-# Tools) too, but none of the three were ever verified present before this.
+# Cloud Shell ships az, python, and (usually) func pre-installed, but not
+# guaranteed at a specific version - `func` in particular needs checking
+# since this script deploys with --functions-version 4 (line ~290) and its
+# publish step behaves differently across major versions. Kept as a real
+# check rather than assumed, same reasoning as the local-machine script:
+# a version mismatch discovered mid-deploy (at the Function App publish
+# step) leaves whatever got created so far half-finished.
 Write-Host "  Checking prerequisites ..." -ForegroundColor Yellow
 $missingTools = @()
-if (-not (Get-Command az -ErrorAction SilentlyContinue)) { $missingTools += "az (Azure CLI - https://learn.microsoft.com/cli/azure/install-azure-cli)" }
-if (-not (Get-Command python -ErrorAction SilentlyContinue)) { $missingTools += "python (Python 3 - https://www.python.org/downloads/)" }
-# `func` needs both presence AND the right major version - this script
-# deploys with --functions-version 4 (line ~352) and its publish step
-# (`func azure functionapp publish ... --python`, line ~513) behaves
-# differently across major versions. An old v1-3 install (e.g. left over
-# from an older tutorial) passes a plain Get-Command check but can fail or
-# silently misbehave later, deep into the deploy - checked here instead so
-# a version problem surfaces alongside the "not installed at all" case,
-# with the same actionable link.
+if (-not (Get-Command az -ErrorAction SilentlyContinue)) { $missingTools += "az (unexpected - Cloud Shell should have this pre-installed; try relaunching Cloud Shell)" }
+if (-not (Get-Command python -ErrorAction SilentlyContinue)) { $missingTools += "python (unexpected - Cloud Shell should have this pre-installed; try relaunching Cloud Shell)" }
 $funcCmd = Get-Command func -ErrorAction SilentlyContinue
 if (-not $funcCmd) {
-    $missingTools += "func (Azure Functions Core Tools v4 - https://learn.microsoft.com/azure/azure-functions/functions-run-local)"
+    $missingTools += "func (Azure Functions Core Tools v4 - not bundled in every Cloud Shell image; install with: npm install -g azure-functions-core-tools@4 --unsafe-perm true)"
 } else {
     $funcVersionRaw = ((func --version) 2>&1 | Select-Object -Last 1).ToString().Trim()
     $funcMajor = $null
     if ($funcVersionRaw -match '^(\d+)\.') { $funcMajor = [int]$Matches[1] }
     if ($funcMajor -ne 4) {
-        $missingTools += "func v4 required, found '$funcVersionRaw' (this script deploys with --functions-version 4) - https://learn.microsoft.com/azure/azure-functions/functions-run-local#install-the-azure-functions-core-tools"
+        $missingTools += "func v4 required, found '$funcVersionRaw' (this script deploys with --functions-version 4) - fix with: npm install -g azure-functions-core-tools@4 --unsafe-perm true"
     }
 }
 if ($missingTools.Count -gt 0) {
     Write-Host ""
-    Write-Host "  [ERROR] Missing required tool(s):" -ForegroundColor Red
+    Write-Host "  [ERROR] Missing/wrong-version tool(s):" -ForegroundColor Red
     foreach ($tool in $missingTools) { Write-Host "    - $tool" -ForegroundColor Red }
     Write-Host ""
     Write-Host "  Install/fix the above, then re-run this script. Nothing has been created yet." -ForegroundColor Yellow
@@ -166,8 +153,12 @@ if ($missingTools.Count -gt 0) {
 }
 Write-Host "        [OK] az, python, and func v4 ($funcVersionRaw) are all available." -ForegroundColor Green
 
+# Cloud Shell auto-authenticates you as whichever account is signed into the
+# Azure Portal, so this should basically always succeed - kept as a defensive
+# check anyway (e.g. a session that's been open long enough for a token to
+# expire) with a message suited to Cloud Shell rather than a local machine.
 $subId = (az account show --query id -o tsv 2>&1).Trim()
-if ($LASTEXITCODE -ne 0) { Fail "Cannot reach Azure CLI. Run 'az login' first." }
+if ($LASTEXITCODE -ne 0) { Fail "Cannot reach Azure CLI. Try 'az login' or, if you have multiple subscriptions, 'az account set --subscription <name-or-id>'." }
 
 # Sanitized once, here, regardless of what was passed in - lowercased and
 # stripped to alphanumeric-only, since that's Storage Account naming's
@@ -190,10 +181,9 @@ $AppPlanName        = "plan-$AppNamePrefix-$suffix"
 # Separate from $AppPlanName (that one hosts the Web App) - the Function
 # App gets its own Consumption/Dynamic plan, auto-created and auto-named
 # by `az functionapp create --consumption-plan-location` if left
-# unnamed (e.g. "WestUS3LinuxDynamicPlan" - real gap the user caught live
-# after a fresh deploy). See this script's own step 5 comment for why
-# giving it a real name needs a different, lower-level command than every
-# other resource here.
+# unnamed (e.g. "WestUS3LinuxDynamicPlan"). See this script's own step 5
+# comment for why giving it a real name needs a different, lower-level
+# command than every other resource here.
 $FunctionPlanName   = "plan-func-$AppNamePrefix-$suffix"
 
 # Storage Account names have the strictest real limit of any resource
@@ -208,7 +198,7 @@ if ($StorageAccountName.Length -gt 24) {
 
 Write-Host ""
 Write-Host "========================================================================" -ForegroundColor Cyan
-Write-Host "  FINOPS AZURE PRODUCTION DEPLOYMENT" -ForegroundColor Cyan
+Write-Host "  FINOPS AZURE PRODUCTION DEPLOYMENT (Cloud Shell)" -ForegroundColor Cyan
 Write-Host "========================================================================" -ForegroundColor Cyan
 Write-Host "   Subscription  : $subId" -ForegroundColor DarkCyan
 Write-Host "   Resource Group: $ResourceGroupName" -ForegroundColor DarkCyan
@@ -257,9 +247,8 @@ if (-not $sqlExists) {
 
 $dbExists = az sql db show --name $SqlDbName --server $SqlServerName --resource-group $ResourceGroupName --query name -o tsv 2>$null
 if (-not $dbExists) {
-    # Try the free-tier offer first (2026-08, added to fit a limited student
-    # subscription budget): 100,000 vCore-seconds + 32 GB data + 32 GB backup
-    # storage free per month, for the lifetime of the subscription - see
+    # Try the free-tier offer first: 100,000 vCore-seconds + 32 GB data + 32 GB
+    # backup storage free per month, for the lifetime of the subscription - see
     # https://learn.microsoft.com/en-us/azure/azure-sql/database/free-offer .
     # --free-limit-exhaustion-behavior AutoPause means it pauses (not bills
     # overage) if the monthly free allowance is ever exceeded - the safer
@@ -299,35 +288,29 @@ $SqlServerFqdn = "$SqlServerName.database.windows.net"
 Write-Host "  [5/7] Azure Function App: $FunctionAppName ..." -ForegroundColor Yellow
 $funcExists = az functionapp show --name $FunctionAppName --resource-group $ResourceGroupName --query name -o tsv 2>$null
 if (-not $funcExists) {
-    # Consumption/Dynamic (Y1) hosting plan created EXPLICITLY and named,
-    # 2026-08-30 - real gap the user caught live after a fresh deploy:
-    # passing --consumption-plan-location (below) to `az functionapp
-    # create` without an explicit --plan makes Azure auto-provision an
-    # UNNAMED plan with its own generated name (e.g.
-    # "WestUS3LinuxDynamicPlan") - not something this script or the user
-    # ever chose. Naming it ourselves turns out to need a genuinely
-    # different, lower-level command than every other resource in this
-    # script: confirmed via Azure CLI's own GitHub issue tracker
-    # (Azure/azure-cli#11195, #19864) that `az functionapp plan create`/
-    # `az appservice plan create` do NOT support the Y1/Dynamic Consumption
-    # tier at all - only paid tiers (B1, S1, EP1, ...). The documented
-    # workaround is a raw ARM resource create against
+    # Consumption/Dynamic (Y1) hosting plan created EXPLICITLY and named -
+    # passing --consumption-plan-location (below) to `az functionapp create`
+    # without an explicit --plan makes Azure auto-provision an UNNAMED plan
+    # with its own generated name (e.g. "WestUS3LinuxDynamicPlan"). Naming it
+    # ourselves needs a genuinely different, lower-level command than every
+    # other resource in this script: confirmed via Azure CLI's own GitHub
+    # issue tracker (Azure/azure-cli#11195, #19864) that `az functionapp plan
+    # create`/`az appservice plan create` do NOT support the Y1/Dynamic
+    # Consumption tier at all - only paid tiers (B1, S1, EP1, ...). The
+    # documented workaround is a raw ARM resource create against
     # Microsoft.Web/serverfarms with an explicit sku.name="Y1"/
     # sku.tier="Dynamic" JSON body - that's what this is. Getting this
     # SKU/tier wrong would silently switch to a BILLED plan on a
-    # budget-conscious student subscription, so this is deliberately
-    # exact, not approximate - verify after deploying with
-    # `az functionapp plan show --name $FunctionPlanName --resource-group
-    # $ResourceGroupName --query sku` and confirm it still reports
-    # "Dynamic"/"Y1" if you ever touch this block.
+    # budget-conscious student subscription, so this is deliberately exact,
+    # not approximate - verify after deploying with `az functionapp plan
+    # show --name $FunctionPlanName --resource-group $ResourceGroupName
+    # --query sku` and confirm it still reports "Dynamic"/"Y1" if you ever
+    # touch this block.
     $funcPlanExists = az functionapp plan show --name $FunctionPlanName --resource-group $ResourceGroupName --query name -o tsv 2>$null
     if ($funcPlanExists) {
-        # Real error hit 2026-09-01, one run after the @file JSON-quoting
-        # fix below: the plan WAS created, but the JSON body only set
-        # location/sku - with no kind/reserved, ARM defaults a serverfarm
-        # to WINDOWS, and Python Functions only run on Linux ("Runtime
-        # python not supported for os windows" - the exact live error).
-        # Detects and self-heals a plan left over from that: `reserved`
+        # Self-heal: a plan created with only location/sku set (no
+        # kind/reserved) defaults to WINDOWS, and Python Functions only run
+        # on Linux ("Runtime python not supported for os windows"). `reserved`
         # is ARM's real Linux/Windows flag on Microsoft.Web/serverfarms
         # (confirmed via Microsoft's own ARM/Bicep samples for a Linux
         # Consumption Function plan) - "true" means Linux. A plan that's
@@ -341,26 +324,17 @@ if (-not $funcExists) {
     }
     if (-not $funcPlanExists) {
         Write-Host "        Creating named Consumption plan '$FunctionPlanName'..." -ForegroundColor Yellow
-        # Passed via a temp @file, not inline on the command line - real
-        # error hit 2026-09-01: `az` on Windows is az.cmd, a batch wrapper
-        # that re-parses the command line through cmd.exe before Python
-        # ever sees it, and that re-parse strips embedded double quotes
-        # from an inline JSON string PowerShell passes to a native/batch
-        # exe (confirmed live: the JSON arrived as
-        # {location:westus3,sku:{name:Y1,tier:Dynamic}} - every `"` gone).
-        # `az`'s own `--properties @<file>` form reads the JSON straight
-        # off disk instead, sidestepping that re-parse entirely - the
-        # standard, documented fix for this exact class of Windows-only
-        # az CLI quoting bug. [System.IO.File]::WriteAllText (not
-        # Set-Content -Encoding utf8) writes UTF-8 with NO byte-order-mark
-        # in both Windows PowerShell 5.1 and 7+ - Set-Content's BOM-less
-        # "utf8NoBOM" encoding name only exists from PS 6 on, and a BOM at
-        # the front of this file could itself trip up az's JSON parser.
+        # Passed via a temp @file, not inline on the command line - avoids a
+        # command-line JSON-quoting class of bug seen on Windows az.cmd; kept
+        # here too since it's a strictly safer way to pass this JSON on any
+        # platform, Cloud Shell included. [System.IO.File]::WriteAllText
+        # writes UTF-8 with no byte-order-mark - a BOM at the front of this
+        # file could itself trip up az's JSON parser.
         # kind="linux" + properties.reserved=true is what actually makes
         # this a LINUX Consumption plan (see the self-heal comment above -
-        # omitting these is exactly what produced the Windows-default
-        # plan the first time).
-        $planJsonPath = Join-Path $env:TEMP "finops-func-plan-$suffix.json"
+        # omitting these is exactly what produces a Windows-default plan).
+        $tempDirForPlan = if ($env:TEMP) { $env:TEMP } elseif ($env:TMPDIR) { $env:TMPDIR } else { "/tmp" }
+        $planJsonPath = Join-Path $tempDirForPlan "finops-func-plan-$suffix.json"
         $planJson = @{
             location   = $Location
             kind       = "linux"
@@ -374,36 +348,33 @@ if (-not $funcExists) {
         if ($funcPlanCreateExit -ne 0) { Fail "Creating named Consumption plan '$FunctionPlanName'" }
     }
 
-    # --disable-app-insights added 2026-08-30, real feedback: without it,
-    # `az functionapp create` silently provisions an Application Insights
-    # resource pointing at Azure's own DEFAULT, unscoped Log Analytics
-    # Workspace naming/placement - kept disabled here even though this
-    # deployment DOES want Application Insights now (see the explicit,
-    # properly-scoped creation right after this function app block below,
-    # added 2026-09-01) - that later step creates it deliberately, in
-    # this resource group, pointed at a workspace this script also
+    # --disable-app-insights: without it, `az functionapp create` silently
+    # provisions an Application Insights resource pointing at Azure's own
+    # DEFAULT, unscoped Log Analytics Workspace naming/placement - kept
+    # disabled here even though this deployment DOES want Application
+    # Insights (see the explicit, properly-scoped creation right after this
+    # function app block below) - that later step creates it deliberately,
+    # in this resource group, pointed at a workspace this script also
     # creates here, rather than accepting whatever this flag would have
     # auto-generated.
     #
-    # Real error hit 2026-09-01: `az functionapp create --plan
-    # $FunctionPlanName` (pointing at the named plan created above) fails
-    # with "AlwaysOn cannot be set for this site as the plan does not
-    # allow it" - a long-standing, documented Azure CLI bug (Azure/
-    # azure-cli#8388, #12271): the --plan code path always tries to set
-    # AlwaysOn regardless of what plan it's given, and Consumption/Dynamic
-    # plans reject AlwaysOn outright. Only --consumption-plan-location
-    # correctly skips it - but that auto-names the plan, defeating the
-    # whole point of creating a named one above. Real, documented
-    # workaround (same GitHub issues): create via
-    # --consumption-plan-location (known-good path, gets an auto-named
-    # throwaway Consumption plan), then move the Function App onto the
-    # ALREADY-CREATED named plan via `az functionapp update --plan`
-    # (confirmed a real, supported parameter via Microsoft's own CLI
-    # reference) - moving a Consumption-tier Function App between two
-    # Consumption plans in the same region is a supported, low-risk
-    # operation (Consumption plans are a scaling/billing construct, not a
-    # dedicated host). The now-empty throwaway plan is deleted afterward
-    # so it doesn't linger as clutter.
+    # `az functionapp create --plan $FunctionPlanName` (pointing at the named
+    # plan created above) fails with "AlwaysOn cannot be set for this site as
+    # the plan does not allow it" - a long-standing, documented Azure CLI bug
+    # (Azure/azure-cli#8388, #12271): the --plan code path always tries to
+    # set AlwaysOn regardless of what plan it's given, and Consumption/
+    # Dynamic plans reject AlwaysOn outright. Only --consumption-plan-location
+    # correctly skips it - but that auto-names the plan, defeating the whole
+    # point of creating a named one above. Real, documented workaround (same
+    # GitHub issues): create via --consumption-plan-location (known-good
+    # path, gets an auto-named throwaway Consumption plan), then move the
+    # Function App onto the ALREADY-CREATED named plan via `az functionapp
+    # update --plan` (confirmed a real, supported parameter via Microsoft's
+    # own CLI reference) - moving a Consumption-tier Function App between two
+    # Consumption plans in the same region is a supported, low-risk operation
+    # (Consumption plans are a scaling/billing construct, not a dedicated
+    # host). The now-empty throwaway plan is deleted afterward so it doesn't
+    # linger as clutter.
     az functionapp create --resource-group $ResourceGroupName --consumption-plan-location $Location --runtime python --runtime-version 3.12 --functions-version 4 --name $FunctionAppName --storage-account $StorageAccountName --os-type Linux --disable-app-insights true -o none
     if ($LASTEXITCODE -ne 0) { Fail "Creating Function App '$FunctionAppName'" }
 
@@ -423,21 +394,18 @@ if (-not $funcExists) {
     Write-Host "        [OK] Already exists - skipped." -ForegroundColor DarkGreen
 }
 
-# Application Insights, scoped properly this time (2026-09-01). Real
-# incident: Application Insights turned out to be essential - it's the
-# ONLY supported way to see a Python Function's startup errors on a
-# Linux Consumption plan (confirmed via Microsoft's own docs) - and is
-# literally how today's real "0 functions indexed" bug (a missing
-# analysis/ package in the deploy staging list) got diagnosed, after
-# every Kudu/filesystem-log approach 404'd. But creating an App Insights
-# component with no --workspace makes Azure auto-provision its own Log
-# Analytics Workspace in a SEPARATE, Azure-managed resource group (name
-# pattern "ai_<name>_<guid>_managed") that resources can't be moved out
-# of afterward - confirmed via Microsoft's own docs on managed
-# workspaces. Pre-creating the workspace HERE, in this same resource
-# group, and passing --workspace avoids that sprawl entirely - --disable
-# -app-insights true stays on the functionapp create call above so Azure
-# never attempts its own default (unscoped) auto-creation in parallel.
+# Application Insights, scoped properly - creating an App Insights component
+# with no --workspace makes Azure auto-provision its own Log Analytics
+# Workspace in a SEPARATE, Azure-managed resource group (name pattern
+# "ai_<name>_<guid>_managed") that resources can't be moved out of afterward
+# (confirmed via Microsoft's own docs on managed workspaces). Pre-creating
+# the workspace HERE, in this same resource group, and passing --workspace
+# avoids that sprawl entirely - --disable-app-insights true stays on the
+# functionapp create call above so Azure never attempts its own default
+# (unscoped) auto-creation in parallel. This is also the ONLY supported way
+# to see a Python Function's startup errors on a Linux Consumption plan
+# (confirmed via Microsoft's own docs) if you ever need to diagnose "0
+# functions indexed" after a publish.
 $LogAnalyticsWorkspaceName = "log-$AppNamePrefix-$suffix"
 $AppInsightsName           = "appi-$AppNamePrefix-$suffix"
 $lawExists = az monitor log-analytics workspace show --resource-group $ResourceGroupName --workspace-name $LogAnalyticsWorkspaceName --query name -o tsv 2>$null
@@ -477,31 +445,24 @@ az functionapp config appsettings delete --resource-group $ResourceGroupName --n
 # cached in a local file - fine for local dev, but this Free-tier plan's
 # Oryx build produces a brand-new container on every code deploy, so that
 # local file (never committed, never persisted) is gone on the next push.
-# Every redeploy silently rotated the key and made every already-stored
-# client secret undecryptable garbage (real incident, 2026-08 - showed up as
-# "Invalid client secret" on a secret that was actually fine). Resolved ONCE
-# here and reused on every re-run of this script (read back from whichever
-# app already has it set, so re-running never rotates a working key out from
-# under already-saved tenants) - and must be IDENTICAL on both apps, since
-# the Function App's cron sync decrypts what the Web App encrypted.
+# Every redeploy would silently rotate the key and make every already-stored
+# client secret undecryptable garbage. Resolved ONCE here and reused on
+# every re-run of this script (read back from whichever app already has it
+# set, so re-running never rotates a working key out from under
+# already-saved tenants) - and must be IDENTICAL on both apps, since the
+# Function App's cron sync decrypts what the Web App encrypted.
 Write-Host "        Configuring shared encryption key (TENANT_SECRET_KEY) ..." -ForegroundColor Yellow
 $sharedSecretKey = az functionapp config appsettings list --resource-group $ResourceGroupName --name $FunctionAppName --query "[?name=='TENANT_SECRET_KEY'].value" -o tsv 2>$null
 if (-not $sharedSecretKey) {
-    # Generated with pure .NET crypto, NOT `python -c "from cryptography..."`
-    # - the earlier version shelled out to whatever `python` resolves to on
-    # PATH, which silently has no guarantee of being this project's venv
-    # (real incident, 2026-08-19: system python was 3.14 with no
-    # `cryptography` installed, the command threw ModuleNotFoundError on
-    # stderr, and the script's missing exit-code check let it print "[OK]"
-    # and set TENANT_SECRET_KEY to an EMPTY string on both apps anyway -
-    # silently reintroducing the exact "every redeploy breaks stored client
-    # secrets" bug this block exists to prevent). A Fernet key is just 32
-    # random bytes, base64-urlsafe-encoded - identical to what
-    # cryptography.fernet.Fernet.generate_key() produces, no Python needed.
-    # RandomNumberGenerator.Create()+GetBytes() (not the newer static
-    # ::Fill(), which is .NET 6+ only and doesn't exist on Windows
-    # PowerShell 5.1's .NET Framework runtime - confirmed by testing both
-    # against the actual target PS version this script declares support for).
+    # Generated with pure .NET crypto, not by shelling out to `python -c
+    # "from cryptography..."` - that has no guarantee of resolving to a
+    # Python with the `cryptography` package installed, and a missing
+    # exit-code check on that path can silently set an EMPTY encryption key
+    # on both apps. A Fernet key is just 32 random bytes, base64-urlsafe-
+    # encoded - identical to what cryptography.fernet.Fernet.generate_key()
+    # produces, no Python needed. RandomNumberGenerator.Create()+GetBytes()
+    # works identically on .NET Core (Cloud Shell's Linux-based pwsh)
+    # and Windows PowerShell.
     $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
     $keyBytes = New-Object byte[] 32
     $rng.GetBytes($keyBytes)
@@ -513,30 +474,24 @@ if (-not $sharedSecretKey) {
 }
 if (-not $sharedSecretKey) { Fail "TENANT_SECRET_KEY resolved empty - refusing to deploy with a blank encryption key." }
 az functionapp config appsettings set --resource-group $ResourceGroupName --name $FunctionAppName --settings TENANT_SECRET_KEY="$sharedSecretKey" -o none
-# Unlike every other az call in this script, this one had no exit-code
-# check - confirmed as a real gap 2026-08-23: a transient DNS failure on
-# this exact call let the script print "[OK] Generated a new
-# TENANT_SECRET_KEY." (true - the LOCAL .NET generation above did succeed)
-# and continue straight past a Function App that never actually got the
-# key set. Since the Web App's matching TENANT_SECRET_KEY gets set later
-# using the same $sharedSecretKey variable in this same run, that mismatch
-# would silently break the cron sync's decryption of tenant secrets the
-# Web App encrypted - exactly the kind of "looked fine, wasn't" failure
-# the Fail() pattern exists to catch everywhere else in this script.
+# Unlike every other az call in this script, this one had no exit-code check
+# in an earlier version - a transient DNS failure on this exact call could
+# let the script print "[OK] Generated a new TENANT_SECRET_KEY." (true - the
+# LOCAL .NET generation above did succeed) and continue past a Function App
+# that never actually got the key set. Since the Web App's matching
+# TENANT_SECRET_KEY gets set later using the same $sharedSecretKey variable
+# in this same run, that mismatch would silently break the cron sync's
+# decryption of tenant secrets the Web App encrypted.
 if ($LASTEXITCODE -ne 0) { Fail "Setting TENANT_SECRET_KEY on Function App '$FunctionAppName'" }
 
-# Fix PowerShell 5.1 Join-Path syntax: use nested 2-argument Join-Path calls
-$parentPath   = Join-Path $PSScriptRoot ".."
 $funcCodePath = [System.IO.Path]::GetFullPath((Join-Path $parentPath "azure_function"))
 
 if (Test-Path $funcCodePath) {
     # function_app.py imports db/, data/, azure_conn/, pricing/, aws/ from the
     # repo root (its sync_pipeline call chain) - publishing azure_function/
-    # alone (the old behavior here) never shipped them, so the Python worker
-    # failed to import the function at cold start and Azure indexed ZERO
-    # functions from it, silently, even on a "successful" publish (confirmed
-    # 2026-08-16: az functionapp function list returned empty against a
-    # deployment that reported no error). Stage a temp copy with those
+    # alone never ships them, so the Python worker fails to import the
+    # function at cold start and Azure indexes ZERO functions from it,
+    # silently, even on a "successful" publish. Stage a temp copy with those
     # sibling packages alongside azure_function/'s own files before
     # publishing - same fix applied to .github/workflows/deploy.yml's
     # deploy-function job.
@@ -547,18 +502,12 @@ if (Test-Path $funcCodePath) {
     Copy-Item (Join-Path $funcCodePath "host.json") $funcStagePath
     Copy-Item (Join-Path $funcCodePath "function_app.py") $funcStagePath
     Copy-Item (Join-Path $funcCodePath "requirements.txt") $funcStagePath
-    # "analysis" added 2026-09-01 - real bug caught live (Application
-    # Insights logs, once temporarily enabled to diagnose "0 functions
-    # indexed": "Error: No module named 'analysis'. Cannot find module.")
-    # - this list was never updated when data/sync_pipeline.py's VM
-    # Rightsizing work added its first-ever import from analysis/
-    # (analysis.rightsizing.get_rightsizing_settings). Latent since
-    # sync_pipeline.py never needed anything from analysis/ before that,
-    # so the Function App's host indexing silently worked despite this
-    # gap - until that import made it a hard ImportError at module load,
-    # which kills ALL function registration for the whole file, not just
-    # the one import. Same gap existed in .github/workflows/deploy.yml's
-    # deploy-function job - fixed there too.
+    # "analysis" - data/sync_pipeline.py's VM Rightsizing work added an
+    # import from analysis/ (analysis.rightsizing.get_rightsizing_settings);
+    # if this list is ever extended with a new top-level package, add it
+    # here AND in .github/workflows/deploy.yml's matching step, or the
+    # Function App's host indexing fails with a hard ImportError that kills
+    # ALL function registration for the whole file, not just the one import.
     foreach ($dep in @("db", "data", "azure_conn", "pricing", "aws", "analysis")) {
         Copy-Item (Join-Path $parentPath $dep) (Join-Path $funcStagePath $dep) -Recurse
     }
@@ -587,16 +536,10 @@ if (-not $planExists) {
     foreach ($region in $candidateRegions) {
         Write-Host "        Attempting App Service Plan creation in region '$region'..." -ForegroundColor Yellow
         # F1 (Free tier) - $0/month, chosen deliberately over B1 to fit a
-        # student subscription's limited remaining credit (2026-08). 60
-        # CPU-min/day cap and no "Always On" (app idles out and cold-starts
-        # on the next request after ~20 min) - both fine for intermittent
-        # demo/test usage, not sustained production traffic. NOT verified
-        # live yet whether Oryx's remote build behaves identically on F1 -
-        # the comment below this block documents build/startup behavior that
-        # was confirmed specifically on B1; F1's much tighter build-time
-        # resource limits (shared CPU, 1 GB storage) could plausibly cause
-        # the remote build to behave differently or time out. Test via a
-        # manual workflow_dispatch run before relying on this for a demo.
+        # student subscription's limited remaining credit. 60 CPU-min/day cap
+        # and no "Always On" (app idles out and cold-starts on the next
+        # request after ~20 min) - both fine for intermittent demo/test
+        # usage, not sustained production traffic.
         $planOut = az appservice plan create --name $AppPlanName --resource-group $ResourceGroupName --sku F1 --is-linux --location $region 2>&1
         if ($LASTEXITCODE -eq 0) {
             $planCreated = $true
@@ -684,17 +627,18 @@ if (Test-Path $appPy) {
 # Sets the current signed-in az CLI user as the SQL Server's Entra admin
 # (idempotent - safe to re-run), then attempts the actual CREATE USER/ALTER
 # ROLE grant automatically via grant_managed_identity_access.py - this
-# genuinely CAN be automated (confirmed 2026-08-19, previously assumed it
-# couldn't be): mssql-python's token_provider parameter accepts an
-# AzureCliCredential directly, reusing the exact same `az login` session this
-# script already requires, so no extra credential/secret is needed. A direct
-# client connection (unlike the Portal's Query editor, which runs inside
-# Azure's own network) needs THIS machine's own public IP allowed though -
-# AllowAzureServices (from step 4) only covers Azure services - so a firewall
-# rule is added just for the duration of the grant, then removed. Falls back
-# to printing the manual T-SQL if the local venv/Python dependencies aren't
-# available (e.g. Azure Cloud Shell, a fresh clone with no venv set up yet)
-# or the automated attempt fails for any reason - never blocks the deploy.
+# genuinely CAN be automated: mssql-python's token_provider parameter accepts
+# an AzureCliCredential directly, reusing the exact same signed-in session
+# Cloud Shell already gives you, so no extra credential/secret is needed. A
+# direct client connection (unlike the Portal's Query editor, which runs
+# inside Azure's own network) needs THIS session's own outbound public IP
+# allowed though - AllowAzureServices (from step 4) only covers Azure PaaS
+# services' internal traffic, not a Cloud Shell container's own egress IP -
+# so a firewall rule is added just for the duration of the grant, then
+# removed. Falls back to printing the manual T-SQL if the local venv/Python
+# dependencies aren't available (the common case on a fresh Cloud Shell
+# session - see the note below) or the automated attempt fails for any
+# reason - never blocks the deploy.
 Write-Host "  [7/7] Granting Managed Identity database access ..." -ForegroundColor Yellow
 $signedInUser = az ad signed-in-user show --query "{upn:userPrincipalName, oid:id}" -o json 2>$null | ConvertFrom-Json
 if ($signedInUser) {
@@ -706,30 +650,17 @@ if ($signedInUser) {
 }
 
 $grantScriptPath = Join-Path $PSScriptRoot "grant_managed_identity_access.py"
-# Windows venvs put the interpreter at venv\Scripts\python.exe; POSIX venvs
-# (macOS, Linux, and Azure Cloud Shell's PowerShell - which runs on a Linux
-# container even in its "PowerShell" mode) put it at venv/bin/python instead.
-# $IsWindows/$IsLinux/$IsMacOS are PowerShell 6+ automatic variables (always
-# $true/$IsWindows on Windows PowerShell 5.1, which never runs elsewhere) -
-# hardcoding the Windows layout here silently made Test-Path always false on
-# every other platform, so step 7's automation never even attempted to run
-# there, regardless of whether a working venv actually existed.
-$venvPython = if ($IsWindows -or $null -eq $IsWindows) {
-    Join-Path $parentPath "venv\Scripts\python.exe"
-} else {
-    Join-Path $parentPath "venv/bin/python"
-}
-$grantAutomated   = $false
+# Cloud Shell's PowerShell always runs on a Linux container underneath, so
+# unlike the local-machine script there's no Windows/POSIX branch to pick
+# between here - it's always venv/bin/python.
+$venvPython = Join-Path $parentPath "venv/bin/python"
+$grantAutomated = $false
 # Checked BEFORE attempting the grant, not just that venvPython exists -
-# grant_managed_identity_access.py imports mssql_python and azure.identity
-# (line ~23-24), and a venv that exists but predates those being added to
-# requirements.txt (or was never fully `pip install -r`'d) would otherwise
-# only fail deep into the attempt below, AFTER the 10s AD-admin-propagation
-# wait, the firewall rule round-trip, and (on failure) a 30s retry wait -
-# ~45+ seconds spent on a path that a 1-line import check up front rules
-# out instantly. Import failures print to stderr (2>$null'd here since this
-# is a presence check, not a diagnostic) and are surfaced via the message
-# below instead, with the exact pip command to fix it.
+# grant_managed_identity_access.py imports mssql_python and azure.identity,
+# and a venv that exists but is missing those would otherwise only fail deep
+# into the attempt below, AFTER the 10s AD-admin-propagation wait, the
+# firewall rule round-trip, and (on failure) a 30s retry wait - ~45+ seconds
+# spent on a path a 1-line import check up front rules out instantly.
 $depsOk = $false
 if (Test-Path $venvPython) {
     & $venvPython -c "import mssql_python, azure.identity" 2>$null
@@ -739,6 +670,16 @@ if (Test-Path $venvPython) {
         Write-Host "        azure-identity - falling back to manual instructions below. Fix with:" -ForegroundColor DarkYellow
         Write-Host "          $venvPython -m pip install mssql_python azure-identity" -ForegroundColor White
     }
+} else {
+    # Expected on a fresh Cloud Shell session - a venv here has never been
+    # created yet, so step 7 will fall back to the manual T-SQL below. If you
+    # want the automation instead, create it ONCE under `$HOME (Cloud Shell's
+    # persistent clouddrive mount, e.g. `$HOME/Multi-Cloud-FinOps-Optimization-System`)
+    # so it survives this session ending - a venv created under /tmp instead
+    # is wiped the moment the container recycles:
+    #   python -m venv venv && ./venv/bin/pip install mssql_python azure-identity
+    Write-Host "        [INFO] No venv yet at '$venvPython' - see this script's comment here for a" -ForegroundColor DarkYellow
+    Write-Host "        one-time setup command if you want the grant automated instead of manual." -ForegroundColor DarkYellow
 }
 if ($signedInUser -and $depsOk -and (Test-Path $grantScriptPath)) {
     Write-Host "        Attempting automated grant ..." -ForegroundColor Yellow
@@ -747,12 +688,10 @@ if ($signedInUser -and $depsOk -and (Test-Path $grantScriptPath)) {
     try { $myIp = (Invoke-RestMethod -Uri "https://api.ipify.org" -TimeoutSec 10) } catch {}
     if ($myIp) {
         az sql server firewall-rule create --resource-group $ResourceGroupName --server $SqlServerName --name "TempDeployAccess" --start-ip-address $myIp --end-ip-address $myIp -o none 2>$null
-        # Retry once with a longer wait - real timeout hit 2026-09-01 even
-        # though this whole IP-whitelist dance ran successfully: a single
-        # 15s wait isn't always enough for the firewall rule to actually
-        # propagate before the connection attempt. If it's a network-level
-        # block on outbound port 1433 (common on some ISPs/campus networks)
-        # instead, no amount of waiting fixes it - falls through to the
+        # Retry once with a longer wait - a single 15s wait isn't always
+        # enough for the firewall rule to actually propagate before the
+        # connection attempt. If it's a network-level block on outbound port
+        # 1433 instead, no amount of waiting fixes it - falls through to the
         # manual Query editor instructions either way, same as before.
         Start-Sleep -Seconds 15
         & $venvPython $grantScriptPath $SqlServerFqdn $SqlDbName $WebAppName $FunctionAppName
@@ -771,17 +710,13 @@ if ($signedInUser -and $depsOk -and (Test-Path $grantScriptPath)) {
         }
         az sql server firewall-rule delete --resource-group $ResourceGroupName --server $SqlServerName --name "TempDeployAccess" -o none 2>$null
     } else {
-        Write-Host "        [WARNING] Could not detect this machine's public IP - falling back to manual instructions below." -ForegroundColor DarkYellow
+        Write-Host "        [WARNING] Could not detect this session's public IP - falling back to manual instructions below." -ForegroundColor DarkYellow
     }
-} elseif (-not (Test-Path $venvPython)) {
-    Write-Host "        [INFO] Local venv ($venvPython) not found - falling back to manual instructions below." -ForegroundColor DarkYellow
-} elseif (-not $depsOk) {
-    # Already printed the specific "venv found but missing packages" warning
-    # (with the pip fix command) right after the import check above - nothing
-    # more to say here, just don't also claim the venv itself is missing.
 } elseif (-not $signedInUser) {
     Write-Host "        [INFO] No signed-in user resolved (see warning above) - falling back to manual instructions below." -ForegroundColor DarkYellow
 }
+# (If venvPython doesn't exist or deps are missing, the messages printed
+# above already explain why - nothing more to add here.)
 
 if (-not $grantAutomated) {
     # Guarded with IF NOT EXISTS, not plain CREATE USER/ALTER ROLE - the
