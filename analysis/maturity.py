@@ -206,6 +206,10 @@ def assess_anomaly_management(recs, inv_raw, currency: str = "USD", inr_rate: fl
     recommendation findings (RI Leakage, Orphaned Capacity) - the only two
     categories with real, non-zero dollar figures; this app's rule-based
     checks are the closest proxy it has to true anomaly detection.
+    Orphaned Capacity is a SUBSET of RI Leakage (leakage = RI potential minus
+    utilised, and a stopped resource's RI is idle capacity inside that
+    figure), so it is only counted when no RI Leakage finding exists -
+    adding both would count the same dollars twice.
 
     Green/Yellow stays capped at Crawl: the Foundation's own Walk criteria
     require alerts that "automatically route to responsible teams" - this
@@ -219,7 +223,12 @@ def assess_anomaly_management(recs, inv_raw, currency: str = "USD", inr_rate: fl
     recs = recs or []
     has_data = inv_raw is not None and not inv_raw.empty
     high_severity = [r for r in recs if r.get("severity") == "HIGH"]
-    high_impact_mo = sum(r.get("financial_impact_hr", 0.0) for r in high_severity) * 730
+    has_ri_leakage = any(r.get("category") == "RI Leakage" for r in high_severity)
+    counted = [
+        r for r in high_severity
+        if not (has_ri_leakage and r.get("category") == "Orphaned Capacity")
+    ]
+    high_impact_mo = sum(r.get("financial_impact_hr", 0.0) for r in counted) * 730
 
     baseline_mo = None
     rate = None
